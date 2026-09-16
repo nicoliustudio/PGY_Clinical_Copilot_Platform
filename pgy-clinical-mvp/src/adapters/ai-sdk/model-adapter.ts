@@ -17,6 +17,7 @@ export const aiSdkModelPort: ModelPort = {
       model: llmModel,
       system,
       prompt,
+      timeout: { totalMs: 180_000 },
     });
     return extractJson(result.text, schema);
   },

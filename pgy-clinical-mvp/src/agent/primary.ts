@@ -2,7 +2,7 @@ import { ToolLoopAgent, tool, isStepCount } from 'ai';
 import { z } from 'zod';
 import { llmModel } from '../model/adapter.js';
 import { aiSdkModelPort } from '../adapters/ai-sdk/model-adapter.js';
-import { extract } from '../clinical/extract.js';
+import { understand } from '../clinical/understanding.js';
 import { search } from '../knowledge/search.js';
 import { searchNormative, validateFormula } from '../clinical/formula.js';
 import { extractJson } from '../util/json.js';
@@ -14,10 +14,10 @@ import {
 } from '../trace.js';
 
 const tools = {
-  'clinical.extract': tool({
-    description: '把病例文本解析为结构化 Clinical Snapshot（人口学/主诉/症状/时序/舌脉/检查/既往）',
+  'clinical.understand': tool({
+    description: '统一语义理解：判断交互模式、提取临床事实、识别意图/风险/信息缺口/能力需求/不确定性',
     inputSchema: z.object({ input: z.string() }),
-    execute: async ({ input }) => extract(input, aiSdkModelPort),
+    execute: async ({ input }) => understand(input, aiSdkModelPort),
   }),
   'knowledge.search': tool({
     description: '检索病、证、治法相关证据，返回结构化 Top-K（含 source_id/authority/excerpt/score/provenance）',
@@ -138,7 +138,7 @@ export async function runCase(input: string): Promise<ClinicalRunResult> {
   try {
     const r = await agent.generate({
       prompt: `医生输入病例：\n${input}`,
-      timeout: { totalMs: 180_000 },
+      timeout: { totalMs: 360_000 },
     });
 
     const result = extractJson(r.text, clinicalResultSchema);
