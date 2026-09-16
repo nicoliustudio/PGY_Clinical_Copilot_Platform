@@ -35,6 +35,7 @@ vector-cache/
 # IDE / OS
 .vscode/
 .idea/
+.trae/
 .DS_Store
 Thumbs.db
 desktop.ini
