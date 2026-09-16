@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { embed } from '../model/adapter.js';
+import { knowledgeManifest } from './manifest.js';
 import type { KnowledgeDoc, KnowledgeIndex, NormativeFormula } from './types.js';
 
 function loadJson<T>(p: string): T {
@@ -36,64 +37,73 @@ interface CaseEntry {
   knowledge_domain?: string;
 }
 
-/** 从 V2 release 结构化资产构建检索文档。gold/evaluation 数据绝不进入索引。 */
+/** 从 V2 release 结构化资产构建检索文档。准入由 KnowledgeManifest 决定，此处无业务判断。 */
 function buildDocs(): KnowledgeDoc[] {
   const dir = config.kb.releaseDir;
   const docs: KnowledgeDoc[] = [];
 
   // P1 规范条目（唯一处方权威）
-  const normative = loadJson<NormativeEntry[]>(path.join(dir, 'normative.json'));
-  for (const n of normative) {
-    const formulas: NormativeFormula[] = (n.formulas ?? []).map((f) => ({
-      id: f.id,
-      name: f.name,
-      composition: f.composition ?? f.raw_composition ?? '',
-      sourceTier: f.source_tier ?? '',
-      knowledgeRole: f.knowledge_role ?? '',
-    }));
-    const parts = [
-      n.disease ? `病名：${n.disease}` : '',
-      n.syndrome ? `证型：${n.syndrome}` : '',
-      n.symptoms ? `症状：${n.symptoms}` : '',
-      n.treatment ? `治法：${n.treatment}` : '',
-      ...formulas.map((f) => `方剂：${f.name}（${f.composition}）`),
-    ].filter(Boolean);
-    docs.push({
-      id: `P1:${n.id}`,
-      tier: 'P1',
-      kind: 'normative',
-      source: n.source ?? '',
-      sourceFile: n.source_file ?? '',
-      disease: n.disease ?? '',
-      syndrome: n.syndrome ?? '',
-      treatment: n.treatment ?? '',
-      title: `${n.disease ?? ''}｜${n.syndrome ?? ''}`,
-      text: parts.join('\n'),
-      formulas,
-      raw: n,
-    });
+  const normPolicy = knowledgeManifest.assets['normative.json'];
+  if (normPolicy?.runtimeAllowed && !normPolicy.evaluationOnly) {
+    const normative = loadJson<NormativeEntry[]>(path.join(dir, 'normative.json'));
+    for (const n of normative) {
+      const formulas: NormativeFormula[] = (n.formulas ?? []).map((f) => ({
+        id: f.id,
+        name: f.name,
+        composition: f.composition ?? f.raw_composition ?? '',
+        sourceTier: f.source_tier ?? '',
+        knowledgeRole: f.knowledge_role ?? '',
+      }));
+      const parts = [
+        n.disease ? `病名：${n.disease}` : '',
+        n.syndrome ? `证型：${n.syndrome}` : '',
+        n.symptoms ? `症状：${n.symptoms}` : '',
+        n.treatment ? `治法：${n.treatment}` : '',
+        ...formulas.map((f) => `方剂：${f.name}（${f.composition}）`),
+      ].filter(Boolean);
+      docs.push({
+        id: `P1:${n.id}`,
+        tier: 'P1',
+        kind: 'normative',
+        source: n.source ?? '',
+        sourceFile: n.source_file ?? '',
+        disease: n.disease ?? '',
+        syndrome: n.syndrome ?? '',
+        treatment: n.treatment ?? '',
+        title: `${n.disease ?? ''}｜${n.syndrome ?? ''}`,
+        text: parts.join('\n'),
+        formulas,
+        raw: n,
+      });
+    }
   }
 
-  // P2 沈仲理病例（观察性历史案例；膏方需显式 intent，MVP 第一版索引排除）
-  const cases = loadJson<CaseEntry[]>(path.join(dir, 'cases.json'));
-  for (const c of cases) {
-    const isGaofang =
-      c.knowledge_domain === 'gaofang' || (c.raw ?? '').includes('膏方');
-    if (isGaofang) continue; // 膏方路由后续单独实现，此处不进入普通检索
-    docs.push({
-      id: `P2:${c.id}`,
-      tier: 'P2',
-      kind: 'case',
-      source: c.source ?? '',
-      sourceFile: c.source_file ?? '',
-      disease: c.disease ?? '',
-      syndrome: '',
-      treatment: '',
-      title: `${c.disease ?? ''}｜${c.patient ?? ''}`,
-      text: c.raw ?? '',
-      formulas: [],
-      raw: c,
-    });
+  // P2 沈仲理病例（观察性历史案例）
+  const casePolicy = knowledgeManifest.assets['cases.json'];
+  if (casePolicy?.runtimeAllowed && !casePolicy.evaluationOnly) {
+    const cases = loadJson<CaseEntry[]>(path.join(dir, 'cases.json'));
+    for (const c of cases) {
+      if (
+        casePolicy.allowedDomains &&
+        !casePolicy.allowedDomains.includes(c.knowledge_domain ?? '')
+      ) {
+        continue;
+      }
+      docs.push({
+        id: `P2:${c.id}`,
+        tier: 'P2',
+        kind: 'case',
+        source: c.source ?? '',
+        sourceFile: c.source_file ?? '',
+        disease: c.disease ?? '',
+        syndrome: '',
+        treatment: '',
+        title: `${c.disease ?? ''}｜${c.patient ?? ''}`,
+        text: c.raw ?? '',
+        formulas: [],
+        raw: c,
+      });
+    }
   }
 
   return docs;
