@@ -20,6 +20,8 @@ export interface KnowledgeDoc {
   syndrome: string;
   /** 治法（normative 有；case 为空，治法含于 raw） */
   treatment: string;
+  /** 知识 scope（如 general / gaofang），检索时按 Capability 过滤 */
+  scope: string;
   title: string;
   /** 用于 embedding / rerank 的文本 */
   text: string;

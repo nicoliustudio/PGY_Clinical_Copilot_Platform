@@ -5,6 +5,7 @@ import { aiSdkModelPort } from '../adapters/ai-sdk/model-adapter.js';
 import { understand } from '../clinical/understanding.js';
 import { search } from '../knowledge/search.js';
 import { searchNormative, validateFormula } from '../clinical/formula.js';
+import { resolveKnowledgeScopes } from '../capability/resolver.js';
 import { extractJson } from '../util/json.js';
 import {
   newTrace,
@@ -20,9 +21,22 @@ const tools = {
     execute: async ({ input }) => understand(input, aiSdkModelPort),
   }),
   'knowledge.search': tool({
-    description: '检索病、证、治法相关证据，返回结构化 Top-K（含 source_id/authority/excerpt/score/provenance）',
-    inputSchema: z.object({ query: z.string() }),
-    execute: async ({ query }) => search(query, 10),
+    description: '检索病、证、治法相关证据，返回结构化 Top-K（含 source_id/authority/excerpt/score/provenance）。scopes 由 capability.resolve 决定',
+    inputSchema: z.object({
+      query: z.string(),
+      scopes: z.array(z.string()).optional(),
+    }),
+    execute: async ({ query, scopes }) => search(query, 10, scopes ?? ['general']),
+  }),
+  'capability.resolve': tool({
+    description: '根据语义理解的能力需求（capabilityNeeds），解析并激活对应 Capability，返回应使用的知识 scope 列表',
+    inputSchema: z.object({
+      capabilityNeeds: z.array(
+        z.object({ capability: z.string(), reason: z.string() }),
+      ),
+    }),
+    execute: async ({ capabilityNeeds }) =>
+      resolveKnowledgeScopes(capabilityNeeds),
   }),
   'formula.search_normative': tool({
     description: '在病例问题/治法方向下检索知识库已存在的 P1 规范方，返回 formula_id/source_id/composition',
@@ -96,12 +110,13 @@ const INSTRUCTIONS = `你是蒲公英中医临床辅助 Agent（Clinical Primary
 
 必须遵守的规则：
 1. 先调用 clinical.understand 理解输入，根据其 interaction.mode 决定最终输出哪种结构。
-2. "病→证→法→方"是临床模式下的展示结构，不是固定 Engine 串联。
-3. 所有方剂必须通过 formula.search_normative 检索得到，禁止凭记忆编造方剂、药物组成。
-4. 引用方剂后必须用 formula.validate 验证组成真实存在、未被改写；验证不通过不得标 NORMATIVE。
-5. 只有知识库存在明确 P1 规范方时 authority 才能是 NORMATIVE；否则 GENERATED_DRAFT；安全失败时 BLOCKED。
-6. 每个 disease/syndrome/treatment/formula 的 evidence_refs 必须填写工具真实返回的 source_id。
-7. confidence 取 0~1 之间的小数。
+2. 临床模式下：先用 capability.resolve 解析 understand 返回的 capabilityNeeds 得到知识 scopes，再用这些 scopes 调用 knowledge.search。
+3. "病→证→法→方"是临床模式下的展示结构，不是固定 Engine 串联。
+4. 所有方剂必须通过 formula.search_normative 检索得到，禁止凭记忆编造方剂、药物组成。
+5. 引用方剂后必须用 formula.validate 验证组成真实存在、未被改写；验证不通过不得标 NORMATIVE。
+6. 只有知识库存在明确 P1 规范方时 authority 才能是 NORMATIVE；否则 GENERATED_DRAFT；安全失败时 BLOCKED。
+7. 每个 disease/syndrome/treatment/formula 的 evidence_refs 必须填写工具真实返回的 source_id。
+8. confidence 取 0~1 之间的小数。
 
 最终输出：只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字。根据 interaction.mode 选择结构：
 

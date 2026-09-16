@@ -8,16 +8,19 @@ const HYBRID_CANDIDATE_K = 40;
  * knowledge.search：dense 召回 → rerank 精排 → 结构化 Top-K。
  * 返回 source_id / title / authority / excerpt / score / provenance。
  */
-export async function search(query: string, topK = 10): Promise<SearchHit[]> {
+export async function search(
+  query: string,
+  topK = 10,
+  scopes: string[] = ['general'],
+): Promise<SearchHit[]> {
   const idx = await loadIndex();
+  const scopeSet = new Set(scopes);
   const [qv] = await embed([query]);
 
-  // dense 召回
-  const scored = idx.docs.map((doc, i) => ({
-    doc,
-    i,
-    score: cosine(qv, idx.vectors[i]),
-  }));
+  // dense 召回（按激活的 Capability scopes 过滤）
+  const scored = idx.docs
+    .map((doc, i) => ({ doc, i, score: cosine(qv, idx.vectors[i]) }))
+    .filter((s) => scopeSet.has(s.doc.scope));
   scored.sort((a, b) => b.score - a.score);
   const candidates = scored.slice(0, HYBRID_CANDIDATE_K);
 

@@ -29,13 +29,13 @@ export const knowledgeManifest: KnowledgeManifest = {
       runtimeAllowed: true,
       evaluationOnly: false,
     },
-    // 膏方病例 knowledge_domain 为 gaofang，暂不进入普通检索；
-    // 待 Capability 机制就位后，通过 allowedDomains 扩展或移除。
+    // 病例按 knowledge_domain 标记 scope（general / gaofang），
+    // 检索时按激活的 Capability scopes 过滤（默认仅 general）。
     'cases.json': {
       authorityLevel: 'P2',
       runtimeAllowed: true,
       evaluationOnly: false,
-      allowedDomains: ['general'],
+      allowedDomains: ['general', 'gaofang'],
     },
   },
 };
