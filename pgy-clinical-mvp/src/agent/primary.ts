@@ -1,6 +1,7 @@
 import { ToolLoopAgent, tool, isStepCount } from 'ai';
 import { z } from 'zod';
 import { llmModel } from '../model/adapter.js';
+import { aiSdkModelPort } from '../adapters/ai-sdk/model-adapter.js';
 import { extract } from '../clinical/extract.js';
 import { search } from '../knowledge/search.js';
 import { searchNormative, validateFormula } from '../clinical/formula.js';
@@ -16,7 +17,7 @@ const tools = {
   'clinical.extract': tool({
     description: '把病例文本解析为结构化 Clinical Snapshot（人口学/主诉/症状/时序/舌脉/检查/既往）',
     inputSchema: z.object({ input: z.string() }),
-    execute: async ({ input }) => extract(input),
+    execute: async ({ input }) => extract(input, aiSdkModelPort),
   }),
   'knowledge.search': tool({
     description: '检索病、证、治法相关证据，返回结构化 Top-K（含 source_id/authority/excerpt/score/provenance）',
