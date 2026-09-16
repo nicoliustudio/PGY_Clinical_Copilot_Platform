@@ -2,10 +2,11 @@ import { ToolLoopAgent, tool, isStepCount } from 'ai';
 import { z } from 'zod';
 import { llmModel } from '../model/adapter.js';
 import { aiSdkModelPort } from '../adapters/ai-sdk/model-adapter.js';
-import { understand } from '../clinical/understanding.js';
+import { understand, type RiskHypothesis } from '../clinical/understanding.js';
 import { search } from '../knowledge/search.js';
 import { searchNormative, validateFormula } from '../clinical/formula.js';
 import { resolveKnowledgeScopes } from '../capability/resolver.js';
+import { resolveRiskState, isFormulaCommitAllowed } from '../clinical/risk.js';
 import { extractJson } from '../util/json.js';
 import {
   newTrace,
@@ -133,6 +134,20 @@ export type ClinicalRunResult = {
   trace: RunTrace;
 };
 
+/** 从 trace 中提取 clinical.understand 的 RiskHypothesis（复用统一理解，不重新判断） */
+function extractRisks(trace: RunTrace): RiskHypothesis[] {
+  const call = trace.toolCalls.find((t) => t.toolName === 'clinical.understand');
+  if (!call) return [];
+  const out = call.output as unknown;
+  if (out && typeof out === 'object') {
+    const o = out as Record<string, unknown>;
+    if (Array.isArray(o.risks)) return o.risks as RiskHypothesis[];
+    const r = o.result as Record<string, unknown> | undefined;
+    if (r && Array.isArray(r.risks)) return r.risks as RiskHypothesis[];
+  }
+  return [];
+}
+
 export async function runCase(input: string): Promise<ClinicalRunResult> {
   const trace = newTrace(input);
 
@@ -159,7 +174,15 @@ export async function runCase(input: string): Promise<ClinicalRunResult> {
 
     const result = extractJson(r.text, agentResultSchema);
     // run_id 由系统注入，不依赖 LLM 输出
-    if (result.mode === 'clinical') result.run_id = trace.runId;
+    if (result.mode === 'clinical') {
+      result.run_id = trace.runId;
+      // Safety Invariant（确定性边界）：高风险禁止 NORMATIVE 方剂 commit
+      const riskState = resolveRiskState(extractRisks(trace));
+      if (!isFormulaCommitAllowed(riskState, result.formula.authority)) {
+        result.formula.authority = 'BLOCKED';
+        result.safety.status = 'BLOCK';
+      }
+    }
     finishTrace({
       finalResult: result,
       usage: r.usage
