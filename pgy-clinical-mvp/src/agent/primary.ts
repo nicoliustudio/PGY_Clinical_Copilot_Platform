@@ -7,6 +7,7 @@ import { search } from '../knowledge/search.js';
 import { searchNormative, validateFormula } from '../clinical/formula.js';
 import { resolveKnowledgeScopes } from '../capability/resolver.js';
 import { resolveRiskState, isFormulaCommitAllowed } from '../clinical/risk.js';
+import { applyFormulaAuthority } from '../authority/formula-authority.js';
 import { extractJson } from '../util/json.js';
 import {
   newTrace,
@@ -179,6 +180,16 @@ export async function runCase(input: string): Promise<ClinicalRunResult> {
       // Safety Invariant（确定性边界）：高风险禁止 NORMATIVE 方剂 commit
       const riskState = resolveRiskState(extractRisks(trace));
       if (!isFormulaCommitAllowed(riskState, result.formula.authority)) {
+        result.formula.authority = 'BLOCKED';
+        result.safety.status = 'BLOCK';
+      }
+      // Authority Pipeline（无条件）：NORMATIVE 组成必须真实存在、未被篡改
+      const authority = await applyFormulaAuthority({
+        authority: result.formula.authority,
+        composition: result.formula.composition,
+        sourceId: result.formula.source_id,
+      });
+      if (authority.authority === 'BLOCKED') {
         result.formula.authority = 'BLOCKED';
         result.safety.status = 'BLOCK';
       }
