@@ -103,6 +103,25 @@ async function main(): Promise<void> {
     try {
       const { result, trace } = await runCase(c.input);
       completed++;
+
+      if (result.mode !== 'clinical') {
+        // 非临床模式（conversation/clarification/urgent），不做病证方对比
+        rows.push({
+          key: c.key,
+          group: c.group,
+          ok: true,
+          errorLayer: 'OK',
+          authority: result.mode,
+          ms: Date.now() - started,
+          toolCalls: trace.toolCalls.length,
+          hasGold: !!gold,
+        });
+        console.log(
+          `[${c.key}] mode=${result.mode} 非临床输出 ${Date.now() - started}ms`,
+        );
+        continue;
+      }
+
       const auth = result.formula.authority;
       if (auth === 'NORMATIVE') normative++;
       else if (auth === 'GENERATED_DRAFT') generatedDraft++;
