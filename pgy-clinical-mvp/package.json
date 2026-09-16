@@ -1,0 +1,29 @@
+{
+  "name": "pgy-clinical-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "蒲公英中医 Clinical Copilot MVP — AI SDK 7 驱动的单 Agent 主诉→方剂闭环",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:index": "tsx src/knowledge/build.ts",
+    "eval:debug": "tsx src/eval/run.ts debug",
+    "eval:calibration": "tsx src/eval/run.ts calibration",
+    "eval:holdout": "tsx src/eval/run.ts holdout",
+    "eval:external": "tsx src/eval/run.ts external",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.49",
+    "ai": "^7.0.102",
+    "dotenv": "^17.4.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
