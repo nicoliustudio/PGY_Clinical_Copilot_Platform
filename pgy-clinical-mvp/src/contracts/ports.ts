@@ -1,5 +1,4 @@
 import type { ClinicalUnderstanding } from './understanding.js';
-import type { CapabilityDescriptor, ResolvedCapability } from './capability.js';
 import type { RuntimeContext, SafetyDecision } from './runtime.js';
 import type { AgentResult } from './result.js';
 import type { FormulaAuthorityInput, FormulaAuthorityOutput } from './proposal.js';
@@ -8,11 +7,8 @@ export interface ClinicalUnderstandingPort {
   understand(input: string): Promise<ClinicalUnderstanding>;
 }
 
-export interface CapabilityResolverPort {
-  resolve(
-    understanding: ClinicalUnderstanding,
-    candidates: CapabilityDescriptor[],
-  ): Promise<ResolvedCapability[]>;
+export interface RuntimePreparationPort {
+  prepare(input: string, runId?: string): Promise<RuntimeContext>;
 }
 
 export interface SafetyPort {

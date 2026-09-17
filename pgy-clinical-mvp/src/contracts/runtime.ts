@@ -2,8 +2,9 @@ import type { ClinicalUnderstanding } from './understanding.js';
 import type { ResolvedCapability } from './capability.js';
 import type { ResolvedSkill } from './skill.js';
 import type { RuntimeToolDescriptor } from './tool.js';
+import type { HarnessControlPort } from './harness.js';
 
-/** 封闭世界安全决策：由语义理解派生的确定性状态，不由关键词推断。 */
+/** Closed-world runtime disposition. Severity is semantic evidence; disposition controls authority. */
 export interface SafetyDecision {
   status: 'PASS' | 'CAUTION' | 'BLOCK';
   reasons: string[];
@@ -16,10 +17,6 @@ export interface ModelProfile {
   model?: string;
 }
 
-/**
- * 最小版 ClinicalRunSnapshot —— 描述「本次 Run 实际用了什么」。
- * 与 EffectiveRuntimeRelease（可用的全部）区分：这里只记录被本次 Run 实际解析/装配的部分。
- */
 export interface RuntimeSnapshot {
   modelProfileId: string;
   promptHash?: string;
@@ -35,8 +32,8 @@ export interface TraceContext {
 }
 
 /**
- * RuntimeContext —— Runtime Plane 的核心装配对象。
- * Primary Agent 消费已装配好的世界，不自行重新组装/发现业务。
+ * RuntimeContext is a per-run mutable harness session.
+ * The agent owns the path; Authority remains outside this context.
  */
 export interface RuntimeContext {
   runId: string;
@@ -49,4 +46,5 @@ export interface RuntimeContext {
   safety: SafetyDecision;
   model: ModelProfile;
   trace: TraceContext;
+  harness: HarnessControlPort;
 }

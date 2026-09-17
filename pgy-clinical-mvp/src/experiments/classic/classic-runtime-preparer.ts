@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { ClinicalUnderstandingPort, RuntimePreparationPort, SafetyPort } from '../../contracts/ports.js';
 import type { ModelProfile, RuntimeContext } from '../../contracts/runtime.js';
-import type { ResolvedSkill } from '../../contracts/skill.js';
-import { CapabilityRegistry } from '../registry/capability-registry.js';
-import { SkillRegistry } from '../registry/skill-registry.js';
-import { ToolRegistry } from '../registry/tool-registry.js';
-import { HarnessSession } from './harness-session.js';
+import { CapabilityRegistry } from '../../platform/registry/capability-registry.js';
+import { SkillRegistry } from '../../platform/registry/skill-registry.js';
+import { ToolRegistry } from '../../platform/registry/tool-registry.js';
+import { HarnessSession } from '../../platform/runtime/harness-session.js';
+import { ClassicSemanticNeedResolver } from './semantic-need-resolver.js';
 
-export interface RuntimePreparerDependencies {
+export interface ClassicRuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
   safety: SafetyPort;
   capabilities: CapabilityRegistry;
@@ -15,30 +15,22 @@ export interface RuntimePreparerDependencies {
   tools: ToolRegistry;
   model: ModelProfile;
   baselineToolIds: string[];
-  baselineSkillIds: string[];
   baselineKnowledgeScopes: string[];
 }
 
-/**
- * H1 Harness bootstrap: seed semantic working memory and baseline platform assets only.
- * Business capabilities are NOT pre-routed. The agent discovers/activates them in-loop.
- */
-export class RuntimePreparer implements RuntimePreparationPort {
-  constructor(private readonly deps: RuntimePreparerDependencies) {}
+/** Legacy pre-routing path retained only for A/B regression. */
+export class ClassicRuntimePreparer implements RuntimePreparationPort {
+  private readonly resolver = new ClassicSemanticNeedResolver();
+  constructor(private readonly deps: ClassicRuntimePreparerDependencies) {}
 
   async prepare(input: string, runId: string = randomUUID()): Promise<RuntimeContext> {
     const understanding = await this.deps.understanding.understand(input);
-    const skills: ResolvedSkill[] = this.deps.baselineSkillIds.map((id) => ({
-      ...this.deps.skills.require(id),
-      activatedBy: ['harness.baseline'],
-    }));
-
     const context = {
       runId,
       input,
       understanding,
       capabilities: [],
-      skills,
+      skills: [],
       knowledgeScopes: [...new Set(this.deps.baselineKnowledgeScopes)],
       tools: this.deps.baselineToolIds.map((id) => this.deps.tools.require(id)),
       safety: await this.deps.safety.evaluate(understanding),
@@ -46,13 +38,10 @@ export class RuntimePreparer implements RuntimePreparationPort {
       trace: { runId, startedAt: new Date().toISOString() },
       harness: undefined as unknown as RuntimeContext['harness'],
     } satisfies RuntimeContext;
-
-    context.harness = new HarnessSession(
-      context,
-      this.deps.capabilities,
-      this.deps.skills,
-      this.deps.tools,
-    );
+    const harness = new HarnessSession(context, this.deps.capabilities, this.deps.skills, this.deps.tools);
+    context.harness = harness;
+    const resolved = await this.resolver.resolve(understanding, this.deps.capabilities.enabled());
+    for (const cap of resolved) harness.activateCapability(cap.id, cap.reason);
     return context;
   }
 }

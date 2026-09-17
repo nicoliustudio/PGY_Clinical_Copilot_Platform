@@ -52,6 +52,10 @@ interface RowResult {
   sourceId?: string;
   ms?: number;
   toolCalls?: number;
+  toolTrace?: { toolName: string; input: unknown; output: unknown; ms: number }[];
+  capabilities?: string[];
+  skills?: string[];
+  knowledgeScopes?: string[];
   // gold 对比
   hasGold?: boolean;
   diseaseHit?: boolean;
@@ -68,6 +72,7 @@ function classifyCrash(msg: string): ErrorLayer {
 
 async function main(): Promise<void> {
   const name = process.argv[2] ?? 'debug';
+  const runtimeMode = (process.argv[3] ?? 'harness') as 'harness' | 'classic';
   const file = DATASETS[name];
   if (!file) {
     console.error(`未知数据集 "${name}"，可选：${Object.keys(DATASETS).join('/')}`);
@@ -81,7 +86,7 @@ async function main(): Promise<void> {
   }
   const ts = JSON.parse(readFileSync(abs, 'utf8')) as TestSet;
 
-  console.log(`[eval] 数据集 ${name}（${ts.total} 例），先确保索引就绪...`);
+  console.log(`[eval] 数据集 ${name}（${ts.total} 例），runtime=${runtimeMode}，先确保索引就绪...`);
   await buildIndex(false);
 
   const rows: RowResult[] = [];
@@ -101,7 +106,7 @@ async function main(): Promise<void> {
     const started = Date.now();
     const gold = getGold(c.key);
     try {
-      const { result, trace } = await runCase(c.input);
+      const { result, trace } = await runCase(c.input, { mode: runtimeMode });
       completed++;
 
       if (result.mode !== 'clinical') {
@@ -114,6 +119,10 @@ async function main(): Promise<void> {
           authority: result.mode,
           ms: Date.now() - started,
           toolCalls: trace.toolCalls.length,
+          toolTrace: trace.toolCalls,
+          capabilities: trace.capabilities,
+          skills: trace.skills,
+          knowledgeScopes: trace.knowledgeScopes,
           hasGold: !!gold,
         });
         console.log(
@@ -142,12 +151,12 @@ async function main(): Promise<void> {
         if (sHit) syndromeHit++;
         if (fHit) formulaHit++;
 
-        if (auth === 'BLOCKED') layer = 'SAFETY_BLOCK';
+        if (auth === 'BLOCKED') layer = result.safety.status === 'BLOCK' ? 'SAFETY_BLOCK' : 'FORMULA_AUTHORITY_ERROR';
         else if (!dHit) layer = 'DISEASE_REASONING_ERROR';
         else if (!sHit) layer = 'SYNDROME_REASONING_ERROR';
         else if (!fHit) layer = 'FORMULA_RETRIEVAL_MISS';
       } else if (auth === 'BLOCKED') {
-        layer = 'SAFETY_BLOCK';
+        layer = result.safety.status === 'BLOCK' ? 'SAFETY_BLOCK' : 'FORMULA_AUTHORITY_ERROR';
       }
 
       rows.push({
@@ -163,6 +172,10 @@ async function main(): Promise<void> {
         sourceId: result.formula.source_id,
         ms: Date.now() - started,
         toolCalls: trace.toolCalls.length,
+        toolTrace: trace.toolCalls,
+        capabilities: trace.capabilities,
+        skills: trace.skills,
+        knowledgeScopes: trace.knowledgeScopes,
         hasGold: !!gold,
         diseaseHit: dHit,
         syndromeHit: sHit,
@@ -198,6 +211,7 @@ async function main(): Promise<void> {
 
   const report = {
     dataset: name,
+    runtimeMode,
     total: ts.cases.length,
     completed,
     crashed,

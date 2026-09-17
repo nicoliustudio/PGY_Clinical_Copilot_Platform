@@ -8,6 +8,7 @@ function req(name: string): string {
 }
 
 export const config = {
+  runtime: { mode: (process.env.CLINICAL_RUNTIME_MODE ?? 'harness') as 'harness' | 'classic' },
   llm: {
     baseURL: req('LLM_BASE_URL'),
     apiKey: req('LLM_API_KEY'),

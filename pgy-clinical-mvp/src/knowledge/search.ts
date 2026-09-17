@@ -50,3 +50,13 @@ export async function search(
     };
   });
 }
+
+/** Read one full knowledge source by id, constrained by active scopes. */
+export async function getSource(
+  sourceId: string,
+  scopes: string[] = ['general'],
+): Promise<import('./types.js').KnowledgeDoc | null> {
+  const idx = await loadIndex();
+  const allowed = new Set(scopes);
+  return idx.docs.find((doc) => doc.id === sourceId && allowed.has(doc.scope)) ?? null;
+}

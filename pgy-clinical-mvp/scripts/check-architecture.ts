@@ -62,6 +62,23 @@ for (const dir of guarded) {
   }
 }
 
+
+// H1 Harness invariants: the production Runtime must not regress to exact-key pre-routing.
+const preparerPath = join(root, 'src/platform/runtime/runtime-preparer.ts');
+const preparerText = await readFile(preparerPath, 'utf8');
+for (const marker of ['capabilityResolver', 'capabilityNeeds.map', '.provides.filter']) {
+  if (preparerText.includes(marker)) {
+    violations.push(`src/platform/runtime/runtime-preparer.ts: H1 bootstrap regressed to pre-routing marker "${marker}"`);
+  }
+}
+const harnessAgentPath = join(root, 'src/adapters/ai-sdk/agent-runtime.ts');
+const harnessAgentText = await readFile(harnessAgentPath, 'utf8');
+for (const marker of ['prepareStep', 'capability.search', 'capability.activate']) {
+  if (!harnessAgentText.includes(marker)) {
+    violations.push(`src/adapters/ai-sdk/agent-runtime.ts: missing H1 harness primitive "${marker}"`);
+  }
+}
+
 if (violations.length) {
   console.error(
     'Architecture guard FAILED:\n' + violations.map((x) => `- ${x}`).join('\n'),

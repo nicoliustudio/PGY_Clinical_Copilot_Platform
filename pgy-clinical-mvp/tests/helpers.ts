@@ -11,7 +11,6 @@ import { CapabilityRegistry } from '../src/platform/registry/capability-registry
 import { SkillRegistry } from '../src/platform/registry/skill-registry.js';
 import { ToolRegistry } from '../src/platform/registry/tool-registry.js';
 import { RuntimePreparer } from '../src/platform/runtime/runtime-preparer.js';
-import { SemanticNeedCapabilityResolver } from '../src/platform/runtime/semantic-need-resolver.js';
 import {
   BASELINE_KNOWLEDGE_SCOPES,
   BASELINE_TOOL_IDS,
@@ -65,13 +64,13 @@ export async function buildTestRuntime(
 
   const preparer = new RuntimePreparer({
     understanding: { understand: async (input) => options.understand(input) },
-    capabilityResolver: new SemanticNeedCapabilityResolver(),
     safety: new RiskHypothesisSafetyPort(),
     capabilities,
     skills,
     tools,
     model: { id: 'test-model' },
     baselineToolIds: BASELINE_TOOL_IDS,
+    baselineSkillIds: ['general-clinical-reasoning'],
     baselineKnowledgeScopes: BASELINE_KNOWLEDGE_SCOPES,
   });
 

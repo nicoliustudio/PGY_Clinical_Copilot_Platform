@@ -1,7 +1,6 @@
 import type { RuntimeRunResult } from '../../contracts/authority.js';
-import type { PrimaryAgentPort } from '../../contracts/ports.js';
+import type { PrimaryAgentPort, RuntimePreparationPort } from '../../contracts/ports.js';
 import { AuthorityPipeline } from '../authority/pipeline.js';
-import { RuntimePreparer } from '../runtime/runtime-preparer.js';
 
 /**
  * 稳定的 Runtime 外壳：prepare → reason/propose → authority。
@@ -9,7 +8,7 @@ import { RuntimePreparer } from '../runtime/runtime-preparer.js';
  */
 export class ClinicalRuntime {
   constructor(
-    private readonly preparer: RuntimePreparer,
+    private readonly preparer: RuntimePreparationPort,
     private readonly primaryAgent: PrimaryAgentPort,
     private readonly authority: AuthorityPipeline,
     /** 本次装配所用的 Prompt 内容 hash（用于 Run 快照溯源） */

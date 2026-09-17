@@ -21,7 +21,7 @@ test('新增 Capability 是数据注册，不是核心分支', () => {
   assert.deepEqual(registry.require('demo.specialty').knowledgeScopes, ['demo.scope']);
 });
 
-test('新 Capability 无需修改 Core Runtime 即可被语义解析激活', async () => {
+test('新 Capability 无需修改 Core Runtime 即可被 Harness 动态激活', async () => {
   const runtime = await buildTestRuntime({
     extraCapabilities: [
       {
@@ -38,14 +38,13 @@ test('新 Capability 无需修改 Core Runtime 即可被语义解析激活', asy
         toolIds: [],
       },
     ],
-    understand: () => ({
-      ...baseUnderstanding('clinical'),
-      capabilityNeeds: [{ capability: 'demo_need', reason: 'demo' }],
-    }),
-    propose: (context) => ({
-      ...clinicalProposal(),
-      missing_information: context.capabilities.map((c) => c.id),
-    }),
+    understand: () => baseUnderstanding('clinical'),
+    propose: (context) => {
+      const discoverable = context.harness.listCapabilities();
+      assert.ok(discoverable.some((c) => c.id === 'demo.specialty'));
+      context.harness.activateCapability('demo.specialty', 'agent chose it from descriptor');
+      return { ...clinicalProposal(), missing_information: context.capabilities.map((c) => c.id) };
+    },
   });
 
   const { authority } = await runtime.run('demo input');

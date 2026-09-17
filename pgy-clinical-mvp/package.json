@@ -17,7 +17,11 @@
     "arch:test": "tsx scripts/check-architecture.ts",
     "assets:list": "tsx scripts/list-assets.ts",
     "capability:new": "tsx scripts/new-capability.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "eval:debug:harness": "tsx src/eval/run.ts debug harness",
+    "eval:debug:classic": "tsx src/eval/run.ts debug classic",
+    "eval:holdout:harness": "tsx src/eval/run.ts holdout harness",
+    "eval:holdout:classic": "tsx src/eval/run.ts holdout classic"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.49",

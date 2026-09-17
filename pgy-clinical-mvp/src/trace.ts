@@ -1,68 +1,41 @@
 import type { RuntimeSnapshot } from './contracts/runtime.js';
 
-export interface ToolCallTrace {
-  toolName: string;
-  input: unknown;
-  output: unknown;
-  ms: number;
-}
-
+export interface ToolCallTrace { toolName: string; input: unknown; output: unknown; ms: number; }
 export interface RunTrace {
-  runId: string;
-  input: string;
-  startedAt: string;
-  finishedAt?: string;
-  totalMs?: number;
-  toolCalls: ToolCallTrace[];
-  finalResult?: unknown;
-  error?: string;
+  runId: string; input: string; startedAt: string; finishedAt?: string; totalMs?: number;
+  toolCalls: ToolCallTrace[]; finalResult?: unknown; error?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
-  // 运行快照（最小版 ClinicalRunSnapshot）：回答「本次 Run 用了什么」。
-  modelProfileId?: string;
-  promptHash?: string;
-  capabilities?: string[];
-  skills?: string[];
-  knowledgeScopes?: string[];
+  modelProfileId?: string; promptHash?: string; capabilities?: string[]; skills?: string[]; knowledgeScopes?: string[];
 }
 
-let currentTrace: RunTrace | null = null;
+const traces = new Map<string, RunTrace>();
 
 export function newTrace(input: string): RunTrace {
-  currentTrace = {
+  const trace: RunTrace = {
     runId: `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     input,
     startedAt: new Date().toISOString(),
     toolCalls: [],
   };
-  return currentTrace;
+  traces.set(trace.runId, trace);
+  return trace;
 }
 
-export function getTrace(): RunTrace | null {
-  return currentTrace;
-}
+export function getTrace(runId: string): RunTrace | null { return traces.get(runId) ?? null; }
+export function addToolCall(runId: string, t: ToolCallTrace): void { traces.get(runId)?.toolCalls.push(t); }
 
-export function addToolCall(t: ToolCallTrace): void {
-  currentTrace?.toolCalls.push(t);
-}
-
-export function finishTrace(args: {
-  finalResult?: unknown;
-  error?: string;
-  usage?: RunTrace['usage'];
-  snapshot?: RuntimeSnapshot;
+export function finishTrace(runId: string, args: {
+  finalResult?: unknown; error?: string; usage?: RunTrace['usage']; snapshot?: RuntimeSnapshot;
 }): RunTrace {
-  if (!currentTrace) throw new Error('trace 未初始化');
-  currentTrace.finishedAt = new Date().toISOString();
-  currentTrace.totalMs = Date.now() - new Date(currentTrace.startedAt).getTime();
-  currentTrace.finalResult = args.finalResult;
-  currentTrace.error = args.error;
-  currentTrace.usage = args.usage;
+  const trace = traces.get(runId);
+  if (!trace) throw new Error(`trace 未初始化: ${runId}`);
+  trace.finishedAt = new Date().toISOString();
+  trace.totalMs = Date.now() - new Date(trace.startedAt).getTime();
+  trace.finalResult = args.finalResult; trace.error = args.error; trace.usage = args.usage;
   if (args.snapshot) {
-    currentTrace.modelProfileId = args.snapshot.modelProfileId;
-    currentTrace.promptHash = args.snapshot.promptHash;
-    currentTrace.capabilities = args.snapshot.capabilities;
-    currentTrace.skills = args.snapshot.skills;
-    currentTrace.knowledgeScopes = args.snapshot.knowledgeScopes;
+    trace.modelProfileId = args.snapshot.modelProfileId; trace.promptHash = args.snapshot.promptHash;
+    trace.capabilities = args.snapshot.capabilities; trace.skills = args.snapshot.skills;
+    trace.knowledgeScopes = args.snapshot.knowledgeScopes;
   }
-  return currentTrace;
+  return trace;
 }

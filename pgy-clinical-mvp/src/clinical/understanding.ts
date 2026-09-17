@@ -43,6 +43,7 @@ export const semanticIntentSchema = z.object({
 export const riskHypothesisSchema = z.object({
   description: z.string(),
   severity: z.enum(['low', 'medium', 'high', 'unknown']),
+  disposition: z.enum(['routine', 'urgent', 'uncertain']),
   evidence: z.string(),
 });
 
@@ -86,7 +87,7 @@ const UNDERSTAND_PROMPT = `你是中医临床的语义理解层。理解输入�
   "interaction": {"mode": "clinical"},
   "facts": [{"kind": "symptom", "value": "", "source": ""}],
   "intents": [{"kind": "", "confidence": 0.9, "evidence": ""}],
-  "risks": [{"description": "", "severity": "medium", "evidence": ""}],
+  "risks": [{"description": "", "severity": "medium", "disposition": "routine", "evidence": ""}],
   "informationGaps": [{"question": "", "reason": ""}],
   "capabilityNeeds": [{"capability": "", "reason": ""}],
   "uncertainties": [{"item": "", "reason": ""}]
@@ -96,9 +97,9 @@ const UNDERSTAND_PROMPT = `你是中医临床的语义理解层。理解输入�
 - interaction.mode：clinical（正式问诊/病例）、conversation（闲聊/生活）、clarification（补充/追问）、unknown。
 - facts[].kind：sex/age/chief_complaint/symptom/tongue_pulse/examination/past_diagnosis/past_treatment/other。只提取文中明确出现的。
 - intents[].kind：语义意图（如 clinical_inquiry、gaofang_request、chitchat），confidence 取 0~1。
-- risks[]：风险假设（非事实），severity 取 low/medium/high/unknown。
+- risks[]：风险假设（非事实）。severity 只描述问题本身严重程度；disposition 只回答当前是否必须改变常规处置路径，取 routine/urgent/uncertain。严重的慢性问题可以是 high + routine；只有当前存在需要立即改变处置路径的语义证据才用 urgent；证据不足时用 uncertain。禁止按疾病名称或关键词直接映射 disposition。
 - informationGaps[]：影响判断的关键信息缺口。
-- capabilityNeeds[].capability：可能需要的能力（如 gaofang），这是语义判断结果。
+- capabilityNeeds[]：仅作为语义工作记忆提示，不再承担运行时路由；不要猜平台内部 capability id。capability 可写自然语言需求描述。
 - uncertainties[]：理解上的不确定点。
 
 输入：

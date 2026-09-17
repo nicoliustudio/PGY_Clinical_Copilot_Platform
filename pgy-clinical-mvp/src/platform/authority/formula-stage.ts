@@ -29,6 +29,7 @@ export class FormulaAuthorityStage implements AuthorityStage {
       authority: formula.authority,
       composition: formula.composition,
       sourceId: formula.source_id,
+      formulaId: formula.formula_id,
     });
 
     if (result.authority === 'BLOCKED') {
@@ -39,7 +40,6 @@ export class FormulaAuthorityStage implements AuthorityStage {
         proposal: {
           ...proposal,
           status: 'BLOCKED',
-          safety: { status: 'BLOCK' },
           formula: { ...formula, authority: 'BLOCKED' },
         },
       };
