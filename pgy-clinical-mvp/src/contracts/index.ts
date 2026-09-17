@@ -7,3 +7,4 @@ export * from './proposal.js';
 export * from './result.js';
 export * from './authority.js';
 export * from './ports.js';
+export * from './workspace.js';
