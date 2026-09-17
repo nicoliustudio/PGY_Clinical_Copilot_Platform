@@ -1,8 +1,6 @@
 import { search } from '../knowledge/search.js';
 import { loadIndex } from '../knowledge/build.js';
 
-export type FormulaAuthority = 'NORMATIVE' | 'GENERATED_DRAFT' | 'BLOCKED';
-
 export interface NormativeFormulaResult {
   authority: 'NORMATIVE';
   formulaId: string;
@@ -82,16 +80,4 @@ export async function validateFormula(
     }
   }
   return { valid: false };
-}
-
-/**
- * 三态 Authority 判定。
- * 有 P1 规范方 → NORMATIVE；无直接权威方但安全通过 → GENERATED_DRAFT；安全/完整性失败 → BLOCKED。
- */
-export function resolveAuthority(args: {
-  normative: NormativeFormulaResult[];
-  safetyBlocked: boolean;
-}): FormulaAuthority {
-  if (args.safetyBlocked) return 'BLOCKED';
-  return args.normative.length > 0 ? 'NORMATIVE' : 'GENERATED_DRAFT';
 }

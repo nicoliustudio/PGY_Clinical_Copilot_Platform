@@ -1,0 +1,5 @@
+{
+  "id": "clinical-primary",
+  "version": "1.0.0",
+  "description": "Clinical Primary Agent 的通用 System Prompt（不含业务 Skill，业务推理由 Skill JIT 注入）"
+}

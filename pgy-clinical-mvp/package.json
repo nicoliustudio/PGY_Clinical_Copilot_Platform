@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "蒲公英中医 Clinical Copilot MVP — AI SDK 7 驱动的单 Agent 主诉→方剂闭环",
+  "description": "蒲公英中医 Clinical Copilot MVP — AI SDK 7 驱动的 Clinical Runtime（prepare → propose → authority）",
   "engines": {
     "node": ">=22"
   },
@@ -13,6 +13,10 @@
     "eval:calibration": "tsx src/eval/run.ts calibration",
     "eval:holdout": "tsx src/eval/run.ts holdout",
     "eval:external": "tsx src/eval/run.ts external",
+    "test": "node --import tsx --test \"tests/*.test.ts\"",
+    "arch:test": "tsx scripts/check-architecture.ts",
+    "assets:list": "tsx scripts/list-assets.ts",
+    "capability:new": "tsx scripts/new-capability.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

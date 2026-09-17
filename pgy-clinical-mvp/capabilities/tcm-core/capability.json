@@ -1,0 +1,14 @@
+{
+  "id": "tcm.core",
+  "version": "0.1.0",
+  "displayName": "TCM Core Clinical Reasoning",
+  "enabled": true,
+  "description": "General TCM clinical reasoning capability.",
+  "semanticDescription": "Use when the semantic understanding indicates a general TCM clinical task.",
+  "provides": ["general_tcm_clinical"],
+  "positiveExamples": [],
+  "negativeExamples": [],
+  "knowledgeScopes": ["general"],
+  "skillIds": ["general-clinical-reasoning"],
+  "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"]
+}

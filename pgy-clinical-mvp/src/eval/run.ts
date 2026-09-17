@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { runCase } from '../agent/primary.js';
+import { runCase } from '../composition/runtime.js';
 import { buildIndex } from '../knowledge/build.js';
 import {
   getGold,

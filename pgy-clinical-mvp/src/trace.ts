@@ -1,3 +1,5 @@
+import type { RuntimeSnapshot } from './contracts/runtime.js';
+
 export interface ToolCallTrace {
   toolName: string;
   input: unknown;
@@ -15,6 +17,12 @@ export interface RunTrace {
   finalResult?: unknown;
   error?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
+  // 运行快照（最小版 ClinicalRunSnapshot）：回答「本次 Run 用了什么」。
+  modelProfileId?: string;
+  promptHash?: string;
+  capabilities?: string[];
+  skills?: string[];
+  knowledgeScopes?: string[];
 }
 
 let currentTrace: RunTrace | null = null;
@@ -41,6 +49,7 @@ export function finishTrace(args: {
   finalResult?: unknown;
   error?: string;
   usage?: RunTrace['usage'];
+  snapshot?: RuntimeSnapshot;
 }): RunTrace {
   if (!currentTrace) throw new Error('trace 未初始化');
   currentTrace.finishedAt = new Date().toISOString();
@@ -48,5 +57,12 @@ export function finishTrace(args: {
   currentTrace.finalResult = args.finalResult;
   currentTrace.error = args.error;
   currentTrace.usage = args.usage;
+  if (args.snapshot) {
+    currentTrace.modelProfileId = args.snapshot.modelProfileId;
+    currentTrace.promptHash = args.snapshot.promptHash;
+    currentTrace.capabilities = args.snapshot.capabilities;
+    currentTrace.skills = args.snapshot.skills;
+    currentTrace.knowledgeScopes = args.snapshot.knowledgeScopes;
+  }
   return currentTrace;
 }
