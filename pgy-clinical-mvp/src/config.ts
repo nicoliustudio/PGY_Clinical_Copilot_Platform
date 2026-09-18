@@ -31,4 +31,13 @@ export const config = {
     releaseDir: path.resolve(req('KB_RELEASE_DIR')),
     cacheDir: path.resolve('.kb-cache'),
   },
+  // ASR 为可选能力：未配置时语音输入回退到禁用态，不影响文字对话。
+  asr: {
+    enabled: process.env.ASR_ENABLED === 'true',
+    model: process.env.ASR_MODEL ?? 'qwen-audio-3.0-asr-flash-streaming',
+    wsUrl: process.env.ASR_WS_URL ?? '',
+    apiKey: process.env.ASR_API_KEY ?? '',
+    sampleRate: Number(process.env.ASR_SAMPLE_RATE ?? 16000),
+    timeoutSeconds: Number(process.env.ASR_TIMEOUT_SECONDS ?? 60),
+  },
 };

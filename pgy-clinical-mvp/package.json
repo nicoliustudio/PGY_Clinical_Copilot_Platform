@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build:index": "tsx src/knowledge/build.ts",
+    "serve": "tsx src/server/index.ts",
     "eval:debug": "tsx src/eval/run.ts debug",
     "eval:calibration": "tsx src/eval/run.ts calibration",
     "eval:holdout": "tsx src/eval/run.ts holdout",
@@ -27,10 +28,12 @@
     "@ai-sdk/openai-compatible": "^3.0.49",
     "ai": "^7.0.102",
     "dotenv": "^17.4.2",
+    "ws": "^8.18.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.20.3",
+    "@types/ws": "^8.5.12",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }

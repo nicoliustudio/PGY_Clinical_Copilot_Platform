@@ -73,7 +73,7 @@ for (const marker of ['capabilityResolver', 'capabilityNeeds.map', '.provides.fi
 }
 const harnessAgentPath = join(root, 'src/adapters/ai-sdk/agent-runtime.ts');
 const harnessAgentText = await readFile(harnessAgentPath, 'utf8');
-for (const marker of ['prepareStep', 'capability.search', 'capability.activate']) {
+for (const marker of ['prepareStep', 'capability.discover', 'capability.activate', 'proposal.submit']) {
   if (!harnessAgentText.includes(marker)) {
     violations.push(`src/adapters/ai-sdk/agent-runtime.ts: missing H1 harness primitive "${marker}"`);
   }

@@ -1,0 +1,5 @@
+{
+  "id": "tcm-clinical-reasoning",
+  "version": "2.0.0",
+  "description": "TCM clinical reasoning method: multi-hypothesis comparison, evidence evaluation, formula candidate comparison, and uncertainty handling."
+}

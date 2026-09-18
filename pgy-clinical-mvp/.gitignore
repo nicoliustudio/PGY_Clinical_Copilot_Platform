@@ -5,3 +5,4 @@ dist/
 .kb-cache/
 reports/
 *.log
+.diagnose-*.out.txt

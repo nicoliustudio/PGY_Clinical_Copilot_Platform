@@ -29,6 +29,7 @@ export const clinicalResultSchema = z.object({
     composition: z.array(z.string()),
     source_id: z.string(),
     evidence_refs: z.array(z.string()),
+    candidate_ref: z.string().optional(),
   }),
   missing_information: z.array(z.string()),
   safety: z.object({ status: z.enum(['PASS', 'BLOCK']) }),

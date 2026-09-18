@@ -3,7 +3,10 @@ import { aiSdkModelPort } from '../adapters/ai-sdk/model-adapter.js';
 import { AiSdkPrimaryAgent } from '../adapters/ai-sdk/agent-runtime.js';
 import { DeterministicFormulaAuthority } from '../authority/formula-authority.js';
 import { config } from '../config.js';
+import type { AuthorityResult } from '../contracts/authority.js';
 import type { AgentResult } from '../contracts/result.js';
+import type { AgentStreamEvent } from '../contracts/stream.js';
+import type { ClinicalWorkspace } from '../contracts/workspace.js';
 import { ClinicalRuntime } from '../platform/agent/clinical-runtime.js';
 import { FormulaAuthorityStage } from '../platform/authority/formula-stage.js';
 import { AuthorityPipeline } from '../platform/authority/pipeline.js';
@@ -89,23 +92,25 @@ export async function getClinicalRuntime(
   return runtime;
 }
 
-export interface ClinicalRunResult { result: AgentResult; trace: RunTrace; }
+export interface ClinicalRunResult { result: AgentResult; trace: RunTrace; workspace: ClinicalWorkspace; authority: AuthorityResult; }
 
 export async function runCase(
   input: string,
-  options: { mode?: ClinicalRuntimeMode } = {},
+  options: { mode?: ClinicalRuntimeMode; onEvent?: (event: AgentStreamEvent) => void } = {},
 ): Promise<ClinicalRunResult> {
   const mode = options.mode ?? config.runtime.mode;
   const runtime = await getClinicalRuntime(mode);
   const trace = newTrace(input);
   try {
-    const { authority, usage, snapshot } = await runtime.run(input, trace.runId);
+    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop } = await runtime.run(input, trace.runId, options.onEvent);
     const result = authority.proposal;
     if (result.mode === 'clinical') result.run_id = trace.runId;
-    finishTrace(trace.runId, { finalResult: result, usage, snapshot });
-    return { result, trace };
+    finishTrace(trace.runId, { finalResult: result, usage, snapshot, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop });
+    return { result, trace, workspace, authority };
   } catch (e) {
     finishTrace(trace.runId, { error: e instanceof Error ? e.message : String(e) });
-    throw e;
+    const err = e instanceof Error ? e : new Error(String(e));
+    (err as Error & { runId?: string }).runId = trace.runId;
+    throw err;
   }
 }

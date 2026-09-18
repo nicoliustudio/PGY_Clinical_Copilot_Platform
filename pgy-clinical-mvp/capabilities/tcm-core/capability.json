@@ -9,6 +9,6 @@
   "positiveExamples": [],
   "negativeExamples": [],
   "knowledgeScopes": ["general"],
-  "skillIds": ["general-clinical-reasoning"],
+  "skillIds": ["general-clinical-reasoning", "tcm-clinical-reasoning"],
   "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"]
 }

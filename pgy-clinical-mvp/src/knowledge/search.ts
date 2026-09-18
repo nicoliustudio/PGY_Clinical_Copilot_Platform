@@ -1,37 +1,49 @@
 import { loadIndex } from './build.js';
 import { cosine, embed, rerank } from '../model/adapter.js';
 import type { SearchHit } from './types.js';
+import type { RetrievalDiagnostics } from './diagnostics.js';
 
 const HYBRID_CANDIDATE_K = 40;
 
+export interface SearchWithDiagnostics {
+  hits: SearchHit[];
+  diagnostics: RetrievalDiagnostics;
+}
+
 /**
  * knowledge.search：dense 召回 → rerank 精排 → 结构化 Top-K。
- * 返回 source_id / title / authority / excerpt / score / provenance。
+ * 同时返回 dense/rerank 的 rank/score，供 Retrieval 诊断，不改变检索行为。
  */
-export async function search(
+export async function searchWithDiagnostics(
   query: string,
   topK = 10,
   scopes: string[] = ['general'],
-): Promise<SearchHit[]> {
+  tool: RetrievalDiagnostics['tool'] = 'knowledge.search',
+): Promise<SearchWithDiagnostics> {
   const idx = await loadIndex();
   const scopeSet = new Set(scopes);
   const [qv] = await embed([query]);
 
-  // dense 召回（按激活的 Capability scopes 过滤）
   const scored = idx.docs
     .map((doc, i) => ({ doc, i, score: cosine(qv, idx.vectors[i]) }))
-    .filter((s) => scopeSet.has(s.doc.scope));
-  scored.sort((a, b) => b.score - a.score);
+    .filter((s) => scopeSet.has(s.doc.scope))
+    .sort((a, b) => b.score - a.score);
+
   const candidates = scored.slice(0, HYBRID_CANDIDATE_K);
+  const ranked = await rerank(query, candidates.map((c) => c.doc.text), topK);
 
-  // rerank 精排
-  const ranked = await rerank(
-    query,
-    candidates.map((c) => c.doc.text),
-    topK,
-  );
+  const dense = candidates.map((c, index) => ({
+    sourceId: c.doc.id,
+    rank: index + 1,
+    score: c.score,
+  }));
+  const reranked = ranked.map((r, index) => ({
+    sourceId: candidates[r.index].doc.id,
+    rank: index + 1,
+    score: r.score,
+  }));
 
-  return ranked.map((r) => {
+  const hits = ranked.map((r) => {
     const { doc } = candidates[r.index];
     return {
       sourceId: doc.id,
@@ -49,6 +61,19 @@ export async function search(
       formulas: doc.formulas,
     };
   });
+
+  return {
+    hits,
+    diagnostics: { tool, query, scopes, topK, dense, reranked },
+  };
+}
+
+export async function search(
+  query: string,
+  topK = 10,
+  scopes: string[] = ['general'],
+): Promise<SearchHit[]> {
+  return (await searchWithDiagnostics(query, topK, scopes, 'knowledge.search')).hits;
 }
 
 /** Read one full knowledge source by id, constrained by active scopes. */

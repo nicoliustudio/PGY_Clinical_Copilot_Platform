@@ -5,6 +5,7 @@ import { CapabilityRegistry } from '../../platform/registry/capability-registry.
 import { SkillRegistry } from '../../platform/registry/skill-registry.js';
 import { ToolRegistry } from '../../platform/registry/tool-registry.js';
 import { HarnessSession } from '../../platform/runtime/harness-session.js';
+import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../../platform/workspace/clinical-workspace.js';
 import { ClassicSemanticNeedResolver } from './semantic-need-resolver.js';
 
 export interface ClassicRuntimePreparerDependencies {
@@ -25,6 +26,17 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
 
   async prepare(input: string, runId: string = randomUUID()): Promise<RuntimeContext> {
     const understanding = await this.deps.understanding.understand(input);
+    const safety = await this.deps.safety.evaluate(understanding);
+
+    const workspace = createClinicalWorkspace();
+    const workspaceStore = new ClinicalWorkspaceStore(workspace, runId);
+    workspace.facts = [...understanding.facts];
+    workspace.informationGaps = understanding.informationGaps.map((g) => g.question);
+    workspace.uncertainties = understanding.uncertainties.map((u) => u.item);
+    workspace.safetyDisposition =
+      safety.status === 'BLOCK' ? 'urgent' : safety.status === 'CAUTION' ? 'uncertain' : 'routine';
+    workspaceStore.append('workspace.seeded', { input });
+
     const context = {
       runId,
       input,
@@ -33,10 +45,12 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
       skills: [],
       knowledgeScopes: [...new Set(this.deps.baselineKnowledgeScopes)],
       tools: this.deps.baselineToolIds.map((id) => this.deps.tools.require(id)),
-      safety: await this.deps.safety.evaluate(understanding),
+      safety,
       model: this.deps.model,
       trace: { runId, startedAt: new Date().toISOString() },
       harness: undefined as unknown as RuntimeContext['harness'],
+      workspace,
+      workspaceStore,
     } satisfies RuntimeContext;
     const harness = new HarnessSession(context, this.deps.capabilities, this.deps.skills, this.deps.tools);
     context.harness = harness;

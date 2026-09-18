@@ -3,6 +3,7 @@ import type { ResolvedCapability } from './capability.js';
 import type { ResolvedSkill } from './skill.js';
 import type { RuntimeToolDescriptor } from './tool.js';
 import type { HarnessControlPort } from './harness.js';
+import type { ClinicalWorkspace, WorkspaceControlPort } from './workspace.js';
 
 /** Closed-world runtime disposition. Severity is semantic evidence; disposition controls authority. */
 export interface SafetyDecision {
@@ -17,11 +18,19 @@ export interface ModelProfile {
   model?: string;
 }
 
+export interface SkillVersion {
+  id: string;
+  version: string;
+}
+
 export interface RuntimeSnapshot {
   modelProfileId: string;
   promptHash?: string;
   capabilities: string[];
   skills: string[];
+  activeSkills: string[];
+  skillVersions: SkillVersion[];
+  skillPromptSections: string[];
   knowledgeScopes: string[];
 }
 
@@ -47,4 +56,6 @@ export interface RuntimeContext {
   model: ModelProfile;
   trace: TraceContext;
   harness: HarnessControlPort;
+  workspace: ClinicalWorkspace;
+  workspaceStore: WorkspaceControlPort;
 }

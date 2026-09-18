@@ -1,5 +1,6 @@
-import { search } from '../knowledge/search.js';
+import { searchWithDiagnostics } from '../knowledge/search.js';
 import { loadIndex } from '../knowledge/build.js';
+import type { RetrievalDiagnostics } from '../knowledge/diagnostics.js';
 import { validateNormativeFormulaInDocs } from './formula-binding.js';
 
 export interface NormativeFormulaResult {
@@ -15,18 +16,23 @@ export interface NormativeFormulaResult {
   score: number;
 }
 
-export async function searchNormative(
+export interface NormativeSearchWithDiagnostics {
+  results: NormativeFormulaResult[];
+  diagnostics: RetrievalDiagnostics;
+}
+
+export async function searchNormativeWithDiagnostics(
   query: string,
   topK = 10,
   scopes: string[] = ['general'],
-): Promise<NormativeFormulaResult[]> {
-  const hits = await search(query, topK, scopes);
-  const out: NormativeFormulaResult[] = [];
+): Promise<NormativeSearchWithDiagnostics> {
+  const { hits, diagnostics } = await searchWithDiagnostics(query, topK, scopes, 'formula.search_normative');
+  const results: NormativeFormulaResult[] = [];
   for (const h of hits) {
     if (h.authority !== 'P1') continue;
     for (const f of h.formulas) {
       if (!f.composition) continue;
-      out.push({
+      results.push({
         authority: 'NORMATIVE', formulaId: f.id, name: f.name,
         composition: f.composition, sourceId: h.sourceId,
         source: h.provenance.source, disease: h.provenance.disease,
@@ -35,7 +41,15 @@ export async function searchNormative(
       });
     }
   }
-  return out;
+  return { results, diagnostics };
+}
+
+export async function searchNormative(
+  query: string,
+  topK = 10,
+  scopes: string[] = ['general'],
+): Promise<NormativeFormulaResult[]> {
+  return (await searchNormativeWithDiagnostics(query, topK, scopes)).results;
 }
 
 function normalize(s: string): string {

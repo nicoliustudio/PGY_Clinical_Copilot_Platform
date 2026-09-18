@@ -8,3 +8,4 @@ export * from './result.js';
 export * from './authority.js';
 export * from './ports.js';
 export * from './workspace.js';
+export * from './agent-loop.js';

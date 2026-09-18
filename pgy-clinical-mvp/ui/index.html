@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f7f9f7" />
+  <title>蒲公英中医 · Clinical Copilot</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="toast" role="status"></div>
+
+  <!-- ============ 用户端 ============ -->
+  <section id="userView" class="user-shell">
+    <aside class="patient-panel">
+      <div class="pp-head">
+        <div class="brand">
+          <span class="brand-mark">蒲</span>
+          <div class="brand-copy"><strong>蒲公英中医</strong><span>Clinical Copilot</span></div>
+        </div>
+        <button class="icon-btn" id="newCase" title="新建病例">＋</button>
+      </div>
+      <div class="side-label">病例 / 会话</div>
+      <div class="session-list" id="sessionList"></div>
+      <div class="pp-foot">
+        <button class="text-btn" id="viewToggle">前往管理员端 →</button>
+      </div>
+    </aside>
+
+    <div class="user-main">
+      <header class="topbar">
+        <div class="case-title" id="caseTitle"><strong>新问诊</strong><span>输入病例开始临床推理</span></div>
+        <div class="topbar-right">
+          <span class="model-chip" id="modelState">模型加载中…</span>
+          <span class="safety-chip" id="safetyState"></span>
+          <button class="ghost-btn" id="openTrace" title="开发者 Trace">Trace</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <main class="chat" id="chat">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-logo">蒲</div>
+            <h2>中医临床 Copilot</h2>
+            <p>粘贴病例，Agent 自主辨证、检索证据、比较候选方，再由 Authority Kernel 校验。右侧可展开完整推理过程，不隐藏、不黑箱。</p>
+          </div>
+        </main>
+
+        <aside class="workspace-panel" id="workspacePanel">
+          <div class="wp-head">
+            <span>临床工作台</span>
+            <span class="wp-run-state" id="wpRunState">idle</span>
+          </div>
+          <nav class="wp-tabs" id="wpTabs">
+            <button data-tab="overview" class="active">概览</button>
+            <button data-tab="evidence">证据</button>
+            <button data-tab="hypotheses">证候</button>
+            <button data-tab="candidates">候选方</button>
+            <button data-tab="deliberation">权衡</button>
+          </nav>
+          <div class="wp-body" id="wpBody">
+            <div class="wp-empty">发送病例后，这里展示 Agent 的可观测推理状态。</div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="composer-wrap">
+        <div class="live-status sr-only" id="liveStatus" aria-live="polite"></div>
+        <div class="composer">
+          <textarea id="input" rows="1" placeholder="粘贴病例，例如：患者月经过多半年…"></textarea>
+          <button class="round-btn mic" id="mic" title="语音输入">
+            <svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v4"/></svg>
+          </button>
+          <button class="round-btn send" id="send" title="发送">
+            <svg class="send-icon" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <span class="stop-square hidden"></span>
+          </button>
+        </div>
+        <div class="composer-tip">Enter 发送 · Shift+Enter 换行 · 语音实时转写</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 管理员端（Agent 治理/观测） ============ -->
+  <section id="adminView" class="admin-view hidden">
+    <aside class="admin-sidebar">
+      <div class="admin-brand">
+        <span class="brand-mark">蒲</span>
+        <div><strong>治理控制台</strong><span>OBSERVABILITY</span></div>
+      </div>
+      <nav class="admin-nav" id="adminNav">
+        <button class="admin-nav-item active" data-page="health">系统健康</button>
+        <button class="admin-nav-item" data-page="traces">运行 / Trace</button>
+        <button class="admin-nav-item" data-page="eval">Eval 模式</button>
+      </nav>
+      <div class="admin-sidebar-foot">
+        <button class="text-btn" id="viewToggleBack">← 返回用户端</button>
+      </div>
+    </aside>
+
+    <div class="admin-workspace">
+      <header class="admin-topbar">
+        <div class="admin-breadcrumb"><strong id="adminPageTitle">系统健康</strong><span id="adminPageSub"></span></div>
+        <button class="ghost-btn" id="adminRefresh">刷新</button>
+      </header>
+      <div class="admin-content" id="adminContent">
+        <section class="admin-page" data-page="health" id="pageHealth">
+          <div class="admin-page-head"><h1>系统健康</h1><p>模型 / 知识索引 / 能力 / 技能 / 语音</p></div>
+          <div class="stat-grid" id="healthCards"></div>
+          <div class="admin-grid-2">
+            <div class="admin-card"><div class="card-head"><h2>依赖状态</h2></div><div class="health-list" id="healthList"></div></div>
+            <div class="admin-card"><div class="card-head"><h2>能力 / 技能</h2></div><div class="health-list" id="capSkillList"></div></div>
+          </div>
+        </section>
+
+        <section class="admin-page hidden" data-page="traces" id="pageTraces">
+          <div class="admin-page-head"><h1>运行 / Trace</h1><p>每次临床运行的完整可观测决策链</p></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>输入</th><th>模型</th><th>状态</th><th></th></tr></thead>
+              <tbody id="traceTable"></tbody>
+            </table>
+          </div>
+          <div class="trace-detail hidden" id="traceDetail"></div>
+        </section>
+
+        <section class="admin-page hidden" data-page="eval" id="pageEval">
+          <div class="admin-page-head"><h1>Eval 模式</h1><p>Gold 是评估参考，不是唯一医学真理</p></div>
+          <div class="admin-card">
+            <div class="card-head"><h2>运行病例并对比 Gold</h2></div>
+            <div class="eval-form">
+              <textarea id="evalInput" rows="4" placeholder="粘贴病例…"></textarea>
+              <div class="eval-form-row">
+                <input id="evalKey" placeholder="goldKey（可选，如 妇科-001）" />
+                <button class="primary" id="evalRun">运行</button>
+              </div>
+            </div>
+            <div id="evalResult" class="eval-result"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- Trace Drawer（开发者） -->
+  <div id="traceDrawer" class="drawer hidden">
+    <div class="drawer-head"><strong>Trace</strong><button class="icon-btn" id="traceClose">×</button></div>
+    <div class="drawer-body" id="traceBody"></div>
+  </div>
+
+  <!-- Knowledge Source Modal -->
+  <div id="sourceModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><strong>知识来源</strong><button class="icon-btn" id="sourceClose">×</button></div>
+      <div class="modal-body" id="sourceBody"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script src="/mic.js"></script>
+</body>
+</html>
