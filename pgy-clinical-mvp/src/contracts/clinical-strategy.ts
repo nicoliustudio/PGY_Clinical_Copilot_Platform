@@ -3,42 +3,18 @@ import { uncertaintySchema, type Uncertainty } from '../clinical/understanding.j
 
 /**
  * Clinical Strategy —— 临床总策划层的「可观测规划状态」。
- * 它回答「本次 reasoning mission 是什么」，不回答病/证/方结论。
+ * H4 收缩：Planner 只回答「为了得到病/证/法/方，当前最重要的判断是什么」。
+ * 它不回答病/证/方结论，也不生成完整问诊、检查或工具步骤。
  * 禁止保存 Chain of Thought；只保存可观测的 planning state。
- */
-
-/** 证据优先级：强证据 / 弱证据 / 一般关联。 */
-export const evidencePrioritySchema = z.enum(['strong', 'weak', 'generic']);
-export type EvidencePriority = z.infer<typeof evidencePrioritySchema>;
-
-/** 一条「需要补齐才能推进判断」的证据需求。 */
-export const evidenceNeedSchema = z.object({
-  id: z.string(),
-  question: z.string(),
-  reason: z.string(),
-  priority: evidencePrioritySchema,
-});
-export type EvidenceNeed = z.infer<typeof evidenceNeedSchema>;
-
-/** 收敛判据：什么条件下已有信息足以形成可辩护结论。 */
-export const stoppingCriteriaSchema = z.object({
-  readyWhen: z.array(z.string()),
-  stopSignals: z.array(z.string()),
-});
-export type StoppingCriteria = z.infer<typeof stoppingCriteriaSchema>;
-
-/**
- * 临床策略。Planner 不负责临床结论，只负责「制定最小推理策略」。
- * - activeQuestions / evidenceNeeds：当前需要解决/补齐的证据，驱动检索方向。
- * - 禁止出现 disease/syndrome/formula 枚举或推荐。
  */
 export const clinicalStrategySchema = z.object({
   goal: z.string(),
-  primaryQuestion: z.string(),
-  secondaryQuestions: z.array(z.string()),
-  evidenceNeeds: z.array(evidenceNeedSchema),
-  activeQuestions: z.array(z.string()),
-  stoppingCriteria: stoppingCriteriaSchema,
+  /** 当前最重要的临床判断（一句话）。 */
+  decisionQuestion: z.string(),
+  /** 只保留「答案可能改变病名 / 证候 / 治法 / 方药」的信息需求。 */
+  criticalEvidenceNeeds: z.array(z.string()),
+  /** 什么条件下已有信息足以形成可辩护结论 / 应当停止检索。 */
+  stopWhen: z.array(z.string()),
   uncertainty: z.array(uncertaintySchema),
 });
 
@@ -48,11 +24,9 @@ export type ClinicalStrategy = z.infer<typeof clinicalStrategySchema>;
 export function emptyClinicalStrategy(): ClinicalStrategy {
   return {
     goal: '',
-    primaryQuestion: '',
-    secondaryQuestions: [],
-    evidenceNeeds: [],
-    activeQuestions: [],
-    stoppingCriteria: { readyWhen: [], stopSignals: [] },
+    decisionQuestion: '',
+    criticalEvidenceNeeds: [],
+    stopWhen: [],
     uncertainty: [],
   };
 }

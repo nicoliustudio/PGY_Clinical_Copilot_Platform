@@ -189,6 +189,7 @@ export interface TraceView {
   retrievalDiagnostics: RunTrace['retrievalDiagnostics'];
   agentLoop?: RunTrace['agentLoop'];
   contextMetrics?: RunTrace['contextMetrics'];
+  runMetrics?: RunTrace['runMetrics'];
   snapshot: {
     modelProfileId?: string;
     promptHash?: string;
@@ -212,6 +213,7 @@ export function buildTraceView(trace: RunTrace): TraceView {
     retrievalDiagnostics: trace.retrievalDiagnostics,
     agentLoop: trace.agentLoop,
     contextMetrics: trace.contextMetrics,
+    runMetrics: trace.runMetrics,
     snapshot: {
       modelProfileId: trace.modelProfileId,
       promptHash: trace.promptHash,
@@ -265,7 +267,7 @@ export function buildKnowledgeSourceView(sourceId: string, trace: { toolCalls: T
         view.disease = asString(readField(out, 'disease'));
         view.syndrome = asString(readField(out, 'syndrome'));
         view.treatment = asString(readField(out, 'treatment'));
-        view.tier = asString(readField(out, 'tier'));
+        view.tier = asString(readField(out, 'sourceTier')) ?? asString(readField(out, 'tier'));
         const text = readField(out, 'text');
         if (typeof text === 'string') view.summary = text.slice(0, 600);
         const formulas = readField(out, 'formulas');

@@ -15,6 +15,7 @@ import type {
 export function createClinicalWorkspace(): ClinicalWorkspace {
   return {
     facts: [],
+    caseFacts: [],
     hypotheses: [],
     evidenceRefs: [],
     candidates: [],
@@ -405,6 +406,9 @@ export function validateCandidateAssessmentRefs(
   for (const e of workspace.evidenceRefs) {
     evidenceIds.add(e.id);
     if (e.sourceId) evidenceIds.add(e.sourceId);
+  }
+  for (const f of workspace.caseFacts) {
+    evidenceIds.add(f.id);
   }
   for (const h of workspace.hypothesisState.hypotheses) {
     for (const r of [...h.supportingEvidenceRefs, ...h.contradictingEvidenceRefs]) evidenceIds.add(r);

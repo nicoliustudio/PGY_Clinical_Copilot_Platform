@@ -38,6 +38,23 @@ export interface AgentLoopTrace {
   usage?: { inputTokens?: number; outputTokens?: number };
   finalStepHadToolCalls: boolean;
   toolCallLedger: ToolCallLedgerEntry[];
+  /** 每一步 prompt 构成估算（仅观测，无硬阈值）。 */
+  promptComponents?: PromptComponents;
+}
+
+/** H4 Prompt Telemetry：估算各部分 token，仅观测不设阈值。 */
+export interface PromptComponents {
+  basePromptTokens: number;
+  strategyTokens: number;
+  decisionStateTokens: number;
+  workingViewTokens: number;
+  skillTokens: number;
+  toolSchemaTokens: number;
+  recentMessageTokens: number;
+  totalPromptTokens: number;
+  /** H6 渐进式 tool 披露观测。 */
+  activeToolCount?: number;
+  availableCapabilityCount?: number;
 }
 
 /**

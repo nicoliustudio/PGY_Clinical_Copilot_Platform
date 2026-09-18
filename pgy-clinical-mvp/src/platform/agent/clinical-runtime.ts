@@ -9,6 +9,8 @@ import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
 import { AuthorityPipeline } from '../authority/pipeline.js';
 import { EVIDENCE_EVENT_TYPES } from '../workspace/evidence-projection.js';
 import { HYPOTHESIS_EVENT_TYPES } from '../workspace/hypothesis-projection.js';
+import { getCanonicalFormula } from '../../clinical/formula.js';
+import { setFormulaIdentityTrace, type FormulaIdentityTrace } from '../../trace.js';
 
 export interface ClinicalRunResult extends RuntimeRunResult {
   workspace: ClinicalWorkspace;
@@ -55,22 +57,42 @@ function recordHypothesisDecision(proposal: AgentResult, context: RuntimeContext
 
 /**
  * candidate_ref → canonical formula record，再进入 Authority 校验。
- * LLM 只引用候选，不负责产出 formula_id/source_id/composition。
+ * H7：canonical hydrate 由 Harness 内部完成，不依赖模型重建 composition。
+ *
+ * H7.1：candidate_ref 是最终 formula identity 的唯一来源。模型提供的
+ * name / formula_id / source_id / composition 不得覆盖 canonical data。
+ * 若 candidate_ref 不存在，保持现有 fail-closed / non-normative 行为。
  */
-function hydrateFormulaProposal(proposal: AgentResult, context: RuntimeContext): AgentResult {
+export async function hydrateFormulaProposal(proposal: AgentResult, context: RuntimeContext): Promise<AgentResult> {
   if (proposal.mode !== 'clinical') return proposal;
   const ref = proposal.formula.candidate_ref;
   if (!ref) return proposal;
   const candidate = context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula');
-  if (!candidate?.formulaId || !candidate?.sourceId || !candidate?.composition) return proposal;
+  if (!candidate?.formulaId || !candidate?.sourceId) return proposal;
+  // 已 hydrate 的 candidate（或测试 fixture）直接复用 composition，避免重复 hydrate。
+  if (candidate.composition && candidate.composition.length > 0) {
+    return {
+      ...proposal,
+      formula: {
+        ...proposal.formula,
+        formula_id: candidate.formulaId,
+        source_id: candidate.sourceId,
+        composition: candidate.composition,
+        name: candidate.name ?? '',
+      },
+    };
+  }
+  // H7 canonical hydrate：card 级 candidate 无 composition，由 Harness 内部从 canonical store 查找。
+  const canonical = await getCanonicalFormula(candidate.sourceId, candidate.formulaId, context.runId);
+  if (!canonical) return proposal;
   return {
     ...proposal,
     formula: {
       ...proposal.formula,
-      formula_id: candidate.formulaId,
-      source_id: candidate.sourceId,
-      composition: candidate.composition,
-      name: candidate.name ?? proposal.formula.name,
+      formula_id: canonical.formulaId,
+      source_id: canonical.sourceId,
+      composition: [canonical.composition],
+      name: canonical.name,
     },
   };
 }
@@ -93,8 +115,36 @@ export class ClinicalRuntime {
     const output = await this.primaryAgent.run(context, onEvent);
     recordCandidateDecision(output.proposal, context);
     recordHypothesisDecision(output.proposal, context);
-    const proposal = hydrateFormulaProposal(output.proposal, context);
-    const authority = await this.authority.resolve(proposal, context);
+    const rawFormula = output.proposal.mode === 'clinical' ? output.proposal.formula : undefined;
+    const proposal = await hydrateFormulaProposal(output.proposal, context);
+    // canonical safety truth：模型 proposal.safety 不覆盖 canonical safety disposition。
+    const withCanonicalSafety: AgentResult = proposal.mode === 'clinical'
+      ? { ...proposal, safety: { status: context.safety.blockNormativeCommit ? 'BLOCK' : 'PASS' } }
+      : proposal;
+    const authority = await this.authority.resolve(withCanonicalSafety, context);
+
+    // H8 Forensic：只记录 identity chain 进 Trace，不改变任何行为。
+    if (proposal.mode === 'clinical') {
+      const ref = proposal.formula.candidate_ref;
+      let canonicalFormula: FormulaIdentityTrace['canonicalFormula'];
+      if (ref) {
+        const [sid, fid] = ref.split('::');
+        if (sid && fid) {
+          const c = await getCanonicalFormula(sid, fid);
+          if (c) canonicalFormula = { sourceId: c.sourceId, formulaId: c.formulaId, name: c.name, composition: c.composition };
+        }
+      }
+      const formulaDecision = authority.decisions.find((d) => d.stage === 'formula.authority');
+      setFormulaIdentityTrace(context.runId, {
+        candidateRef: ref,
+        rawFormula: rawFormula ? { name: rawFormula.name, sourceId: rawFormula.source_id, formulaId: rawFormula.formula_id, composition: rawFormula.composition } : undefined,
+        hydratedFormula: { sourceId: proposal.formula.source_id, formulaId: proposal.formula.formula_id, name: proposal.formula.name, composition: proposal.formula.composition },
+        canonicalFormula,
+        authorityBlockCode: formulaDecision?.reasons?.[0],
+        authorityReasons: formulaDecision?.reasons,
+      });
+    }
+
     const workspaceEvents = context.workspaceStore.trace();
     return {
       authority,

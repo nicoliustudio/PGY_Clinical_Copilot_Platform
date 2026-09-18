@@ -14,21 +14,17 @@ const PLAN_PROMPT = `你是中医临床的「总策划层」（Clinical Planner�
 严格按此结构输出一个 JSON 对象，不要 markdown 代码块、不要解释文字：
 {
   "goal": "",
-  "primaryQuestion": "",
-  "secondaryQuestions": [],
-  "evidenceNeeds": [{"id": "", "question": "", "reason": "", "priority": "strong"}],
-  "activeQuestions": [],
-  "stoppingCriteria": {"readyWhen": [], "stopSignals": []},
+  "decisionQuestion": "",
+  "criticalEvidenceNeeds": [],
+  "stopWhen": [],
   "uncertainty": [{"item": "", "reason": ""}]
 }
 
 字段说明：
 - goal：本次要解决的临床目标（一句话，站在「主任查房先定目标」的视角）。
-- primaryQuestion：当前最主要的临床矛盾/最需要回答的问题。
-- secondaryQuestions：次要矛盾。
-- activeQuestions：当前需要解决的开放问题，用于驱动后续证据收集。
-- evidenceNeeds：需要补齐才能推进判断的证据需求。每条 {id, question, reason, priority}，priority 取 strong/weak/generic。按优先级从高到低排序。
-- stoppingCriteria：{readyWhen, stopSignals}，描述「什么条件下已有信息足以形成可辩护结论」以及「什么信号出现就应该停止检索」。
+- decisionQuestion：为了得到病名、辨证、治法、方药，当前最重要的判断是什么（一句话）。
+- criticalEvidenceNeeds：只保留「答案可能改变病名 / 证候 / 治法 / 方药」的信息需求（字符串数组）。不要生成完整问诊、检查或工具步骤。
+- stopWhen：什么条件下已有信息足以形成可辩护结论、应当停止检索（字符串数组）。
 - uncertainty：当前最关键的未知/不确定点 [{item, reason}]。
 
 纪律（必须遵守）：
@@ -36,7 +32,7 @@ const PLAN_PROMPT = `你是中医临床的「总策划层」（Clinical Planner�
 - 不做「症状→证型」映射，不预判临床结论。
 - 目标是控制检索方向、减少无目的搜索，而不是解答病例。
 - 只输出可观测的规划状态，不输出思维链（Chain of Thought）。
-- activeQuestions / evidenceNeeds 只描述「需要知道什么、为什么」，不描述「答案是什么」。
+- criticalEvidenceNeeds 只描述「需要知道什么、为什么」，不描述「答案是什么」，且只保留会改变治疗判断的信息。
 
 输入：`;
 

@@ -13,7 +13,7 @@ test('tcm-clinical-reasoning 能被真实 SkillLoader 发现', async () => {
   assert.ok(skills[0].promptSections.some((p) => p.includes('You are a TCM clinical reasoning assistant')));
 });
 
-test('Harness run 激活后 activeSkills 包含 tcm-clinical-reasoning', async () => {
+test('Harness run 激活后 activeSkills 包含 tcm-clinical-cognition', async () => {
   const runtime = await buildTestRuntime({
     understand: () => baseUnderstanding('clinical'),
     propose: (context) => {
@@ -24,7 +24,7 @@ test('Harness run 激活后 activeSkills 包含 tcm-clinical-reasoning', async (
 
   const { authority } = await runtime.run('常规中医病例');
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
-  assert.ok(authority.proposal.missing_information.includes('tcm-clinical-reasoning'));
+  assert.ok(authority.proposal.missing_information.includes('tcm-clinical-cognition'));
 });
 
 test('prepareStep 的 instructions 包含 TCM Reasoning 核心方法约束', async () => {
@@ -35,7 +35,7 @@ test('prepareStep 的 instructions 包含 TCM Reasoning 核心方法约束', asy
   assert.ok(rendered.includes('You are a TCM clinical reasoning assistant'));
 });
 
-test('不激活 tcm.core 时不得注入 tcm-clinical-reasoning', async () => {
+test('不激活 tcm.core 时 baseline 已注入 tcm-clinical-cognition', async () => {
   const runtime = await buildTestRuntime({
     understand: () => baseUnderstanding('clinical'),
     propose: (context) => ({ ...clinicalProposal(), missing_information: context.skills.map((s) => s.id) }),
@@ -44,5 +44,5 @@ test('不激活 tcm.core 时不得注入 tcm-clinical-reasoning', async () => {
   const { authority } = await runtime.run('常规中医病例');
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
   assert.ok(!authority.proposal.missing_information.includes('tcm-clinical-reasoning'));
-  assert.ok(authority.proposal.missing_information.includes('general-clinical-reasoning'));
+  assert.ok(authority.proposal.missing_information.includes('tcm-clinical-cognition'));
 });

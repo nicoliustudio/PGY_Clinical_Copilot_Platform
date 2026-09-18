@@ -48,6 +48,12 @@ export class RuntimePreparer implements RuntimePreparationPort {
     const workspace = createClinicalWorkspace();
     const workspaceStore = new ClinicalWorkspaceStore(workspace, runId);
     workspace.facts = [...understanding.facts];
+    workspace.caseFacts = understanding.facts.map((f, i) => ({
+      id: `CF_${String(i + 1).padStart(3, '0')}`,
+      kind: f.kind,
+      value: f.value,
+      source: f.source,
+    }));
     workspace.informationGaps = understanding.informationGaps.map((g) => g.question);
     workspace.uncertainties = understanding.uncertainties.map((u) => u.item);
     workspace.safetyDisposition =

@@ -314,14 +314,14 @@ function renderWorkspace(ws, tab) {
 
 function renderStrategy(strategy) {
   if (!strategy || !strategy.goal) return '';
-  const needs = (strategy.activeQuestions || []).concat((strategy.evidenceNeeds || []).map((n) => n.question));
+  const needs = (strategy.criticalEvidenceNeeds || []);
   const uncertainty = (strategy.uncertainty || []).map((u) => `${u.item}${u.reason ? '（' + u.reason + '）' : ''}`);
   const list = (items) => (items.length ? `<ul class="wp-list">${items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<span class="muted">—</span>');
   return `
     <div class="wp-section strategy">
       <div class="wp-section-title">当前目标</div><div class="wp-card">${esc(strategy.goal || '—')}</div>
-      <div class="wp-section-title">当前关键问题</div><div class="wp-card">${esc(strategy.primaryQuestion || '—')}</div>
-      <div class="wp-section-title">需要解决</div><div class="wp-card">${list(needs)}</div>
+      <div class="wp-section-title">当前关键判断</div><div class="wp-card">${esc(strategy.decisionQuestion || '—')}</div>
+      <div class="wp-section-title">关键证据需求</div><div class="wp-card">${list(needs)}</div>
       <div class="wp-section-title">当前不确定性</div><div class="wp-card">${list(uncertainty)}</div>
     </div>`;
 }

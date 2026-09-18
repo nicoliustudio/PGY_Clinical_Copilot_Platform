@@ -1,7 +1,7 @@
 import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
-import { searchNormativeWithDiagnostics, validateNormativeFormula } from '../../clinical/formula.js';
+import { searchNormativeWithDiagnostics, validateNormativeFormula, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { agentResultSchema, type AgentResult } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
@@ -116,18 +116,24 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     execute: async ({ id, reason }) => context.harness.activateCapability(id, reason),
   }),
   'knowledge.search': (context) => tool({
-    description: '在当前已激活知识 scope 中检索证据。仅在预计会改变当前临床判断时才再次检索；若已有证据已足以支撑可辩护的 Proposal，直接提交。',
-    inputSchema: z.object({ query: z.string(), topK: z.number().optional() }),
-    execute: async ({ query, topK }) => {
-      const { hits, diagnostics } = await searchWithDiagnostics(query, topK ?? 10, context.knowledgeScopes, 'knowledge.search');
+    description:
+      '在当前已激活知识 scope 中检索证据。可用 role 限定知识角色：NORMATIVE_TREATMENT（规范治法/方）、CLINICAL_CASE（P1 不足后的经验性病例）、DIAGNOSTIC_DIFFERENTIAL（症状辨证鉴别）、DIAGNOSTIC_STANDARD（病名诊断依据）。仅在预计会改变当前临床判断时才再次检索；若已有证据已足以支撑可辩护的 Proposal，直接提交。',
+    inputSchema: z.object({
+      query: z.string(),
+      topK: z.number().optional(),
+      role: z.enum(['DIAGNOSTIC_DIFFERENTIAL', 'DIAGNOSTIC_STANDARD', 'NORMATIVE_TREATMENT', 'CLINICAL_CASE']).optional(),
+      fallbackReason: z.string().optional(),
+    }),
+    execute: async ({ query, topK, role, fallbackReason }) => {
+      const { hits, diagnostics } = await searchWithDiagnostics(query, topK ?? 10, context.knowledgeScopes, 'knowledge.search', { role, fallbackReason });
       addRetrievalDiagnostics(context.runId, diagnostics);
       return hits;
     },
   }),
   'knowledge.get_source': (context) => tool({
-    description: '读取 knowledge.search 返回的单个完整来源，用于核对上下文、反证和方剂出处。同一 sourceId 无需重复读取。',
-    inputSchema: z.object({ sourceId: z.string() }),
-    execute: async ({ sourceId }) => getSource(sourceId, context.knowledgeScopes),
+    description: '读取 knowledge.search 返回的单个来源详情。detailLevel 默认 excerpt（相关摘录）；只有明确需要完整来源验证时才用 full。同一 sourceId 无需重复读取。',
+    inputSchema: z.object({ sourceId: z.string(), detailLevel: z.enum(['excerpt', 'full']).optional() }),
+    execute: async ({ sourceId, detailLevel }) => getSource(sourceId, context.knowledgeScopes, detailLevel ?? 'excerpt'),
   }),
   'formula.search_normative': (context) => tool({
     description: '在当前已激活 scope 中检索真实 P1 规范方。若为某个受支持的 hypothesis 探索候选方，请传入其 promotion work item 的 ref（promotionWorkItemRef）；不要手写 hypothesis 身份或 id 数组。',
@@ -140,24 +146,49 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       const candidateRefs = results.map((r) => `${r.sourceId}::${r.formulaId}`);
       addRetrievalDiagnostics(context.runId, { ...diagnostics, promotionWorkItemRef, resolvedHypothesisRef, candidateRefs });
       return results.map((r) => ({
+        candidateId: `${r.sourceId}::${r.formulaId}`,
         candidateRef: `${r.sourceId}::${r.formulaId}`,
         formulaId: r.formulaId,
+        formulaName: r.name,
         sourceId: r.sourceId,
-        composition: [r.composition],
-        name: r.name,
+        sourceTier: 'P1',
+        diseaseVariant: r.disease,
+        syndromeVariant: r.syndrome,
+        treatmentMethod: r.treatment,
+        prescriptionAuthority: true,
+        detailAvailable: true,
         score: r.score,
-        source: r.source,
-        disease: r.disease,
-        syndrome: r.syndrome,
-        treatment: r.treatment,
         originatingHypothesisRefs: refs,
       }));
     },
   }),
-  'formula.validate': () => tool({
-    description: '校验 source_id + formula_id + composition 是否绑定于同一条 P1 规范记录。',
-    inputSchema: z.object({ sourceId: z.string(), formulaId: z.string(), composition: z.string() }),
-    execute: async (input) => validateNormativeFormula(input),
+  'formula.validate': (context) => tool({
+    description: '校验 source_id + formula_id + composition 是否绑定于同一条 P1 规范记录。也可只传 candidateId，Harness 内部 canonical hydrate 后校验。',
+    inputSchema: z.object({
+      sourceId: z.string().optional(),
+      formulaId: z.string().optional(),
+      composition: z.string().optional(),
+      candidateId: z.string().optional(),
+    }),
+    execute: async ({ sourceId, formulaId, composition, candidateId }) => {
+      if (candidateId) {
+        const [sid, fid] = candidateId.split('::');
+        if (!sid || !fid) {
+          recordFormulaValidation(context.runId);
+          return { valid: false };
+        }
+        const canonical = await getCanonicalFormula(sid, fid, context.runId);
+        if (!canonical) {
+          recordFormulaValidation(context.runId);
+          return { valid: false };
+        }
+        recordFormulaValidation(context.runId, candidateId);
+        return validateNormativeFormula({ sourceId: sid, formulaId: fid, composition: canonical.composition });
+      }
+      recordFormulaValidation(context.runId);
+      if (!sourceId || !formulaId || !composition) return { valid: false };
+      return validateNormativeFormula({ sourceId, formulaId, composition });
+    },
   }),
   'workspace.focus_candidates': (context) => tool({
     description: '从已 present 的候选中，选择哪些候选值得进入正式比较（Deliberation Frontier）。present 只表示「搜索发现过」，不等于必须评估。只 focus 你认为真正值得比较的少数候选。',

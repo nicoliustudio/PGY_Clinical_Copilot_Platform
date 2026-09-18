@@ -11,13 +11,9 @@ import { baseUnderstanding, buildTestRuntime, clinicalProposal } from './helpers
 function validStrategy(overrides: Partial<ClinicalStrategy> = {}): ClinicalStrategy {
   return {
     goal: '分析当前主要病机及治疗方向',
-    primaryQuestion: '当前主要矛盾是瘀阻、气虚不摄还是阴虚火旺？',
-    secondaryQuestions: [],
-    evidenceNeeds: [
-      { id: 'bleeding.status', question: '当前出血状态如何？', reason: '区分活动性出血', priority: 'strong' },
-    ],
-    activeQuestions: ['是否仍在活动性出血'],
-    stoppingCriteria: { readyWhen: ['主要矛盾已能区分'], stopSignals: ['检索不再改变判断'] },
+    decisionQuestion: '当前主要矛盾是瘀阻、气虚不摄还是阴虚火旺？',
+    criticalEvidenceNeeds: ['当前出血状态如何？'],
+    stopWhen: ['主要矛盾已能区分', '检索不再改变判断'],
     uncertainty: [{ item: '病程阶段', reason: '未明确' }],
     ...overrides,
   };
@@ -43,8 +39,8 @@ test('Planner 输出 schema-valid ClinicalStrategy', async () => {
     fakeModel(expected),
   );
   assert.equal(strategy.goal, expected.goal);
-  assert.equal(strategy.primaryQuestion, expected.primaryQuestion);
-  assert.equal(strategy.evidenceNeeds[0].priority, 'strong');
+  assert.equal(strategy.decisionQuestion, expected.decisionQuestion);
+  assert.equal(strategy.criticalEvidenceNeeds.length, 1);
   assert.equal(strategy.uncertainty.length, 1);
 });
 
@@ -95,7 +91,7 @@ test('strategy 进入 RuntimeContext 与 Agent working view', async () => {
       assert.equal(context.strategy.goal, validStrategy().goal);
       const view = buildClinicalWorkingView(context.workspace, context.strategy);
       assert.equal(view.goal, validStrategy().goal);
-      assert.equal(view.primaryQuestion, validStrategy().primaryQuestion);
+      assert.equal(view.decisionQuestion, validStrategy().decisionQuestion);
       return clinicalProposal();
     },
   });

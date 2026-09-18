@@ -5,17 +5,21 @@ import { agentResultSchema, type AgentResult } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { PrimaryAgentOutput, PrimaryAgentPort } from '../../contracts/ports.js';
 import type { AgentStreamEvent, LifecycleStage } from '../../contracts/stream.js';
-import type { AgentLoopTrace, TerminationReason, ContextMetrics } from '../../contracts/agent-loop.js';
-import { addToolCall } from '../../trace.js';
+import type { AgentLoopTrace, TerminationReason, ContextMetrics, PromptComponents } from '../../contracts/agent-loop.js';
+import { addToolCall, addActionReceipt, setRunMetrics } from '../../trace.js';
+import { executionProtocolVersion, type ActionReceipt, type DecisionImpact, type RunExecutionMetrics, type RecentRetrievalFeedback } from '../../contracts/execution.js';
 import { DEFAULT_AI_SDK_TOOL_BINDINGS, type AiSdkToolBindings } from './tool-bindings.js';
 import { applyToolExecutionResult, type ToolExecutionEnvelope } from './workspace-events.js';
 import { ToolCallLedger } from './tool-call-ledger.js';
+import { RetrievalDisciplineTracker } from './retrieval-discipline.js';
 import { buildEvidenceProjection } from '../../platform/workspace/evidence-projection.js';
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
+import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
-import type { ClinicalWorkspace } from '../../contracts/workspace.js';
+import type { ClinicalWorkspace, WorkspaceEvent } from '../../contracts/workspace.js';
+import { getFormulaHydrationStats, resetFormulaHydrationStats } from '../../clinical/formula.js';
 
 /**
  * H2.5D：promotion gap 只作为 Agent projection / diagnostics / trace，不再自动扩大 reasoning loop。
@@ -96,21 +100,24 @@ function buildRecentActions(ledger?: ToolCallLedger): RecentAction[] {
 }
 
 const ACTION_PRINCIPLE = `## Action Principle
-- 再次调用工具前，先判断：该动作是否会实质性减少当前 ClinicalStrategy 中某个开放问题或不确定性？
-- 若已有证据足以支撑可辩护 Proposal，优先调用 proposal.submit。
-- 不要因为「可能还有更多信息」就继续搜索。
-- 保留显式不确定性，而不是追求穷尽式确定。`;
+- Use the shortest defensible path to a clinical proposal.
+- Before another tool call, determine whether the result is likely to materially change: disease framing, syndrome judgment, treatment method, or formula selection.
+- If it will not materially change any of these, do not call the tool.
+- Do not resolve every uncertainty.
+- When existing evidence already supports a defensible source-grounded proposal, call proposal.submit.
+- Reuse before retrieving. Before another retrieval, name the unresolved decision it could change (disease framing / syndrome judgment / treatment method / formula selection / safety disposition). If the workspace already has sufficient evidence for that decision, reuse existing evidence instead of retrieving again.
+- Do not retrieve merely to increase confidence or completeness. Do not continue broad retrieval after a viable canonical candidate exists unless new evidence could materially change the decision.`;
 
-export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger): string {
+export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback): string {
   const skills = renderActiveSkills(context.skills);
-  const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger));
+  const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback);
   const workingView = renderClinicalWorkingView(view);
   return `${base}\n\n${ACTION_PRINCIPLE}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
 }
 
 /** 度量「目标驱动工作上下文」相对「全量投影」的收缩程度（估算）。 */
-function computeContextMetrics(context: RuntimeContext, ledger: ToolCallLedger): ContextMetrics {
-  const workingView = renderClinicalWorkingView(buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger)));
+function computeContextMetrics(context: RuntimeContext, ledger: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback): ContextMetrics {
+  const workingView = renderClinicalWorkingView(buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback));
   const raw = [
     JSON.stringify(buildHypothesisProjection(context.workspace), null, 2),
     JSON.stringify(buildEvidenceProjection(context.workspace), null, 2),
@@ -121,6 +128,50 @@ function computeContextMetrics(context: RuntimeContext, ledger: ToolCallLedger):
   const rawContextTokenEstimate = estimateTokens(raw);
   const compressionRatio = workingViewTokenEstimate === 0 ? 0 : rawContextTokenEstimate / workingViewTokenEstimate;
   return { workingViewTokenEstimate, rawContextTokenEstimate, compressionRatio };
+}
+
+/** H4 Prompt Telemetry：估算每一步 prompt 各组成部分 token（仅观测，不设阈值）。 */
+function computePromptComponents(context: RuntimeContext, ledger: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback): PromptComponents {
+  const basePromptTokens = estimateTokens(`${context.input}\n${ACTION_PRINCIPLE}\nActive scopes: ${context.knowledgeScopes.join(', ')}`);
+  const strategyTokens = estimateTokens(JSON.stringify(context.strategy));
+  const decisionStateTokens = estimateTokens(JSON.stringify(buildDecisionState(context.workspace, context.strategy)));
+  const workingViewTokens = estimateTokens(renderClinicalWorkingView(buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback)));
+  const skillTokens = estimateTokens(renderActiveSkills(context.skills));
+  const toolSchemaTokens = estimateTokens(context.tools.map((t) => `${t.id}:${t.description}`).join('\n'));
+  const recentMessageTokens = estimateTokens(buildSearchHistory(ledger));
+  return {
+    basePromptTokens,
+    strategyTokens,
+    decisionStateTokens,
+    workingViewTokens,
+    skillTokens,
+    toolSchemaTokens,
+    recentMessageTokens,
+    totalPromptTokens:
+      basePromptTokens + strategyTokens + decisionStateTokens + workingViewTokens + skillTokens + toolSchemaTokens + recentMessageTokens,
+    activeToolCount: context.tools.length,
+    availableCapabilityCount: context.capabilities.length,
+  };
+}
+
+/** H5 Decision Impact：基于 Workspace state delta 判定（非模型声明）。 */
+export function computeDecisionImpact(delta: WorkspaceEvent[], errored: boolean): DecisionImpact {
+  if (errored) return 'unresolved';
+  const types = new Set(delta.map((e) => e.type));
+  if (
+    types.has('candidate.presented') ||
+    types.has('candidate.focused') ||
+    types.has('candidate.selected') ||
+    types.has('hypothesis.presented') ||
+    types.has('hypothesis.selected') ||
+    types.has('hypothesis.rejected')
+  ) {
+    return 'changed';
+  }
+  if (types.has('evidence.added') || types.has('hypothesis.supported')) {
+    return 'reinforced';
+  }
+  return 'none';
 }
 
 function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'): string {
@@ -200,6 +251,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     const bindings = this.options.toolBindings ?? DEFAULT_AI_SDK_TOOL_BINDINGS;
     const mode = this.options.mode ?? 'harness';
     const ledger = new ToolCallLedger();
+    resetFormulaHydrationStats(context.runId);
     const resourceSteps = this.options.maxSteps ?? 16;
     let proposal: AgentResult | undefined;
     let usage: PrimaryAgentOutput['usage'];
@@ -212,24 +264,55 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     let terminationReason: TerminationReason = 'agent_submitted';
     let proposalSubmitted = false;
     let forcedFinalization = false;
+    let actionCounter = 0;
+    let currentStep = 0;
+    const tracker = new RetrievalDisciplineTracker();
+    const metrics: RunExecutionMetrics = {
+      totalToolCalls: 0, decisionChangingToolCalls: 0, reinforcingToolCalls: 0, nonDecisionChangingToolCalls: 0, unresolvedToolCalls: 0,
+      redundantSearchCount: 0, deduplicatedCallCount: 0, cacheHitCount: 0, parallelGroupCount: 0, parallelToolCallCount: 0,
+      knowledgeSearchCount: 0, getSourceCount: 0, formulaSearchCount: 0, formulaValidationCalls: 0,
+      toolLatencyMsTotal: 0, resultTokensProduced: 0,
+      uniqueCandidatesDiscovered: 0, uniqueCandidatesPromoted: 0, uniqueCandidatesHydrated: 0, uniqueCandidatesValidated: 0,
+      formulaHydrationCalls: 0, formulaHydrationCacheHitCount: 0, formulaCandidateVisibleTokens: 0, formulaHydratedVisibleTokens: 0,
+      retrievalsBeforeFirstViableCandidate: 0, retrievalsAfterFirstViableCandidate: 0,
+      nonDecisionChangingRetrievalsBeforeViable: 0, nonDecisionChangingRetrievalsAfterViable: 0,
+      getSourceReuseCount: 0, formulaSearchReuseCount: 0, evidenceReuseCount: 0,
+    };
 
     const emit = (stage: LifecycleStage) => onEvent?.({ type: 'lifecycle', stage });
 
     const agent = new ToolLoopAgent({
       model: llmModel,
       tools: buildTools(context, bindings, ledger),
-      instructions: dynamicInstructions(this.options.instructions, context, ledger),
-      prepareStep: async ({ initialMessages, steps }) => ({
-        activeTools: activeToolIds(context, bindings, mode),
-        instructions: dynamicInstructions(this.options.instructions, context, ledger),
-        messages: compactAgentMessages(initialMessages, steps),
-      }),
+      instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
+      prepareStep: async ({ initialMessages, steps }) => {
+        currentStep = steps.length + 1;
+        return {
+          activeTools: activeToolIds(context, bindings, mode),
+          instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
+          messages: compactAgentMessages(initialMessages, steps),
+        };
+      },
       stopWhen: mode === 'harness'
         ? [hasToolCall(toApiToolName('proposal.submit')), isStepCount(resourceSteps)]
         : [isStepCount(resourceSteps)],
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const internalName = fromApiToolName(toolCall.toolName);
         const reused = ledger.isReused(internalName, toolCall.input);
+        const actionId = `A_${String(++actionCounter).padStart(4, '0')}`;
+        const nowMs = Date.now();
+
+        // H8：复用判定需要「本次调用前」的 workspace 身份快照。
+        const candidateIdsBefore = new Set(context.workspace.candidates.map((c) => c.id));
+        const evidenceIdsBefore = new Set<string>();
+        for (const e of context.workspace.evidenceState.evidenceItems) {
+          evidenceIdsBefore.add(e.id);
+          evidenceIdsBefore.add(e.sourceRef);
+        }
+        for (const r of context.workspace.evidenceRefs) {
+          evidenceIdsBefore.add(r.id);
+          if (r.sourceId) evidenceIdsBefore.add(r.sourceId);
+        }
 
         let rawOutput: unknown;
         let error: unknown;
@@ -244,19 +327,70 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
 
         if (internalName === 'proposal.submit' && toolOutput.type === 'tool-result') {
           submittedProposal = toolCall.input;
+          tracker.recordSubmit(currentStep, nowMs);
         }
+
+        // H5：计算 workspace state delta 与 decision impact，生成 ActionReceipt。
+        const all = context.workspaceStore.trace();
+        const delta = reused ? [] : all.slice(workspaceEventCursor);
+        const decisionImpact = computeDecisionImpact(delta, error !== undefined);
+        const newEvidenceCount = delta.filter((e) => e.type === 'evidence.added').length;
+        const status = error !== undefined ? 'error' : reused ? 'deduplicated' : 'success';
+        const resultTokenEstimate = rawOutput === undefined ? 0 : estimateTokens(JSON.stringify(rawOutput));
+
+        tracker.recordToolExecution({
+          toolName: internalName,
+          reused,
+          decisionImpact,
+          rawOutput,
+          candidateIdsBefore,
+          evidenceIdsBefore,
+        });
+        tracker.recordViableCandidateIfAbsent(context.workspace, currentStep, nowMs);
+
+        const receipt: ActionReceipt = {
+          executionProtocolVersion,
+          actionId,
+          runId: context.runId,
+          toolName: internalName,
+          status,
+          sourceRefs: [],
+          evidenceRefs: delta.filter((e) => e.type === 'evidence.added').map((e) => typeof e.payload.id === 'string' ? e.payload.id : '').filter(Boolean),
+          stateDeltaRefs: delta.map((e) => `${e.type}:${typeof e.payload.id === 'string' ? e.payload.id : ''}`),
+          newEvidenceCount,
+          reusedEvidenceCount: reused ? 1 : 0,
+          stateDeltaCount: delta.length,
+          decisionImpact,
+          latencyMs: toolExecutionMs ?? 0,
+          resultTokenEstimate,
+          errorCode: error !== undefined ? 'TOOL_ERROR' : undefined,
+        };
+        addActionReceipt(context.runId, receipt);
+
+        // 累计运行指标。
+        metrics.totalToolCalls += 1;
+        metrics.toolLatencyMsTotal += toolExecutionMs ?? 0;
+        metrics.resultTokensProduced += resultTokenEstimate;
+        if (decisionImpact === 'changed') metrics.decisionChangingToolCalls += 1;
+        else if (decisionImpact === 'reinforced') metrics.reinforcingToolCalls += 1;
+        else if (decisionImpact === 'none') metrics.nonDecisionChangingToolCalls += 1;
+        else metrics.unresolvedToolCalls += 1;
+        if (reused) { metrics.deduplicatedCallCount += 1; metrics.cacheHitCount += 1; }
+        if ((internalName === 'knowledge.search' || internalName === 'formula.search_normative') && decisionImpact === 'none' && newEvidenceCount === 0) {
+          metrics.redundantSearchCount += 1;
+        }
+        if (internalName === 'knowledge.search') metrics.knowledgeSearchCount += 1;
+        else if (internalName === 'knowledge.get_source') metrics.getSourceCount += 1;
+        else if (internalName === 'formula.search_normative') metrics.formulaSearchCount += 1;
+        else if (internalName === 'formula.validate') metrics.formulaValidationCalls += 1;
 
         const toolCallTrace = { toolName: internalName, input: toolCall.input, output: rawOutput, error, ms: toolExecutionMs, reused };
         addToolCall(context.runId, toolCallTrace);
         onEvent?.({ type: 'tool-call', toolCall: toolCallTrace });
 
-        if (!reused) {
-          const all = context.workspaceStore.trace();
-          if (all.length > workspaceEventCursor) {
-            const delta = all.slice(workspaceEventCursor);
-            workspaceEventCursor = all.length;
-            onEvent?.({ type: 'workspace', events: delta });
-          }
+        if (!reused && delta.length > 0) {
+          workspaceEventCursor = all.length;
+          onEvent?.({ type: 'workspace', events: delta });
         }
       },
     });
@@ -317,9 +451,21 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       usage,
       finalStepHadToolCalls,
       toolCallLedger: ledger.entries(),
+      promptComponents: computePromptComponents(context, ledger, tracker.feedback()),
     };
 
-    const contextMetrics = computeContextMetrics(context, ledger);
+    const contextMetrics = computeContextMetrics(context, ledger, tracker.feedback());
+    const hydrationStats = getFormulaHydrationStats(context.runId);
+    const retrievalMetrics = tracker.metrics();
+    metrics.uniqueCandidatesDiscovered = context.workspace.candidates.length;
+    metrics.uniqueCandidatesPromoted = context.workspace.deliberationState.frontier.length;
+    metrics.uniqueCandidatesValidated = hydrationStats.uniqueCandidatesValidated;
+    metrics.uniqueCandidatesHydrated = hydrationStats.uniqueCandidatesHydrated;
+    metrics.formulaHydrationCalls = hydrationStats.formulaHydrationCalls;
+    metrics.formulaHydrationCacheHitCount = hydrationStats.formulaHydrationCacheHitCount;
+    metrics.formulaValidationCalls = hydrationStats.formulaValidationCalls;
+    Object.assign(metrics, retrievalMetrics);
+    setRunMetrics(context.runId, metrics);
 
     return { proposal, usage, agentLoop, contextMetrics };
   }

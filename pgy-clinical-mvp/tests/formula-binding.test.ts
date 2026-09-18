@@ -5,13 +5,17 @@ import type { KnowledgeDoc } from '../src/knowledge/types.js';
 
 const docs: KnowledgeDoc[] = [
   {
-    id: 'P1:A', tier: 'P1', kind: 'normative', source: 'A', sourceFile: 'a.json',
+    id: 'P1:A', sourceId: 'P1_GYN_MANUAL', sourceTier: 'P1', knowledgeRole: 'NORMATIVE_TREATMENT',
+    prescriptionAuthority: true, releaseVersion: 'test', kind: 'normative',
+    source: 'A', sourceFile: 'a.json',
     disease: 'd', syndrome: 's', treatment: 't', scope: 'general', title: 'A', text: 'A',
     formulas: [{ id: 'F:A', name: '方A', composition: '药甲10g，药乙6g', sourceTier: 'P1', knowledgeRole: 'normative' }],
     raw: {},
   },
   {
-    id: 'P1:B', tier: 'P1', kind: 'normative', source: 'B', sourceFile: 'b.json',
+    id: 'P1:B', sourceId: 'P1_GYN_MANUAL', sourceTier: 'P1', knowledgeRole: 'NORMATIVE_TREATMENT',
+    prescriptionAuthority: true, releaseVersion: 'test', kind: 'normative',
+    source: 'B', sourceFile: 'b.json',
     disease: 'd', syndrome: 's', treatment: 't', scope: 'general', title: 'B', text: 'B',
     formulas: [{ id: 'F:B', name: '方B', composition: '药丙10g，药丁6g', sourceTier: 'P1', knowledgeRole: 'normative' }],
     raw: {},

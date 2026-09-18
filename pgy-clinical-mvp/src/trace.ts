@@ -3,8 +3,23 @@ import type { CandidateAssessment, CandidateComparison, DeliberationCoverage, Hy
 import type { RetrievalDiagnostics } from './knowledge/diagnostics.js';
 import type { AgentLoopTrace, ContextMetrics } from './contracts/agent-loop.js';
 import type { ClinicalStrategy } from './contracts/clinical-strategy.js';
+import type { ActionReceipt, RunExecutionMetrics } from './contracts/execution.js';
 
 export interface ToolCallTrace { toolName: string; input: unknown; output: unknown; error?: unknown; ms: number; reused?: boolean; }
+
+/**
+ * H8 Forensic：formula identity chain 诊断（debug-only，只进 Trace，不进 Agent prompt）。
+ * 用于定位 candidate → hydrate → validate → proposal → Authority 的身份连续性。
+ */
+export interface FormulaIdentityTrace {
+  candidateRef?: string;
+  rawFormula?: { name?: string; sourceId: string; formulaId: string; composition?: string[] };
+  hydratedFormula?: { sourceId: string; formulaId: string; name?: string; composition?: string[] };
+  canonicalFormula?: { sourceId: string; formulaId: string; name: string; composition: string };
+  authorityBlockCode?: string;
+  authorityReasons?: string[];
+}
+
 export interface RunTrace {
   runId: string; input: string; startedAt: string; finishedAt?: string; totalMs?: number;
   toolCalls: ToolCallTrace[]; finalResult?: unknown; error?: string;
@@ -18,6 +33,9 @@ export interface RunTrace {
   candidateAssessments: CandidateAssessment[];
   deliberationCoverage: DeliberationCoverage[];
   retrievalDiagnostics: RetrievalDiagnostics[];
+  actionReceipts: ActionReceipt[];
+  runMetrics?: RunExecutionMetrics;
+  formulaIdentityTrace?: FormulaIdentityTrace;
   activeSkills?: string[];
   skillVersions?: SkillVersion[];
   skillPromptSections?: string[];
@@ -44,6 +62,7 @@ export function newTrace(input: string): RunTrace {
     candidateAssessments: [],
     deliberationCoverage: [],
     retrievalDiagnostics: [],
+    actionReceipts: [],
   };
   traces.set(trace.runId, trace);
   return trace;
@@ -52,6 +71,9 @@ export function newTrace(input: string): RunTrace {
 export function getTrace(runId: string): RunTrace | null { return traces.get(runId) ?? null; }
 export function addToolCall(runId: string, t: ToolCallTrace): void { traces.get(runId)?.toolCalls.push(t); }
 export function addRetrievalDiagnostics(runId: string, d: RetrievalDiagnostics): void { traces.get(runId)?.retrievalDiagnostics.push(d); }
+export function addActionReceipt(runId: string, r: ActionReceipt): void { traces.get(runId)?.actionReceipts.push(r); }
+export function setRunMetrics(runId: string, m: RunExecutionMetrics): void { const t = traces.get(runId); if (t) t.runMetrics = m; }
+export function setFormulaIdentityTrace(runId: string, ft: FormulaIdentityTrace): void { const t = traces.get(runId); if (t) t.formulaIdentityTrace = ft; }
 
 export function finishTrace(runId: string, args: {
   finalResult?: unknown; error?: string; usage?: RunTrace['usage']; snapshot?: RuntimeSnapshot;

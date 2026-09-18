@@ -17,7 +17,7 @@ export function validateNormativeFormulaInDocs(
   input: { sourceId: string; formulaId: string; composition: string },
 ): FormulaBindingValidationResult {
   const target = normalize(input.composition);
-  const doc = docs.find((d) => d.id === input.sourceId && d.tier === 'P1');
+  const doc = docs.find((d) => d.id === input.sourceId && d.sourceTier === 'P1');
   if (!doc || !target) return { valid: false };
   const formula = doc.formulas.find(
     (f) => f.id === input.formulaId && normalize(f.composition) === target,

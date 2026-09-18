@@ -147,8 +147,46 @@ export interface CandidateReference {
   originatingHypothesisRefs?: string[];
 }
 
+/** 带稳定身份（CF_xxx）的病例事实。 */
+export interface CaseFact {
+  id: string;
+  kind: string;
+  value: string;
+  source?: string;
+}
+
+/**
+ * H7 Formula Candidate Card —— model-visible discovery representation。
+ * candidateId 是 canonical formula 的 pointer，禁止通过 name/文本重建 identity。
+ * 不默认携带完整 composition；只有 Frontier / validate / submit 才 canonical hydrate。
+ */
+export interface FormulaCandidateCard {
+  candidateId: string;
+  formulaId: string;
+  formulaName: string;
+  sourceId: string;
+  sourceTier: string;
+  diseaseVariant?: string;
+  syndromeVariant?: string;
+  treatmentMethod?: string;
+  prescriptionAuthority: boolean;
+  detailAvailable: boolean;
+}
+
+/** 当前推理焦点的投影：从 Strategy / Hypothesis / Deliberation / Evidence 派生，不新增 workflow。 */
+export interface DecisionState {
+  question: string;
+  leadingExplanations: string[];
+  decisionChangingUnknowns: string[];
+  currentEvidenceRefs: string[];
+  /** 当前 Deliberation Frontier（进入正式比较的 candidateRefs）。 */
+  currentFrontier: string[];
+}
+
 export interface ClinicalWorkspace {
   facts: unknown[];
+  /** 带稳定 CF_xxx 身份的病例事实（EvidenceRef 可引用 CaseFactRef）。 */
+  caseFacts: CaseFact[];
   hypotheses: unknown[];
   evidenceRefs: EvidenceReference[];
   candidates: CandidateReference[];

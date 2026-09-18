@@ -13,7 +13,7 @@ test('clinical-reasoning-governor 能被真实 SkillLoader 发现', async () => 
   assert.ok(skills[0].instruction.includes('Stop Condition'));
 });
 
-test('governor 是 baseline skill，无需激活 capability 即注入', async () => {
+test('tcm-clinical-cognition 是 baseline skill，无需激活 capability 即注入', async () => {
   const runtime = await buildTestRuntime({
     understand: () => baseUnderstanding('clinical'),
     propose: (context) => ({
@@ -24,7 +24,7 @@ test('governor 是 baseline skill，无需激活 capability 即注入', async ()
 
   const { authority } = await runtime.run('常规病例');
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
-  assert.ok(authority.proposal.missing_information.includes('clinical-reasoning-governor'));
+  assert.ok(authority.proposal.missing_information.includes('tcm-clinical-cognition'));
 });
 
 test('governor 方法被渲染进 Agent 上下文', async () => {

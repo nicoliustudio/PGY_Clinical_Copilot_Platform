@@ -1,53 +1,99 @@
-export type Tier = 'P1' | 'P2';
-export type Kind = 'normative' | 'case' | 'gaofang';
+/**
+ * 知识库类型 —— Runtime Knowledge Role / Source Tier / Index 结构。
+ *
+ * 关键分离：
+ * - `sourceTier`（P1/P2/AUX）：粗粒度权威层级，决定检索 precedence。
+ * - `knowledgeRole`（DIAGNOSTIC_* / NORMATIVE_* / CLINICAL_*）：知识功能角色。
+ * - `prescriptionAuthority`：处方权。Role 不决定处方权，必须单独判定（见 manifest.ts）。
+ */
 
-/** 来源流派：沈仲理 / 国标（规范） / 经典 / 通用中医。 */
+/** 粗粒度来源权威层级（用于 precedence / 报告）。 */
+export type SourceTier = 'P1' | 'P2' | 'AUX';
+
+/** 运行时知识角色。 */
+export type KnowledgeRole =
+  | 'DIAGNOSTIC_DIFFERENTIAL'
+  | 'DIAGNOSTIC_STANDARD'
+  | 'NORMATIVE_TREATMENT'
+  | 'CLINICAL_CASE';
+
+/** 文档功能形态（仅作 provenance，不参与临床路由）。 */
+export type Kind = 'normative' | 'case' | 'diagnostic' | 'standard';
+
+/** 来源流派（School-aware Evidence 元数据）。 */
 export type SourceSchool = 'shen_zhongli' | 'national_standard' | 'classical' | 'general_tcm';
 
 export interface NormativeFormula {
   id: string;
   name: string;
   composition: string;
+  /** 公式级 source_tier（源自源数据，provenance 字符串，非 doc.sourceTier）。 */
   sourceTier: string;
+  /** 公式级 knowledge_role（源自源数据，provenance 字符串）。 */
   knowledgeRole: string;
 }
 
-/** 一个可检索的知识单元（对应一个 chunk） */
+/** 一个可检索的知识单元（对应一个 chunk / 向量）。 */
 export interface KnowledgeDoc {
   id: string;
-  tier: Tier;
-  kind: Kind;
+  text: string;
+  /** 稳定来源身份（catalog layer id，如 P1_GYN_MANUAL / S1_SYMPTOM_DIFFERENTIAL）。 */
+  sourceId: string;
   source: string;
   sourceFile: string;
-  /** 来源流派（provenance 元数据，用于 School-aware Evidence）。 */
   sourceSchool?: SourceSchool;
+  sourceTier: SourceTier;
+  knowledgeRole: KnowledgeRole;
+  /** 处方权。任何非 NORMATIVE_TREATMENT 角色默认 false（fail-closed）。 */
+  prescriptionAuthority: boolean;
+  specialty?: string;
+  /** 知识 scope（如 general / gaofang），检索时按激活 Capability 过滤。 */
+  scope?: string;
   disease: string;
   syndrome: string;
-  /** 治法（normative 有；case 为空，治法含于 raw） */
   treatment: string;
-  /** 知识 scope（如 general / gaofang），检索时按 Capability 过滤 */
-  scope: string;
   title: string;
-  /** 用于 embedding / rerank 的文本 */
-  text: string;
   formulas: NormativeFormula[];
-  raw: unknown;
+  /** 原资产 identity（不通过文本重新推断）。 */
+  diseaseId?: string;
+  syndromeId?: string;
+  formulaId?: string;
+  releaseVersion: string;
+  kind: Kind;
+  raw?: unknown;
+}
+
+/** 索引 breakdown（build 报告 + 可观测性）。 */
+export interface IndexBreakdown {
+  byRole: Record<KnowledgeRole, number>;
+  bySourceTier: Record<SourceTier, number>;
+  bySourceSchool: Record<string, number>;
+  prescriptionAuthority: { true: number; false: number };
+  /** 未进入 vector index 的资产（blocked / shadow / evaluation-only）。 */
+  blockedAssets: string[];
+  shadowAssets: string[];
 }
 
 export interface KnowledgeIndex {
   version: string;
+  releaseVersion: string;
   builtAt: string;
   docCount: number;
   docs: KnowledgeDoc[];
-  /** 与 docs 严格对齐的向量 */
+  /** 与 docs 严格对齐的向量。 */
   vectors: number[][];
+  breakdown: IndexBreakdown;
 }
 
-/** knowledge.search 返回的结构化条目 */
+/** knowledge.search 返回的结构化条目。 */
 export interface SearchHit {
   sourceId: string;
   title: string;
-  authority: Tier;
+  /** 向后兼容：等价于 sourceTier。 */
+  authority: SourceTier;
+  sourceTier: SourceTier;
+  knowledgeRole: KnowledgeRole;
+  prescriptionAuthority: boolean;
   excerpt: string;
   score: number;
   provenance: {
@@ -59,4 +105,9 @@ export interface SearchHit {
     sourceSchool?: SourceSchool;
   };
   formulas: NormativeFormula[];
+  /** H6 紧凑结果卡片字段（additive，不改变 ranking）。 */
+  shortEvidenceSummary?: string;
+  matchedConcepts?: string[];
+  candidateRefs?: string[];
+  detailAvailable?: boolean;
 }

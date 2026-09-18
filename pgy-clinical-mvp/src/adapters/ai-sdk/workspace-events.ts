@@ -20,6 +20,15 @@ function formulaIds(value: unknown): string[] {
   return value.map((f) => readField(f, 'id')).filter((x): x is string => typeof x === 'string');
 }
 
+/** 稳定 hypothesis 身份：由语义标签派生确定性 H_xxx（跨多次检索保持一致，不与 sourceId/label 混用）。 */
+function stableHypothesisId(label: string): string {
+  let h = 5381;
+  for (let i = 0; i < label.length; i++) {
+    h = ((h << 5) + h + label.charCodeAt(i)) >>> 0;
+  }
+  return `H_${h.toString(16).padStart(6, '0')}`;
+}
+
 function evidenceItemDraft(hit: Record<string, unknown>): WorkspaceEventDraft | null {
   const sourceId = readField(hit, 'sourceId');
   if (typeof sourceId !== 'string') return null;
@@ -73,22 +82,49 @@ export function workspaceEventsForTool(
       .filter((x): x is WorkspaceEventDraft => x !== null);
 
     const hypotheses: WorkspaceEventDraft[] = [];
+    const candidates: WorkspaceEventDraft[] = [];
     for (const hit of output) {
       const sourceId = readField(hit, 'sourceId');
+      const authority = readField(hit, 'authority');
       const syndrome = readPath(hit, 'provenance', 'syndrome');
       if (typeof syndrome === 'string' && syndrome.trim()) {
+        const hid = stableHypothesisId(syndrome);
         hypotheses.push({
           type: 'hypothesis.presented',
           payload: {
-            id: syndrome,
+            id: hid,
             label: syndrome,
             supportingEvidenceRefs: typeof sourceId === 'string' ? [sourceId] : [],
           },
         });
       }
+      // 直接 canonical hydrate：knowledge.search 已返回明确 P1 formula candidate 时，
+      // 不要求重复 formula.search_normative。
+      if (authority === 'P1' && typeof sourceId === 'string') {
+        const formulas = readField(hit, 'formulas');
+        if (Array.isArray(formulas)) {
+          for (const f of formulas) {
+            const formulaId = readField(f, 'id');
+            const composition = readField(f, 'composition');
+            if (typeof formulaId === 'string' && typeof composition === 'string' && composition.trim()) {
+              candidates.push({
+                type: 'candidate.presented',
+                payload: {
+                  id: `${sourceId}::${formulaId}`,
+                  formulaId,
+                  sourceId,
+                  composition: [composition],
+                  name: readField(f, 'name'),
+                  originatingHypothesisRefs: typeof syndrome === 'string' && syndrome.trim() ? [stableHypothesisId(syndrome)] : [],
+                },
+              });
+            }
+          }
+        }
+      }
     }
 
-    return [completed, ...added, ...hypotheses];
+    return [completed, ...added, ...hypotheses, ...candidates];
   }
 
   if (toolName === 'knowledge.get_source') {
@@ -102,7 +138,7 @@ export function workspaceEventsForTool(
       payload: {
         id: sourceId,
         sourceRef: sourceId,
-        sourceType: readField(doc, 'tier') ?? 'knowledge',
+        sourceType: readField(doc, 'sourceTier') ?? 'knowledge',
         sourceSchool: readField(doc, 'sourceSchool'),
         title: readField(doc, 'title'),
         summary: typeof summary === 'string' ? summary.slice(0, 400) : undefined,
@@ -126,17 +162,18 @@ export function workspaceEventsForTool(
             id,
             formulaId: readField(candidate, 'formulaId'),
             sourceId: readField(candidate, 'sourceId'),
-            composition: readField(candidate, 'composition'),
-            name: readField(candidate, 'name'),
+            // H7：candidate card 不携带 composition；canonical hydrate 由 Harness 内部完成。
+            // 兼容旧字段名 name / syndrome。
+            name: readField(candidate, 'formulaName') ?? readField(candidate, 'name'),
             originatingHypothesisRefs: readField(candidate, 'originatingHypothesisRefs'),
           },
         });
       }
-      const syndrome = readField(candidate, 'syndrome');
+      const syndrome = readField(candidate, 'syndromeVariant') ?? readField(candidate, 'syndrome');
       if (typeof syndrome === 'string' && syndrome.trim()) {
         hypotheses.push({
           type: 'hypothesis.presented',
-          payload: { id: syndrome, label: syndrome },
+          payload: { id: stableHypothesisId(syndrome), label: syndrome },
         });
       }
     }

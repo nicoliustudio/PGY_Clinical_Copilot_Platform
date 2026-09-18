@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     authorityReached: authority.status,
     formulaAuthority: result.mode === 'clinical' ? result.formula.authority : undefined,
     strategy: trace.clinicalStrategy
-      ? { goal: trace.clinicalStrategy.goal, primaryQuestion: trace.clinicalStrategy.primaryQuestion }
+      ? { goal: trace.clinicalStrategy.goal, decisionQuestion: trace.clinicalStrategy.decisionQuestion }
       : null,
     agentLoop: loop
       ? {

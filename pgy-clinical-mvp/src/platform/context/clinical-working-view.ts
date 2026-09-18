@@ -1,9 +1,12 @@
-import type { ClinicalStrategy, StoppingCriteria } from '../../contracts/clinical-strategy.js';
-import type { ClinicalWorkspace } from '../../contracts/workspace.js';
+import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
+import type { ClinicalWorkspace, DecisionState } from '../../contracts/workspace.js';
+import type { RecentRetrievalFeedback } from '../../contracts/execution.js';
+import { buildDecisionState } from '../workspace/decision-state-projection.js';
 
 /**
  * ClinicalWorkingView —— Agent 每一步默认看到的「目标驱动工作上下文」。
- * 只做结构化压缩与投影，不引入任何医学 relevance 判断。
+ * H4 收缩：只保留当前注意力（Strategy / DecisionState / CaseFrame / leading hypotheses /
+ * focused candidates / decision-changing uncertainty / active assets / recent action receipt）。
  * 完整数据继续保存在 Workspace / Trace，此处只提供 current attention。
  */
 
@@ -13,15 +16,6 @@ export interface WorkingHypothesis {
   status: string;
   supporting: string[];
   contradicting: string[];
-  unknown: string[];
-}
-
-export interface WorkingEvidence {
-  id: string;
-  sourceRef: string;
-  sourceType: string;
-  title?: string;
-  summary?: string;
 }
 
 export interface WorkingCandidate {
@@ -31,6 +25,12 @@ export interface WorkingCandidate {
   sourceId?: string;
 }
 
+export interface WorkingCaseFact {
+  id: string;
+  kind: string;
+  value: string;
+}
+
 export interface RecentAction {
   toolName: string;
   summary: string;
@@ -38,36 +38,35 @@ export interface RecentAction {
 
 export interface ClinicalWorkingView {
   goal: string;
-  primaryQuestion: string;
-  secondaryQuestions: string[];
-  activeQuestions: string[];
-  stoppingCriteria: StoppingCriteria;
-  importantFacts: string[];
-  activeHypotheses: WorkingHypothesis[];
-  discriminatingEvidence: WorkingEvidence[];
+  decisionQuestion: string;
+  criticalEvidenceNeeds: string[];
+  stopWhen: string[];
+  decisionState: DecisionState;
+  caseFrame: WorkingCaseFact[];
+  leadingHypotheses: WorkingHypothesis[];
   focusedCandidates: WorkingCandidate[];
-  openQuestions: string[];
-  uncertainty: string[];
+  decisionChangingUncertainty: string[];
+  activeSkills: string[];
+  activeCapabilities: string[];
   recentUsefulActions: string[];
-}
-
-function factToLine(f: unknown): string {
-  if (typeof f === 'string') return f;
-  if (f && typeof f === 'object') {
-    const o = f as { kind?: string; value?: string };
-    return o.value ? `${o.kind ?? 'fact'}：${o.value}` : (o.kind ?? 'fact');
-  }
-  return String(f);
+  retrievalFeedback?: RecentRetrievalFeedback;
 }
 
 export function buildClinicalWorkingView(
   workspace: ClinicalWorkspace,
   strategy: ClinicalStrategy,
   recentActions: RecentAction[] = [],
+  retrievalFeedback?: RecentRetrievalFeedback,
 ): ClinicalWorkingView {
-  const importantFacts = (workspace.facts ?? []).map(factToLine);
+  const decisionState = buildDecisionState(workspace, strategy);
 
-  const activeHypotheses = (workspace.hypothesisState?.hypotheses ?? [])
+  const caseFrame: WorkingCaseFact[] = (workspace.caseFacts ?? []).map((f) => ({
+    id: f.id,
+    kind: f.kind,
+    value: f.value,
+  }));
+
+  const leadingHypotheses = (workspace.hypothesisState?.hypotheses ?? [])
     .filter((h) => h.status !== 'rejected')
     .map((h) => ({
       id: h.id,
@@ -75,16 +74,7 @@ export function buildClinicalWorkingView(
       status: h.status,
       supporting: h.supportingEvidenceRefs ?? [],
       contradicting: h.contradictingEvidenceRefs ?? [],
-      unknown: h.missingEvidence ?? [],
     }));
-
-  const discriminatingEvidence = (workspace.evidenceState?.evidenceItems ?? []).map((e) => ({
-    id: e.id,
-    sourceRef: e.sourceRef,
-    sourceType: e.sourceType,
-    title: e.title,
-    summary: e.summary,
-  }));
 
   const frontier = workspace.deliberationState?.frontier ?? [];
   const focusedCandidates = frontier
@@ -92,30 +82,22 @@ export function buildClinicalWorkingView(
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
     .map((c) => ({ id: c.id, name: c.name, composition: c.composition, sourceId: c.sourceId }));
 
-  const openQuestions = [
-    ...(strategy.activeQuestions ?? []),
-    ...(strategy.evidenceNeeds ?? []).map((n) => n.question),
-    ...(workspace.informationGaps ?? []),
-  ];
-
-  const uncertainty = [
-    ...(strategy.uncertainty ?? []).map((u) => (u.reason ? `${u.item}（${u.reason}）` : u.item)),
-    ...(workspace.uncertainties ?? []),
-  ];
+  const decisionChangingUncertainty = decisionState.decisionChangingUnknowns;
 
   return {
     goal: strategy.goal ?? '',
-    primaryQuestion: strategy.primaryQuestion ?? '',
-    secondaryQuestions: strategy.secondaryQuestions ?? [],
-    activeQuestions: strategy.activeQuestions ?? [],
-    stoppingCriteria: strategy.stoppingCriteria ?? { readyWhen: [], stopSignals: [] },
-    importantFacts,
-    activeHypotheses,
-    discriminatingEvidence,
+    decisionQuestion: strategy.decisionQuestion ?? '',
+    criticalEvidenceNeeds: strategy.criticalEvidenceNeeds ?? [],
+    stopWhen: strategy.stopWhen ?? [],
+    decisionState,
+    caseFrame,
+    leadingHypotheses,
     focusedCandidates,
-    openQuestions,
-    uncertainty,
+    decisionChangingUncertainty,
+    activeSkills: workspace.activeSkills ?? [],
+    activeCapabilities: workspace.activeCapabilities ?? [],
     recentUsefulActions: recentActions.map((a) => `${a.toolName}: ${a.summary}`),
+    retrievalFeedback,
   };
 }
 
@@ -123,20 +105,33 @@ function renderHypotheses(hs: WorkingHypothesis[]): string {
   if (!hs.length) return '（无）';
   return hs
     .map((h) => {
-      const lines = [`- ${h.label} [${h.status}]`];
+      const lines = [`- ${h.label} [${h.status}] (${h.id})`];
       if (h.supporting.length) lines.push(`    支持: ${h.supporting.join('、')}`);
       if (h.contradicting.length) lines.push(`    反证: ${h.contradicting.join('、')}`);
-      if (h.unknown.length) lines.push(`    未知: ${h.unknown.join('、')}`);
       return lines.join('\n');
     })
     .join('\n');
 }
 
-function renderEvidence(es: WorkingEvidence[]): string {
-  if (!es.length) return '（无）';
-  return es
-    .map((e) => `- [${e.sourceRef}] ${e.title ?? ''}${e.summary ? ` — ${e.summary.slice(0, 400)}` : ''}`)
-    .join('\n');
+function renderCaseFrame(facts: WorkingCaseFact[]): string {
+  if (!facts.length) return '（无）';
+  return facts.map((f) => `- [${f.id}] ${f.kind}：${f.value}`).join('\n');
+}
+
+function renderRetrievalFeedback(fb?: RecentRetrievalFeedback): string {
+  if (!fb) return '（无）';
+  const lines = [
+    `lastImpact: ${fb.lastImpact ?? '—'}`,
+    `recentNonDecisionChangingRetrievals: ${fb.recentNonDecisionChangingRetrievals}`,
+    `recentEvidenceReuseCount: ${fb.recentEvidenceReuseCount}`,
+  ];
+  if (fb.firstViableCandidateRef) {
+    lines.push(`firstViableCandidateRef: ${fb.firstViableCandidateRef}`);
+    lines.push(
+      'A defensible canonical candidate already exists. Retrieve more only if it can materially change disease / syndrome / treatment / formula / safety; otherwise proceed to validation or submission.',
+    );
+  }
+  return lines.join('\n');
 }
 
 /** 将 WorkingView 渲染为 Agent 上下文片段。 */
@@ -146,15 +141,22 @@ export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
 
   const sections = [
     block('Goal', view.goal || '（未定义）'),
-    block('Primary Question', view.primaryQuestion || '（未定义）'),
-  ];
-  if (view.secondaryQuestions.length) {
-    sections.push(block('Secondary Questions', list(view.secondaryQuestions)));
-  }
-  sections.push(
-    block('Important Facts', list(view.importantFacts)),
-    block('Active Hypotheses', renderHypotheses(view.activeHypotheses)),
-    block('Discriminating Evidence', renderEvidence(view.discriminatingEvidence)),
+    block('Decision Question', view.decisionQuestion || '（未定义）'),
+    block('Critical Evidence Needs', list(view.criticalEvidenceNeeds)),
+    block('Stop When', list(view.stopWhen)),
+    block(
+      'Decision State',
+      [
+        `question: ${view.decisionState.question || '—'}`,
+        `leading: ${view.decisionState.leadingExplanations.join(' | ') || '—'}`,
+        `decisionChangingUnknowns: ${view.decisionState.decisionChangingUnknowns.join('; ') || '—'}`,
+        `availableEvidenceRefs: ${view.decisionState.currentEvidenceRefs.join(', ') || '—'}`,
+        `frontier: ${view.decisionState.currentFrontier.join(', ') || '—'}`,
+      ].join('\n'),
+    ),
+    block('Retrieval Feedback', renderRetrievalFeedback(view.retrievalFeedback)),
+    block('Case Frame', renderCaseFrame(view.caseFrame)),
+    block('Leading Hypotheses', renderHypotheses(view.leadingHypotheses)),
     block(
       'Focused Candidates',
       view.focusedCandidates.length
@@ -163,14 +165,10 @@ export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
             .join('\n')
         : '（无）',
     ),
-    block('Open Questions', list(view.openQuestions)),
-    block('Uncertainty', list(view.uncertainty)),
+    block('Decision-Changing Uncertainty', list(view.decisionChangingUncertainty)),
+    block('Active Skills / Capabilities', `skills: ${view.activeSkills.join(', ') || '—'}\ncapabilities: ${view.activeCapabilities.join(', ') || '—'}`),
     block('Recent Useful Actions', list(view.recentUsefulActions)),
-    block(
-      'Stopping Criteria',
-      `readyWhen: ${view.stoppingCriteria.readyWhen.join('; ') || '—'}\nstopSignals: ${view.stoppingCriteria.stopSignals.join('; ') || '—'}`,
-    ),
-  );
+  ];
 
   return sections.join('\n\n');
 }
