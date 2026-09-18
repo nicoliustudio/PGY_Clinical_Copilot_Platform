@@ -57,6 +57,7 @@ export async function searchWithDiagnostics(
         disease: doc.disease,
         syndrome: doc.syndrome,
         treatment: doc.treatment,
+        sourceSchool: doc.sourceSchool,
       },
       formulas: doc.formulas,
     };

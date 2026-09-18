@@ -1,0 +1,5 @@
+{
+  "id": "clinical-reasoning-governor",
+  "version": "0.1.0",
+  "description": "Controls Agent reasoning behavior: anti-anchoring, unknown-vs-negative evidence discipline, evidence priority, and stop condition."
+}

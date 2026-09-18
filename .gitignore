@@ -44,3 +44,10 @@ desktop.ini
 *.zip
 pgy-clinical-mvp.bak/
 
+# 运行分析 / 架构提案 / 本地记录（不纳入代码仓库）
+H3_ARCHITECTURE.md
+病例运行分析-*.md
+UI开发建议.md
+pgy-clinical-mvp-PROBLEM-REPORT.md
+*病例运行分析*-raw.json
+

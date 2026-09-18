@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ClinicalUnderstandingPort, RuntimePreparationPort, SafetyPort } from '../../contracts/ports.js';
+import type { ClinicalPlannerPort, ClinicalUnderstandingPort, RuntimePreparationPort, SafetyPort } from '../../contracts/ports.js';
 import type { ModelProfile, RuntimeContext } from '../../contracts/runtime.js';
 import type { ResolvedSkill } from '../../contracts/skill.js';
 import { CapabilityRegistry } from '../registry/capability-registry.js';
@@ -11,6 +11,7 @@ import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../workspace/cl
 export interface RuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
   safety: SafetyPort;
+  planner: ClinicalPlannerPort;
   capabilities: CapabilityRegistry;
   skills: SkillRegistry;
   tools: ToolRegistry;
@@ -30,6 +31,15 @@ export class RuntimePreparer implements RuntimePreparationPort {
   async prepare(input: string, runId: string = randomUUID()): Promise<RuntimeContext> {
     const understanding = await this.deps.understanding.understand(input);
     const safety = await this.deps.safety.evaluate(understanding);
+    const strategy = await this.deps.planner.plan({
+      input,
+      understanding,
+      safety,
+      availableCapabilities: this.deps.capabilities.enabled().map((c) => ({
+        id: c.id,
+        semanticDescription: c.semanticDescription,
+      })),
+    });
     const skills: ResolvedSkill[] = this.deps.baselineSkillIds.map((id) => ({
       ...this.deps.skills.require(id),
       activatedBy: ['harness.baseline'],
@@ -48,6 +58,7 @@ export class RuntimePreparer implements RuntimePreparationPort {
       runId,
       input,
       understanding,
+      strategy,
       capabilities: [],
       skills,
       knowledgeScopes: [...new Set(this.deps.baselineKnowledgeScopes)],

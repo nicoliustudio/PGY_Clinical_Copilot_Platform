@@ -3,6 +3,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { embed } from '../model/adapter.js';
 import { knowledgeManifest } from './manifest.js';
+import { classifySourceSchool } from './source-school.js';
 import type { KnowledgeDoc, KnowledgeIndex, NormativeFormula } from './types.js';
 
 function loadJson<T>(p: string): T {
@@ -67,6 +68,7 @@ function buildDocs(): KnowledgeDoc[] {
         kind: 'normative',
         source: n.source ?? '',
         sourceFile: n.source_file ?? '',
+        sourceSchool: classifySourceSchool(n.source ?? ''),
         disease: n.disease ?? '',
         syndrome: n.syndrome ?? '',
         treatment: n.treatment ?? '',
@@ -96,6 +98,7 @@ function buildDocs(): KnowledgeDoc[] {
         kind: 'case',
         source: c.source ?? '',
         sourceFile: c.source_file ?? '',
+        sourceSchool: classifySourceSchool(c.source ?? ''),
         disease: c.disease ?? '',
         syndrome: '',
         treatment: '',

@@ -2,6 +2,8 @@ import type { CapabilityDescriptor } from '../src/contracts/capability.js';
 import type { AgentResult } from '../src/contracts/result.js';
 import type { ClinicalUnderstanding } from '../src/contracts/understanding.js';
 import type { RuntimeContext } from '../src/contracts/runtime.js';
+import type { ClinicalStrategy } from '../src/contracts/clinical-strategy.js';
+import { emptyClinicalStrategy } from '../src/contracts/clinical-strategy.js';
 import { ClinicalRuntime } from '../src/platform/agent/clinical-runtime.js';
 import { FormulaAuthorityStage } from '../src/platform/authority/formula-stage.js';
 import { AuthorityPipeline } from '../src/platform/authority/pipeline.js';
@@ -13,6 +15,7 @@ import { ToolRegistry } from '../src/platform/registry/tool-registry.js';
 import { RuntimePreparer } from '../src/platform/runtime/runtime-preparer.js';
 import {
   BASELINE_KNOWLEDGE_SCOPES,
+  BASELINE_SKILL_IDS,
   BASELINE_TOOL_IDS,
   PLATFORM_TOOLS,
 } from '../src/composition/platform-assets.js';
@@ -42,6 +45,8 @@ export interface TestRuntimeOptions {
   /** 返回 false 表示组成被篡改（用于验证 Formula Authority 关卡不可绕过） */
   validateFormula?(sourceId: string): boolean;
   extraCapabilities?: CapabilityDescriptor[];
+  /** 可选 Planner 替身，默认返回空策略。 */
+  plan?(): ClinicalStrategy;
 }
 
 /**
@@ -58,19 +63,20 @@ export async function buildTestRuntime(
 
   const capabilities = new CapabilityRegistry(manifests);
   const skills = new SkillRegistry(
-    await loadSkills(manifests.flatMap((m) => m.skillIds)),
+    await loadSkills([...manifests.flatMap((m) => m.skillIds), ...BASELINE_SKILL_IDS]),
   );
   const tools = new ToolRegistry(PLATFORM_TOOLS);
 
   const preparer = new RuntimePreparer({
     understanding: { understand: async (input) => options.understand(input) },
     safety: new RiskHypothesisSafetyPort(),
+    planner: { plan: async () => (options.plan ? options.plan() : emptyClinicalStrategy()) },
     capabilities,
     skills,
     tools,
     model: { id: 'test-model' },
     baselineToolIds: BASELINE_TOOL_IDS,
-    baselineSkillIds: ['general-clinical-reasoning'],
+    baselineSkillIds: BASELINE_SKILL_IDS,
     baselineKnowledgeScopes: BASELINE_KNOWLEDGE_SCOPES,
   });
 

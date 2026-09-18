@@ -1,6 +1,9 @@
 export type Tier = 'P1' | 'P2';
 export type Kind = 'normative' | 'case' | 'gaofang';
 
+/** 来源流派：沈仲理 / 国标（规范） / 经典 / 通用中医。 */
+export type SourceSchool = 'shen_zhongli' | 'national_standard' | 'classical' | 'general_tcm';
+
 export interface NormativeFormula {
   id: string;
   name: string;
@@ -16,6 +19,8 @@ export interface KnowledgeDoc {
   kind: Kind;
   source: string;
   sourceFile: string;
+  /** 来源流派（provenance 元数据，用于 School-aware Evidence）。 */
+  sourceSchool?: SourceSchool;
   disease: string;
   syndrome: string;
   /** 治法（normative 有；case 为空，治法含于 raw） */
@@ -51,6 +56,7 @@ export interface SearchHit {
     disease: string;
     syndrome: string;
     treatment: string;
+    sourceSchool?: SourceSchool;
   };
   formulas: NormativeFormula[];
 }

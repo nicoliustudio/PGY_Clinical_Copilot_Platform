@@ -1,6 +1,7 @@
 import { understand } from '../clinical/understanding.js';
-import { aiSdkModelPort } from '../adapters/ai-sdk/model-adapter.js';
+import { aiSdkModelPort, aiSdkFastModelPort } from '../adapters/ai-sdk/model-adapter.js';
 import { AiSdkPrimaryAgent } from '../adapters/ai-sdk/agent-runtime.js';
+import { StructuredClinicalPlanner } from '../platform/planning/clinical-planner.js';
 import { DeterministicFormulaAuthority } from '../authority/formula-authority.js';
 import { config } from '../config.js';
 import type { AuthorityResult } from '../contracts/authority.js';
@@ -22,6 +23,7 @@ import { discoverCapabilityManifests, loadSkills } from './load-assets.js';
 import { loadPromptProfile } from './load-prompt.js';
 import {
   BASELINE_KNOWLEDGE_SCOPES,
+  BASELINE_SKILL_IDS,
   BASELINE_TOOL_IDS,
   CLASSIC_BASELINE_TOOL_IDS,
   PLATFORM_TOOLS,
@@ -35,7 +37,7 @@ export async function createClinicalRuntime(
 ): Promise<ClinicalRuntime> {
   const manifests = await discoverCapabilityManifests();
   const capabilities = new CapabilityRegistry(manifests);
-  const skills = new SkillRegistry(await loadSkills(manifests.flatMap((m) => m.skillIds)));
+  const skills = new SkillRegistry(await loadSkills([...manifests.flatMap((m) => m.skillIds), ...BASELINE_SKILL_IDS]));
   const tools = new ToolRegistry(PLATFORM_TOOLS);
   const safety = new RiskHypothesisSafetyPort();
   const understanding = { understand: (input: string) => understand(input, aiSdkModelPort) };
@@ -45,12 +47,13 @@ export async function createClinicalRuntime(
     ? new RuntimePreparer({
         understanding,
         safety,
+        planner: new StructuredClinicalPlanner(aiSdkFastModelPort),
         capabilities,
         skills,
         tools,
         model,
         baselineToolIds: BASELINE_TOOL_IDS,
-        baselineSkillIds: ['general-clinical-reasoning'],
+        baselineSkillIds: BASELINE_SKILL_IDS,
         baselineKnowledgeScopes: BASELINE_KNOWLEDGE_SCOPES,
       })
     : new ClassicRuntimePreparer({
@@ -102,10 +105,10 @@ export async function runCase(
   const runtime = await getClinicalRuntime(mode);
   const trace = newTrace(input);
   try {
-    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop } = await runtime.run(input, trace.runId, options.onEvent);
+    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, strategy, contextMetrics } = await runtime.run(input, trace.runId, options.onEvent);
     const result = authority.proposal;
     if (result.mode === 'clinical') result.run_id = trace.runId;
-    finishTrace(trace.runId, { finalResult: result, usage, snapshot, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop });
+    finishTrace(trace.runId, { finalResult: result, usage, snapshot, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, clinicalStrategy: strategy, contextMetrics });
     return { result, trace, workspace, authority };
   } catch (e) {
     finishTrace(trace.runId, { error: e instanceof Error ? e.message : String(e) });

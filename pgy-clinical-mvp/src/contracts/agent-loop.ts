@@ -39,3 +39,14 @@ export interface AgentLoopTrace {
   finalStepHadToolCalls: boolean;
   toolCallLedger: ToolCallLedgerEntry[];
 }
+
+/**
+ * H3 Context 压缩指标（估算值，非精确 tokenizer）。
+ * 用于度量「目标驱动工作上下文」相对「全量投影」的收缩程度。
+ */
+export interface ContextMetrics {
+  workingViewTokenEstimate: number;
+  rawContextTokenEstimate: number;
+  /** raw / working：值越大表示压缩越显著。 */
+  compressionRatio: number;
+}

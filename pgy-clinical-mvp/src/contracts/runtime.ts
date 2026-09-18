@@ -4,6 +4,7 @@ import type { ResolvedSkill } from './skill.js';
 import type { RuntimeToolDescriptor } from './tool.js';
 import type { HarnessControlPort } from './harness.js';
 import type { ClinicalWorkspace, WorkspaceControlPort } from './workspace.js';
+import type { ClinicalStrategy } from './clinical-strategy.js';
 
 /** Closed-world runtime disposition. Severity is semantic evidence; disposition controls authority. */
 export interface SafetyDecision {
@@ -48,6 +49,8 @@ export interface RuntimeContext {
   runId: string;
   input: string;
   understanding: ClinicalUnderstanding;
+  /** 临床总策划状态：本次 run 的 reasoning mission（observable planning state，非 CoT）。 */
+  strategy: ClinicalStrategy;
   capabilities: ResolvedCapability[];
   skills: ResolvedSkill[];
   knowledgeScopes: string[];

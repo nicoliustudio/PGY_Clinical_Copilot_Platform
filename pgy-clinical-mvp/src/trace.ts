@@ -1,7 +1,8 @@
 import type { RuntimeSnapshot, SkillVersion } from './contracts/runtime.js';
 import type { CandidateAssessment, CandidateComparison, DeliberationCoverage, HypothesisCandidate, PromotionCoverage, WorkspaceEvent } from './contracts/workspace.js';
 import type { RetrievalDiagnostics } from './knowledge/diagnostics.js';
-import type { AgentLoopTrace } from './contracts/agent-loop.js';
+import type { AgentLoopTrace, ContextMetrics } from './contracts/agent-loop.js';
+import type { ClinicalStrategy } from './contracts/clinical-strategy.js';
 
 export interface ToolCallTrace { toolName: string; input: unknown; output: unknown; error?: unknown; ms: number; reused?: boolean; }
 export interface RunTrace {
@@ -22,6 +23,8 @@ export interface RunTrace {
   skillPromptSections?: string[];
   modelProfileId?: string; promptHash?: string; capabilities?: string[]; skills?: string[]; knowledgeScopes?: string[];
   agentLoop?: AgentLoopTrace;
+  clinicalStrategy?: ClinicalStrategy;
+  contextMetrics?: ContextMetrics;
 }
 
 const traces = new Map<string, RunTrace>();
@@ -57,6 +60,8 @@ export function finishTrace(runId: string, args: {
   candidateAssessments?: CandidateAssessment[];
   deliberationCoverage?: DeliberationCoverage[];
   agentLoop?: AgentLoopTrace;
+  clinicalStrategy?: ClinicalStrategy;
+  contextMetrics?: ContextMetrics;
 }): RunTrace {
   const trace = traces.get(runId);
   if (!trace) throw new Error(`trace 未初始化: ${runId}`);
@@ -72,6 +77,8 @@ export function finishTrace(runId: string, args: {
   if (args.candidateAssessments) trace.candidateAssessments = args.candidateAssessments;
   if (args.deliberationCoverage) trace.deliberationCoverage = args.deliberationCoverage;
   if (args.agentLoop) trace.agentLoop = args.agentLoop;
+  if (args.clinicalStrategy) trace.clinicalStrategy = args.clinicalStrategy;
+  if (args.contextMetrics) trace.contextMetrics = args.contextMetrics;
   if (args.snapshot) {
     trace.modelProfileId = args.snapshot.modelProfileId; trace.promptHash = args.snapshot.promptHash;
     trace.capabilities = args.snapshot.capabilities; trace.skills = args.snapshot.skills;

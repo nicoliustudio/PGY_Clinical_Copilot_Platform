@@ -10,6 +10,7 @@ import type {
   WorkspaceEvent,
 } from '../contracts/workspace.js';
 import type { RunTrace, ToolCallTrace } from '../trace.js';
+import type { ClinicalStrategy } from '../contracts/clinical-strategy.js';
 import { buildComparisonMatrix } from '../platform/workspace/deliberation-projection.js';
 
 /**
@@ -69,6 +70,7 @@ export interface EvidenceViewItem {
   id: string;
   sourceRef: string;
   sourceType: string;
+  sourceSchool?: string;
   title?: string;
   summary?: string;
   relatedCandidates: string[];
@@ -140,6 +142,7 @@ export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
       id: e.id,
       sourceRef: e.sourceRef,
       sourceType: e.sourceType,
+      sourceSchool: e.sourceSchool,
       title: e.title,
       summary: e.summary,
       relatedCandidates: e.relatedCandidates,
@@ -185,6 +188,7 @@ export interface TraceView {
   workspaceEvents: WorkspaceEvent[];
   retrievalDiagnostics: RunTrace['retrievalDiagnostics'];
   agentLoop?: RunTrace['agentLoop'];
+  contextMetrics?: RunTrace['contextMetrics'];
   snapshot: {
     modelProfileId?: string;
     promptHash?: string;
@@ -207,6 +211,7 @@ export function buildTraceView(trace: RunTrace): TraceView {
     workspaceEvents: trace.workspaceEvents,
     retrievalDiagnostics: trace.retrievalDiagnostics,
     agentLoop: trace.agentLoop,
+    contextMetrics: trace.contextMetrics,
     snapshot: {
       modelProfileId: trace.modelProfileId,
       promptHash: trace.promptHash,
@@ -337,6 +342,7 @@ export interface SessionView {
   authority: AuthorityResult;
   workspace: WorkspaceView;
   trace: TraceView;
+  strategy?: ClinicalStrategy;
 }
 
 export interface SessionSource {
@@ -354,5 +360,6 @@ export function buildSessionView(src: SessionSource): SessionView {
     authority: src.authority,
     workspace: buildWorkspaceView(src.workspace),
     trace: buildTraceView(src.trace),
+    strategy: src.trace.clinicalStrategy,
   };
 }

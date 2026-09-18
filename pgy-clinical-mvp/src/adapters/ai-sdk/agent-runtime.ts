@@ -1,11 +1,11 @@
-import { ToolLoopAgent, isStepCount, hasToolCall, generateText, type ToolSet } from 'ai';
+import { ToolLoopAgent, isStepCount, hasToolCall, generateText, type ToolSet, type ModelMessage } from 'ai';
 import { llmModel } from '../../model/adapter.js';
 import { extractJson } from '../../util/json.js';
 import { agentResultSchema, type AgentResult } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { PrimaryAgentOutput, PrimaryAgentPort } from '../../contracts/ports.js';
 import type { AgentStreamEvent, LifecycleStage } from '../../contracts/stream.js';
-import type { AgentLoopTrace, TerminationReason } from '../../contracts/agent-loop.js';
+import type { AgentLoopTrace, TerminationReason, ContextMetrics } from '../../contracts/agent-loop.js';
 import { addToolCall } from '../../trace.js';
 import { DEFAULT_AI_SDK_TOOL_BINDINGS, type AiSdkToolBindings } from './tool-bindings.js';
 import { applyToolExecutionResult, type ToolExecutionEnvelope } from './workspace-events.js';
@@ -14,6 +14,7 @@ import { buildEvidenceProjection } from '../../platform/workspace/evidence-proje
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
+import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace } from '../../contracts/workspace.js';
 
 /**
@@ -77,13 +78,49 @@ function buildSearchHistory(ledger: ToolCallLedger): string {
   return rows.join('\n');
 }
 
+function buildRecentActions(ledger?: ToolCallLedger): RecentAction[] {
+  if (!ledger) return [];
+  const useful = new Set([
+    'knowledge.search',
+    'knowledge.get_source',
+    'formula.search_normative',
+    'workspace.focus_candidates',
+    'workspace.record_deliberation',
+    'workspace.record_candidate_assessment',
+    'workspace.record_candidate_exclusion',
+  ]);
+  return ledger.entries()
+    .filter((e) => useful.has(e.toolName))
+    .slice(-6)
+    .map((e) => ({ toolName: e.toolName, summary: e.normalizedInput.slice(0, 120) }));
+}
+
+const ACTION_PRINCIPLE = `## Action Principle
+- 再次调用工具前，先判断：该动作是否会实质性减少当前 ClinicalStrategy 中某个开放问题或不确定性？
+- 若已有证据足以支撑可辩护 Proposal，优先调用 proposal.submit。
+- 不要因为「可能还有更多信息」就继续搜索。
+- 保留显式不确定性，而不是追求穷尽式确定。`;
+
 export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger): string {
   const skills = renderActiveSkills(context.skills);
-  const hypotheses = JSON.stringify(buildHypothesisProjection(context.workspace), null, 2);
-  const projection = JSON.stringify(buildEvidenceProjection(context.workspace), null, 2);
-  const deliberation = JSON.stringify(buildComparisonMatrix(context.workspace), null, 2);
-  const searchHistory = ledger ? buildSearchHistory(ledger) : '';
-  return `${base}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Recent Searches\n${searchHistory || '（无）'}\n\n## Hypothesis Coverage\n${hypotheses}\n\n## Evidence Projection\n${projection}\n\n## Candidate Comparison Matrix (Frontier)\n${deliberation}`;
+  const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger));
+  const workingView = renderClinicalWorkingView(view);
+  return `${base}\n\n${ACTION_PRINCIPLE}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
+}
+
+/** 度量「目标驱动工作上下文」相对「全量投影」的收缩程度（估算）。 */
+function computeContextMetrics(context: RuntimeContext, ledger: ToolCallLedger): ContextMetrics {
+  const workingView = renderClinicalWorkingView(buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger)));
+  const raw = [
+    JSON.stringify(buildHypothesisProjection(context.workspace), null, 2),
+    JSON.stringify(buildEvidenceProjection(context.workspace), null, 2),
+    JSON.stringify(buildComparisonMatrix(context.workspace), null, 2),
+    buildSearchHistory(ledger),
+  ].join('\n\n');
+  const workingViewTokenEstimate = estimateTokens(workingView);
+  const rawContextTokenEstimate = estimateTokens(raw);
+  const compressionRatio = workingViewTokenEstimate === 0 ? 0 : rawContextTokenEstimate / workingViewTokenEstimate;
+  return { workingViewTokenEstimate, rawContextTokenEstimate, compressionRatio };
 }
 
 function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'): string {
@@ -91,8 +128,8 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
   return [
     `本次 Run 初始交互模式：${context.understanding.interaction.mode}`,
     '',
-    '初始共享语义工作记忆（seed，不是固定流水线结论；可在检索/工具调用后修正）：',
-    JSON.stringify(context.understanding, null, 2),
+    `初始安全处置：${context.workspace.safetyDisposition}`,
+    '临床总策划（ClinicalStrategy）与当前工作上下文见 system 指令中的 Clinical Working View。',
     '',
     mode === 'harness' ? 'Harness active skills:' : 'Classic pre-routed skills:', skills || '（无）',
     '',
@@ -142,6 +179,20 @@ export interface AiSdkPrimaryAgentOptions {
   mode?: 'harness' | 'classic';
 }
 
+/**
+ * 压缩下一 step 的 model-visible messages：只保留初始用户消息 + 最近一步的 tool call/result。
+ * 历史 raw tool result 不再自动回灌；完整信息保留在 Workspace / Trace / ToolCallLedger，
+ * 模型通过 ClinicalWorkingView（instructions）获取当前注意力的压缩状态与 recent action receipt。
+ */
+export function compactAgentMessages(
+  initialMessages: ModelMessage[],
+  steps: { response: { messages: ModelMessage[] } }[],
+): ModelMessage[] {
+  if (steps.length === 0) return [...initialMessages];
+  const lastStep = steps[steps.length - 1];
+  return [...initialMessages, ...lastStep.response.messages];
+}
+
 export class AiSdkPrimaryAgent implements PrimaryAgentPort {
   constructor(private readonly options: AiSdkPrimaryAgentOptions) {}
 
@@ -168,9 +219,10 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       model: llmModel,
       tools: buildTools(context, bindings, ledger),
       instructions: dynamicInstructions(this.options.instructions, context, ledger),
-      prepareStep: async () => ({
+      prepareStep: async ({ initialMessages, steps }) => ({
         activeTools: activeToolIds(context, bindings, mode),
         instructions: dynamicInstructions(this.options.instructions, context, ledger),
+        messages: compactAgentMessages(initialMessages, steps),
       }),
       stopWhen: mode === 'harness'
         ? [hasToolCall(toApiToolName('proposal.submit')), isStepCount(resourceSteps)]
@@ -267,7 +319,9 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       toolCallLedger: ledger.entries(),
     };
 
-    return { proposal, usage, agentLoop };
+    const contextMetrics = computeContextMetrics(context, ledger);
+
+    return { proposal, usage, agentLoop, contextMetrics };
   }
 
   /**

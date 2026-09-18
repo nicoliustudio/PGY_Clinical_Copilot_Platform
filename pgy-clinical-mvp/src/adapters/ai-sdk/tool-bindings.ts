@@ -1,8 +1,8 @@
-import { tool, type ToolSet } from 'ai';
+import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormula } from '../../clinical/formula.js';
-import { agentResultSchema } from '../../contracts/result.js';
+import { agentResultSchema, type AgentResult } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
@@ -15,6 +15,82 @@ function assertKnownCandidateRef(context: RuntimeContext, candidateRef: string):
   if (!context.workspace.candidates.some((c) => c.id === candidateRef)) {
     throw new Error(`unknown candidateRef: ${candidateRef}`);
   }
+}
+
+/**
+ * proposal.submit 的 DeepSeek 兼容 JSON Schema。
+ * z.discriminatedUnion 会生成顶层 oneOf（缺 type: "object"），DeepSeek 拒绝。
+ * 这里改为顶层 type: "object"；真实结构校验由 validate 回调委托给 agentResultSchema.safeParse。
+ */
+const PROPOSAL_SUBMIT_JSON_SCHEMA: JSONSchema7 = {
+  type: 'object',
+  properties: {
+    mode: { type: 'string', enum: ['conversation', 'clinical', 'clarification', 'urgent'] },
+    message: { type: 'string' },
+    questions: { type: 'array', items: { type: 'string' } },
+    risks: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          description: { type: 'string' },
+          severity: { type: 'string' },
+        },
+        required: ['description', 'severity'],
+      },
+    },
+    status: { type: 'string', enum: ['COMPLETED', 'BLOCKED'] },
+    disease: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        confidence: { type: 'number' },
+        evidence_refs: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    syndrome: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        confidence: { type: 'number' },
+        evidence_refs: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    treatment: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        evidence_refs: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    formula: {
+      type: 'object',
+      properties: {
+        authority: { type: 'string', enum: ['NORMATIVE', 'GENERATED_DRAFT', 'BLOCKED'] },
+        formula_id: { type: 'string' },
+        name: { type: 'string' },
+        composition: { type: 'array', items: { type: 'string' } },
+        source_id: { type: 'string' },
+        evidence_refs: { type: 'array', items: { type: 'string' } },
+        candidate_ref: { type: 'string' },
+      },
+    },
+    missing_information: { type: 'array', items: { type: 'string' } },
+    safety: {
+      type: 'object',
+      properties: { status: { type: 'string', enum: ['PASS', 'BLOCK'] } },
+    },
+  },
+  required: ['mode'],
+};
+
+function validateProposal(
+  value: unknown,
+): { success: true; value: AgentResult } | { success: false; error: Error } {
+  const result = agentResultSchema.safeParse(value);
+  return result.success
+    ? { success: true, value: result.data }
+    : { success: false, error: result.error };
 }
 
 /** Adapter-owned bindings. Agent runtime consumes this registry generically. */
@@ -143,7 +219,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
   }),
   'proposal.submit': () => tool({
     description: '当临床探索已充分、可以形成最终 Proposal 时调用。这是终结 reasoning loop 的终结工具，输入即最终 Proposal，调用后立即停止。目标不是穷尽所有信息，而是基于当前证据给出最佳可辩护 Proposal。',
-    inputSchema: agentResultSchema,
+    inputSchema: jsonSchema<AgentResult>(PROPOSAL_SUBMIT_JSON_SCHEMA, { validate: validateProposal }),
     execute: async (input) => input,
   }),
 };

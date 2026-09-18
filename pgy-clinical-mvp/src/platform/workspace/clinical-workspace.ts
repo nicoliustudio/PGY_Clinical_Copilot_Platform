@@ -133,6 +133,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       id,
       sourceRef: asString(payload.sourceRef) ?? sourceId ?? id,
       sourceType: asString(payload.sourceType) ?? 'knowledge',
+      sourceSchool: asString(payload.sourceSchool),
       title: asString(payload.title),
       summary: asString(payload.summary),
       relatedCandidates: asStringArray(payload.relatedCandidates),

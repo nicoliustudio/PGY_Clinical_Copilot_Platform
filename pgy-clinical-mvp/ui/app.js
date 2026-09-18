@@ -312,6 +312,62 @@ function renderWorkspace(ws, tab) {
   body.innerHTML = (renderers[currentWpTab] || renderOverview)(ws);
 }
 
+function renderStrategy(strategy) {
+  if (!strategy || !strategy.goal) return '';
+  const needs = (strategy.activeQuestions || []).concat((strategy.evidenceNeeds || []).map((n) => n.question));
+  const uncertainty = (strategy.uncertainty || []).map((u) => `${u.item}${u.reason ? '（' + u.reason + '）' : ''}`);
+  const list = (items) => (items.length ? `<ul class="wp-list">${items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<span class="muted">—</span>');
+  return `
+    <div class="wp-section strategy">
+      <div class="wp-section-title">当前目标</div><div class="wp-card">${esc(strategy.goal || '—')}</div>
+      <div class="wp-section-title">当前关键问题</div><div class="wp-card">${esc(strategy.primaryQuestion || '—')}</div>
+      <div class="wp-section-title">需要解决</div><div class="wp-card">${list(needs)}</div>
+      <div class="wp-section-title">当前不确定性</div><div class="wp-card">${list(uncertainty)}</div>
+    </div>`;
+}
+
+const SCHOOL_LABELS = {
+  shen_zhongli: '沈仲理',
+  national_standard: '国标',
+  classical: '经典',
+  general_tcm: '通用中医',
+};
+
+function renderHypothesisMap(ws) {
+  const hs = (ws.hypotheses || []).filter((h) => h.status !== 'rejected');
+  if (!hs.length) return '<div class="wp-empty">暂无假设</div>';
+  return hs.map((h) => {
+    const sup = (h.supportingEvidenceRefs || []).length;
+    const con = (h.contradictingEvidenceRefs || []).length;
+    const unk = (h.missingEvidence || []).length;
+    return `
+      <div class="wp-card">
+        <div class="wp-card-title">${esc(h.label)}<span class="wp-tag ${esc(h.status)}">${esc(h.status)}</span></div>
+        <div class="wp-inline"><span class="wp-tag sup">支持 ${sup}</span> <span class="wp-tag con">反证 ${con}</span> <span class="wp-tag unk">未知 ${unk}</span></div>
+      </div>`;
+  }).join('');
+}
+
+function renderFocusedCandidates(ws) {
+  const frontier = new Set((ws.deliberation?.rows || []).map((r) => r.candidateRef));
+  const focused = (ws.candidates || []).filter((c) => frontier.has(c.id));
+  if (!focused.length) return '<div class="wp-empty">暂无聚焦候选</div>';
+  return focused.map((c) => `
+    <div class="wp-card">
+      <div class="wp-card-title">${esc(c.name || c.id)}<span class="wp-tag ${esc(c.status)}">${esc(c.status)}</span></div>
+      ${c.sourceId ? `<div class="muted">${esc(c.sourceId)}</div>` : ''}
+    </div>`).join('');
+}
+
+function renderSourceSchools(ws) {
+  const schools = new Set();
+  for (const e of (ws.evidence || [])) {
+    if (e.sourceSchool) schools.add(e.sourceSchool);
+  }
+  if (!schools.size) return '<span class="muted">—</span>';
+  return [...schools].map((s) => `<span class="wp-tag school">${esc(SCHOOL_LABELS[s] || s)}</span>`).join(' ');
+}
+
 function renderOverview(ws) {
   const facts = (ws.facts || []).map((f) => {
     if (typeof f === 'string') return `<li>${esc(f)}</li>`;
@@ -324,8 +380,12 @@ function renderOverview(ws) {
   const caps = (ws.activeCapabilities || []).map((c) => `<span class="wp-tag active">${esc(c)}</span>`).join(' ');
   const skills = (ws.activeSkills || []).map((s) => `<span class="wp-tag">${esc(s)}</span>`).join(' ');
   return `
+    ${renderStrategy(state.activeSession?.strategy)}
     <div class="wp-section"><div class="wp-section-title">安全状态</div>
       <div class="wp-card"><span class="wp-tag ${esc(ws.safetyDisposition)}">${esc(ws.safetyDisposition)}</span></div></div>
+    <div class="wp-section"><div class="wp-section-title">假设地图</div><div class="wp-card">${renderHypothesisMap(ws)}</div></div>
+    <div class="wp-section"><div class="wp-section-title">当前候选（聚焦）</div><div class="wp-card">${renderFocusedCandidates(ws)}</div></div>
+    <div class="wp-section"><div class="wp-section-title">学术来源</div><div class="wp-card">${renderSourceSchools(ws)}</div></div>
     <div class="wp-section"><div class="wp-section-title">病例事实</div><div class="wp-card"><ul class="wp-list">${facts || '<li>—</li>'}</ul></div></div>
     <div class="wp-section"><div class="wp-section-title">信息缺口</div><div class="wp-card"><ul class="wp-list">${gaps || '<li>—</li>'}</ul></div></div>
     <div class="wp-section"><div class="wp-section-title">不确定点</div><div class="wp-card"><ul class="wp-list">${unc || '<li>—</li>'}</ul></div></div>
@@ -408,12 +468,18 @@ function renderTrace(session) {
     <div class="trace-kv"><span class="k">proposal.submit</span><span>${loop.proposalSubmitted ? '是' : '否'}</span></div>
     <div class="trace-kv"><span class="k">forced finalization</span><span>${loop.forcedFinalization ? '是' : '否'}</span></div>
     <div class="trace-kv"><span class="k">末步含工具调用</span><span>${loop.finalStepHadToolCalls ? '是' : '否'}</span></div>`;
+  const cm = t.contextMetrics || {};
+  const cmHtml = Object.keys(cm).length ? `
+    <div class="trace-kv"><span class="k">workingView tokens</span><span>${cm.workingViewTokenEstimate ?? '—'}</span></div>
+    <div class="trace-kv"><span class="k">raw context tokens</span><span>${cm.rawContextTokenEstimate ?? '—'}</span></div>
+    <div class="trace-kv"><span class="k">压缩比 (raw/working)</span><span>${cm.compressionRatio != null ? cm.compressionRatio.toFixed(1) + '×' : '—'}</span></div>` : '';
   body.innerHTML = `
     <div class="trace-section"><h3>Run</h3>
       <div class="trace-kv"><span class="k">runId</span><span>${esc(t.runId)}</span></div>
       <div class="trace-kv"><span class="k">模型</span><span>${esc(snap.modelProfileId || session.model)}</span></div>
       <div class="trace-kv"><span class="k">耗时</span><span>${t.totalMs != null ? t.totalMs + 'ms' : '—'}</span></div>
       ${Object.keys(loop).length ? loopHtml : ''}
+      ${cmHtml}
     </div>
     <div class="trace-section"><h3>Authority</h3>${authority || '<div class="muted">—</div>'}</div>
     <div class="trace-section"><h3>工具调用（${(t.toolCalls || []).length}）</h3>${tools || '<div class="muted">—</div>'}</div>

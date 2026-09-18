@@ -8,6 +8,8 @@ export interface EvidenceItem {
   id: string;
   sourceRef: string;
   sourceType: string;
+  /** 来源流派（School-aware Evidence 的 provenance 标签）。 */
+  sourceSchool?: string;
   title?: string;
   summary?: string;
   relatedCandidates: string[];

@@ -13,3 +13,6 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
 export const BASELINE_TOOL_IDS: string[] = PLATFORM_TOOLS.map((t) => t.id);
 export const CLASSIC_BASELINE_TOOL_IDS: string[] = BASELINE_TOOL_IDS.filter((id) => id !== 'knowledge.get_source');
 export const BASELINE_KNOWLEDGE_SCOPES: string[] = ['general'];
+
+/** 平台级 baseline skills：不依赖任何业务 capability，随 harness.baseline 注入。 */
+export const BASELINE_SKILL_IDS: string[] = ['general-clinical-reasoning', 'clinical-reasoning-governor'];

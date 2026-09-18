@@ -10,6 +10,9 @@ const provider = createOpenAICompatible({
 // AI SDK LanguageModel，供 ToolLoopAgent / generateText 使用
 export const llmModel = provider(config.llm.deepModel);
 
+// fast 模型：供 Clinical Planner 等轻量结构化调用使用，降低策划延迟与 token 开销
+export const fastModel = provider(config.llm.fastModel);
+
 /**
  * 批量向量化。返回与输入等长的向量数组（每项维度 = EMBEDDING_DIMENSIONS）。
  * 直接调用阿里云 OpenAI 兼容 embedding 端点，不依赖 AI SDK 的 provider。

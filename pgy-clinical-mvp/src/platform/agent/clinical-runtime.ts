@@ -4,7 +4,8 @@ import type { AgentResult } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { CandidateAssessment, CandidateComparison, ClinicalWorkspace, DeliberationCoverage, HypothesisCandidate, PromotionCoverage, WorkspaceEvent } from '../../contracts/workspace.js';
 import type { AgentStreamEvent } from '../../contracts/stream.js';
-import type { AgentLoopTrace } from '../../contracts/agent-loop.js';
+import type { AgentLoopTrace, ContextMetrics } from '../../contracts/agent-loop.js';
+import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
 import { AuthorityPipeline } from '../authority/pipeline.js';
 import { EVIDENCE_EVENT_TYPES } from '../workspace/evidence-projection.js';
 import { HYPOTHESIS_EVENT_TYPES } from '../workspace/hypothesis-projection.js';
@@ -20,6 +21,8 @@ export interface ClinicalRunResult extends RuntimeRunResult {
   candidateAssessments: CandidateAssessment[];
   deliberationCoverage: DeliberationCoverage[];
   agentLoop?: AgentLoopTrace;
+  strategy: ClinicalStrategy;
+  contextMetrics?: ContextMetrics;
 }
 
 /** 依据 proposal 的 candidate_ref 记录候选比较结果：选中 vs 放弃。 */
@@ -116,6 +119,8 @@ export class ClinicalRuntime {
       candidateAssessments: context.workspace.deliberationState.assessments.map((a) => ({ ...a })),
       deliberationCoverage: context.workspace.deliberationState.coverage.map((c) => ({ ...c })),
       agentLoop: output.agentLoop,
+      strategy: context.strategy,
+      contextMetrics: output.contextMetrics,
     };
   }
 }

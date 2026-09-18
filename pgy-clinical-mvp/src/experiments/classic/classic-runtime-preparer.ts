@@ -7,6 +7,7 @@ import { ToolRegistry } from '../../platform/registry/tool-registry.js';
 import { HarnessSession } from '../../platform/runtime/harness-session.js';
 import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../../platform/workspace/clinical-workspace.js';
 import { ClassicSemanticNeedResolver } from './semantic-need-resolver.js';
+import { emptyClinicalStrategy } from '../../contracts/clinical-strategy.js';
 
 export interface ClassicRuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
@@ -41,6 +42,7 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
       runId,
       input,
       understanding,
+      strategy: emptyClinicalStrategy(),
       capabilities: [],
       skills: [],
       knowledgeScopes: [...new Set(this.deps.baselineKnowledgeScopes)],
