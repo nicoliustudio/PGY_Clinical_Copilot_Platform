@@ -61,3 +61,39 @@ export const agentResultSchema = z.discriminatedUnion('mode', [
 
 export type ClinicalResult = z.infer<typeof clinicalResultSchema>;
 export type AgentResult = z.infer<typeof agentResultSchema>;
+
+/**
+ * H11 proposal.submit 的「最小化」输入契约。
+ * 模型只提交「选择」，不重复生成 Kernel 已知事实：
+ * formula sourceId / formulaId / composition / authority / safety 均由 Runtime 填充。
+ */
+export const proposalSubmitInputSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('conversation'), message: z.string() }),
+  z.object({ mode: z.literal('clarification'), questions: z.array(z.string()) }),
+  z.object({
+    mode: z.literal('urgent'),
+    message: z.string(),
+    risks: z.array(z.object({ description: z.string(), severity: z.string() })),
+  }),
+  z.object({
+    mode: z.literal('clinical'),
+    disease: z.object({
+      name: z.string(),
+      confidence: z.number().optional(),
+      evidence_refs: z.array(z.string()).optional(),
+    }),
+    syndrome: z.object({
+      name: z.string(),
+      confidence: z.number().optional(),
+      evidence_refs: z.array(z.string()).optional(),
+    }),
+    treatment: z.object({
+      text: z.string(),
+      evidence_refs: z.array(z.string()).optional(),
+    }),
+    candidate_ref: z.string().optional(),
+    uncertainty: z.array(z.string()).optional(),
+  }),
+]);
+
+export type ProposalSubmitInput = z.infer<typeof proposalSubmitInputSchema>;

@@ -11,6 +11,15 @@ Method, not medical answer. Governs how the Agent reasons toward a clinical prop
 5. A meaningfully supported alternative must be adopted, evidence-excluded, or kept as explicit uncertainty — never silently dropped.
 6. When source-grounded evidence already supports a defensible proposal, submit immediately; do not keep searching because ordinary uncertainty remains.
 
+## Retrieval vs Patient Hypothesis (epistemic)
+
+- A source's syndrome/disease label describes the knowledge source, not the patient.
+- Retrieved labels are knowledge metadata; they do not diagnose the patient.
+- Do not treat a syndrome returned by retrieval as confirmation merely because the query already contained that syndrome.
+- Patient-level hypotheses must be justified against case facts, treatment context, tongue/pulse, and discriminating evidence.
+- A hypothesis-conditioned search provides knowledge about that hypothesis, but does not independently prove the patient has it.
+- Establish patient hypotheses explicitly (workspace.consider_hypotheses); do not let retrieval labels silently become patient hypotheses.
+
 ## Reasoning Discipline
 
 - Separate unknown from negative evidence: a missing finding is an information gap, not counter-evidence.

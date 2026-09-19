@@ -40,18 +40,14 @@ test('runtime 只注入 tcm-clinical-cognition 作为 baseline skill', () => {
 });
 
 test('hypothesis 使用稳定 H_xxx ID（非 label/sourceId）', () => {
-  const drafts = workspaceEventsForTool('knowledge.search', { query: '崩漏' }, [
-    { sourceId: 'P1:a', title: '崩漏', authority: 'P1', excerpt: 'x', provenance: { source: '', sourceFile: '', disease: '', syndrome: '气虚下陷', treatment: '' }, formulas: [] },
-  ]);
+  const drafts = workspaceEventsForTool('workspace.consider_hypotheses', { hypotheses: [{ label: '气虚下陷', role: 'alternative' }] }, undefined);
   const hyp = drafts.find((d) => d.type === 'hypothesis.presented');
   assert.ok(hyp);
   const id = hyp.payload.id as string;
   assert.ok(id.startsWith('H_'), `expected H_xxx, got ${id}`);
   assert.notEqual(id, '气虚下陷');
   // 相同 label 得到相同稳定 ID
-  const drafts2 = workspaceEventsForTool('knowledge.search', { query: '崩漏2' }, [
-    { sourceId: 'P1:b', title: '崩漏', authority: 'P1', excerpt: 'x', provenance: { source: '', sourceFile: '', disease: '', syndrome: '气虚下陷', treatment: '' }, formulas: [] },
-  ]);
+  const drafts2 = workspaceEventsForTool('workspace.consider_hypotheses', { hypotheses: [{ label: '气虚下陷', role: 'alternative' }] }, undefined);
   const hyp2 = drafts2.find((d) => d.type === 'hypothesis.presented');
   assert.equal(hyp2?.payload.id, id);
 });

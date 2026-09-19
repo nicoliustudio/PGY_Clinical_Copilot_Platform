@@ -30,4 +30,6 @@ Proposal 结构（proposal.submit 的 input）：
 - conversation：{"mode":"conversation","message":"自然回应"}
 - clarification：{"mode":"clarification","questions":["追问1"]}
 - urgent：{"mode":"urgent","message":"提示","risks":[{"description":"","severity":"high"}]}
-- clinical：{"mode":"clinical","status":"COMPLETED","disease":{"name":"","confidence":0.0,"evidence_refs":[]},"syndrome":{"name":"","confidence":0.0,"evidence_refs":[]},"treatment":{"text":"","evidence_refs":[]},"formula":{"authority":"NORMATIVE","formula_id":"","name":"","composition":[],"source_id":"","candidate_ref":"","evidence_refs":[]},"missing_information":[],"safety":{"status":"PASS"}}
+- clinical：{"mode":"clinical","disease":{"name":"","confidence":0.0,"evidence_refs":[]},"syndrome":{"name":"","confidence":0.0,"evidence_refs":[]},"treatment":{"text":"","evidence_refs":[]},"candidate_ref":"","uncertainty":[]}
+
+注意：clinical 只需要提交「选择」（病名/证型/治法 + 可选 candidate_ref/uncertainty）。formula 的 source_id / formula_id / composition / authority 与 safety 由 Runtime 依据 candidate_ref 水合并填充，不要重复生成。

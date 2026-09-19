@@ -13,6 +13,8 @@ export interface HarnessActivationResult {
   addedKnowledgeScopes: string[];
   addedSkills: { id: string; instruction: string }[];
   addedToolIds: string[];
+  /** H10：本次激活是否复用了已激活的 capability（幂等返回已有状态）。 */
+  reused: boolean;
 }
 
 /**

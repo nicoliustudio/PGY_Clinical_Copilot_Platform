@@ -24,27 +24,27 @@ export class ToolCallLedger {
   private readonly results = new Map<string, { output: unknown; entry: ToolCallLedgerEntry }>();
   private readonly calls = new Map<string, number>();
 
-  private static key(toolName: string, input: unknown): string {
-    return `${toolName}\u0000${stableStringify(input)}`;
+  private static key(toolName: string, input: unknown, stateKey?: string): string {
+    return `${toolName}\u0000${stateKey ?? ''}\u0000${stableStringify(input)}`;
   }
 
   /** 每次执行前调用；返回本次是该 key 的第几次调用（>1 即复用）。 */
-  private bump(toolName: string, input: unknown): number {
-    const key = ToolCallLedger.key(toolName, input);
+  private bump(toolName: string, input: unknown, stateKey?: string): number {
+    const key = ToolCallLedger.key(toolName, input, stateKey);
     const n = (this.calls.get(key) ?? 0) + 1;
     this.calls.set(key, n);
     return n;
   }
 
-  /** 尝试复用结果。返回 undefined 表示首次执行，应真实执行。 */
-  reuse(toolName: string, input: unknown): { output: unknown } | undefined {
-    this.bump(toolName, input);
-    return this.results.get(ToolCallLedger.key(toolName, input));
+  /** 尝试复用结果。返回 undefined 表示首次执行，应真实执行。stateKey 用于 stateful 工具（如 capability.discover）。 */
+  reuse(toolName: string, input: unknown, stateKey?: string): { output: unknown } | undefined {
+    this.bump(toolName, input, stateKey);
+    return this.results.get(ToolCallLedger.key(toolName, input, stateKey));
   }
 
   /** 记录一次真实执行的确定性结果。 */
-  record(toolName: string, input: unknown, output: unknown): void {
-    const key = ToolCallLedger.key(toolName, input);
+  record(toolName: string, input: unknown, output: unknown, stateKey?: string): void {
+    const key = ToolCallLedger.key(toolName, input, stateKey);
     if (this.results.has(key)) return;
     const entry: ToolCallLedgerEntry = {
       toolName,
@@ -57,8 +57,8 @@ export class ToolCallLedger {
   }
 
   /** 当前调用是否属于复用（同一 key 已执行过）。 */
-  isReused(toolName: string, input: unknown): boolean {
-    return (this.calls.get(ToolCallLedger.key(toolName, input)) ?? 0) > 1;
+  isReused(toolName: string, input: unknown, stateKey?: string): boolean {
+    return (this.calls.get(ToolCallLedger.key(toolName, input, stateKey)) ?? 0) > 1;
   }
 
   entries(): ToolCallLedgerEntry[] {

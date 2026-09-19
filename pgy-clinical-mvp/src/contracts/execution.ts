@@ -34,6 +34,42 @@ export type ActionStatus = 'success' | 'cached' | 'deduplicated' | 'error';
 
 export type DecisionImpact = 'changed' | 'reinforced' | 'none' | 'unresolved';
 
+/**
+ * H10 Execution Necessity —— 与 DecisionImpact 正交的确定性维度。
+ * 由 Harness 根据 tool role / workspace state / cache / candidate / validation /
+ * capability activation state 判定，不由模型填写。
+ *
+ * - required   当前业务动作完成所必需的确定性执行（即使 decisionImpact=none）。
+ * - avoidable  不执行也不影响当前业务目标，且没有新增有效状态/证据。
+ * - unknown    runtime 无法确定，保守保留。
+ */
+export type ExecutionNecessity = 'required' | 'avoidable' | 'unknown';
+
+/** H10 每个 ExecutionRole 的 run-level 成本聚合。 */
+export type ExecutionRoleCost = {
+  toolCalls: number;
+  nonDecisionChangingCalls: number;
+  latencyMs: number;
+  resultTokens: number;
+};
+
+/**
+ * H9 工具执行角色分类：
+ * - RETRIEVAL          检索类（knowledge.search / get_source / formula.search_normative）
+ * - COGNITIVE_MUTATION 认知状态持久化（workspace.* deliberation/focus/assessment/exclusion）
+ * - VALIDATION         校验类（formula.validate）
+ * - COMMIT             终结提交（proposal.submit）
+ * - CAPABILITY         能力发现/激活（capability.*）
+ * - OTHER              其它
+ */
+export type ExecutionRole =
+  | 'RETRIEVAL'
+  | 'COGNITIVE_MUTATION'
+  | 'VALIDATION'
+  | 'COMMIT'
+  | 'CAPABILITY'
+  | 'OTHER';
+
 /** 工具执行后的统一结构化 Receipt（Trace/Workspace 事实记录，非模型编造）。 */
 export interface ActionReceipt {
   executionProtocolVersion: string;
@@ -41,6 +77,8 @@ export interface ActionReceipt {
   runId: string;
   toolName: string;
   status: ActionStatus;
+  /** H9 执行角色分类（区分「未改变 DecisionState 但完成必要持久化」与真正 noop）。 */
+  executionRole?: ExecutionRole;
   decisionRef?: string;
   sourceRefs: string[];
   evidenceRefs: string[];
@@ -49,6 +87,8 @@ export interface ActionReceipt {
   reusedEvidenceCount: number;
   stateDeltaCount: number;
   decisionImpact: DecisionImpact;
+  /** H10 执行必要性（Harness 确定性判定，非模型声明）。 */
+  executionNecessity?: ExecutionNecessity;
   duplicateOf?: string;
   latencyMs: number;
   resultPayloadSize?: number;
@@ -115,4 +155,29 @@ export interface RunExecutionMetrics extends RetrievalDisciplineMetrics {
   formulaHydrationCacheHitCount: number;
   formulaCandidateVisibleTokens: number;
   formulaHydratedVisibleTokens: number;
+  /** H9 Workspace Mutation Consolidation telemetry。 */
+  cognitiveMutationCalls: number;
+  effectiveMutationCalls: number;
+  noopMutationCalls: number;
+  workspaceEventsWritten: number;
+  workspaceEventBatches: number;
+  workspaceProjectionCount: number;
+  decisionStateProjectionCount: number;
+  deliberationCommitCount: number;
+  /** H10 Action Surface Consolidation & Tool Economy telemetry。 */
+  toolCallsByExecutionRole: Record<ExecutionRole, ExecutionRoleCost>;
+  nonDecisionChangingCallsByExecutionRole: Record<ExecutionRole, number>;
+  latencyMsByExecutionRole: Record<ExecutionRole, number>;
+  resultTokensByExecutionRole: Record<ExecutionRole, number>;
+  requiredNonDecisionChangingCalls: number;
+  avoidableNonDecisionChangingCalls: number;
+  capabilityActivationCount: number;
+  capabilityReuseCount: number;
+  duplicateCapabilityActivationCount: number;
+  validationCallCount: number;
+  validationReuseCount: number;
+  duplicateValidationCount: number;
+  projectionWithStateChange: number;
+  projectionWithoutStateChange: number;
+  projectionReuseCount: number;
 }

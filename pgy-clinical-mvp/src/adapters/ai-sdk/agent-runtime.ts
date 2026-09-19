@@ -1,24 +1,34 @@
-import { ToolLoopAgent, isStepCount, hasToolCall, generateText, type ToolSet, type ModelMessage } from 'ai';
+import { ToolLoopAgent, isStepCount, generateText, type ToolSet, type ModelMessage } from 'ai';
 import { llmModel } from '../../model/adapter.js';
 import { extractJson } from '../../util/json.js';
-import { agentResultSchema, type AgentResult } from '../../contracts/result.js';
+import { agentResultSchema, type AgentResult, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { PrimaryAgentOutput, PrimaryAgentPort } from '../../contracts/ports.js';
 import type { AgentStreamEvent, LifecycleStage } from '../../contracts/stream.js';
-import type { AgentLoopTrace, TerminationReason, ContextMetrics, PromptComponents } from '../../contracts/agent-loop.js';
+import type { AgentLoopTrace, CommitReliabilityMetrics, TerminationReason, ContextMetrics, PromptComponents } from '../../contracts/agent-loop.js';
 import { addToolCall, addActionReceipt, setRunMetrics } from '../../trace.js';
-import { executionProtocolVersion, type ActionReceipt, type DecisionImpact, type RunExecutionMetrics, type RecentRetrievalFeedback } from '../../contracts/execution.js';
+import { executionProtocolVersion, type ActionReceipt, type DecisionImpact, type ExecutionRole, type ExecutionRoleCost, type RunExecutionMetrics, type RecentRetrievalFeedback } from '../../contracts/execution.js';
 import { DEFAULT_AI_SDK_TOOL_BINDINGS, type AiSdkToolBindings } from './tool-bindings.js';
 import { applyToolExecutionResult, type ToolExecutionEnvelope } from './workspace-events.js';
 import { ToolCallLedger } from './tool-call-ledger.js';
-import { RetrievalDisciplineTracker } from './retrieval-discipline.js';
+import { RetrievalDisciplineTracker, isRetrievalTool } from './retrieval-discipline.js';
+import { computeExecutionNecessity } from './execution-necessity.js';
+import { ProjectionCache } from './projection-cache.js';
+import { canonicalizeProposalSubmit } from './proposal-canonicalizer.js';
+import { buildProposalDraft, countProposalDraftFields } from '../../platform/workspace/proposal-draft.js';
+import {
+  buildMinimalFinalizationPrompt,
+  buildRetryPrompt,
+  tryParseProposalSubmit,
+  countFinalizationContextItems,
+} from './minimal-finalization.js';
 import { buildEvidenceProjection } from '../../platform/workspace/evidence-projection.js';
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
-import type { ClinicalWorkspace, WorkspaceEvent } from '../../contracts/workspace.js';
+import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
 import { getFormulaHydrationStats, resetFormulaHydrationStats } from '../../clinical/formula.js';
 
 /**
@@ -42,27 +52,54 @@ function fromApiToolName(name: string): string {
   return name.replace(/-/g, '.');
 }
 
-function wrapToolWithLedger(id: string, t: ToolSet[string], ledger: ToolCallLedger): ToolSet[string] {
+function wrapToolWithLedger(id: string, t: ToolSet[string], ledger: ToolCallLedger, stateKey?: () => string): ToolSet[string] {
   const original = t.execute as unknown as ((input: unknown, options: unknown) => unknown) | undefined;
   if (!original) return t;
   return {
     ...t,
     execute: async (input: unknown, options: unknown) => {
-      const cached = ledger.reuse(id, input);
+      const key = stateKey ? stateKey() : undefined;
+      const cached = ledger.reuse(id, input, key);
       if (cached) return cached.output;
       const output = await original(input, options);
-      ledger.record(id, input, output);
+      ledger.record(id, input, output, key);
       return output;
     },
   } as ToolSet[string];
 }
 
+/** H10：capability.discover 是 stateful 工具，其结果随 active capabilities 变化，dedupe key 需纳入 active 状态。 */
+function capabilityStateKey(context: RuntimeContext): string {
+  return `caps:${[...context.capabilities.map((c) => c.id)].sort().join(',')}`;
+}
+
 function buildTools(context: RuntimeContext, bindings: AiSdkToolBindings, ledger: ToolCallLedger): ToolSet {
   const tools: ToolSet = {};
   for (const [id, factory] of Object.entries(bindings)) {
-    tools[toApiToolName(id)] = wrapToolWithLedger(id, factory(context), ledger);
+    const stateKey = id === 'capability.discover' ? () => capabilityStateKey(context) : undefined;
+    tools[toApiToolName(id)] = wrapToolWithLedger(id, factory(context), ledger, stateKey);
   }
   return tools;
+}
+
+/**
+ * H12：proposal.submit 只有在覆盖检查通过（返回真实 proposal，而非 notReady 修正回执）时才终止 loop。
+ * 若存在 unresolved formal hypothesis，proposal.submit 返回 { notReady: true }，loop 应继续让 Agent 完成 deliberation。
+ */
+function proposalSubmitReadyStep() {
+  return ({ steps }: { steps: unknown[] }): boolean => {
+    const last = steps[steps.length - 1] as
+      | { toolCalls?: Array<{ toolName?: string }>; toolResults?: Array<unknown> }
+      | undefined;
+    if (!last?.toolCalls) return false;
+    const target = toApiToolName('proposal.submit');
+    return last.toolCalls.some((tc, i) => {
+      if (tc.toolName !== target) return false;
+      const result = last.toolResults?.[i] as { output?: unknown } | undefined;
+      const output = result?.output;
+      return !(typeof output === 'object' && output !== null && (output as Record<string, unknown>).notReady === true);
+    });
+  };
 }
 
 function activeToolIds(context: RuntimeContext, bindings: AiSdkToolBindings, mode: 'harness' | 'classic'): string[] {
@@ -106,11 +143,17 @@ const ACTION_PRINCIPLE = `## Action Principle
 - Do not resolve every uncertainty.
 - When existing evidence already supports a defensible source-grounded proposal, call proposal.submit.
 - Reuse before retrieving. Before another retrieval, name the unresolved decision it could change (disease framing / syndrome judgment / treatment method / formula selection / safety disposition). If the workspace already has sufficient evidence for that decision, reuse existing evidence instead of retrieving again.
-- Do not retrieve merely to increase confidence or completeness. Do not continue broad retrieval after a viable canonical candidate exists unless new evidence could materially change the decision.`;
+- Do not retrieve merely to increase confidence or completeness. Do not continue broad retrieval after a viable canonical candidate exists unless new evidence could materially change the decision.
+- Commit workspace cognition atomically: when one clinical decision includes candidate focus, candidate assessment, hypothesis update, and uncertainty resolution, commit them together in one workspace.record_deliberation. Do not split one cognitive decision into multiple workspace writes unless later information genuinely changes the decision. Do not repeat workspace mutations that are already persisted.
+- Choose the clinical action you need. Do not manually perform deterministic preparation (canonical hydrate, formula validation, source binding) that the Harness completes automatically before submit.
+- Reuse already activated capabilities, validated candidates, and existing deterministic results when still valid. Do not repeat execution chores that do not change the business objective.
+- When the clinical decision is sufficiently complete, submit the proposal instead of continuing exploration. Do not repeat deterministic preparation already handled by the Harness.
+- Retrieved syndrome labels describe knowledge sources, not the patient's diagnosis. Do not treat a syndrome returned by retrieval as confirmation merely because the query already contained that syndrome. Patient-level hypotheses must be justified against case facts, treatment context, tongue/pulse, and discriminating evidence. A hypothesis-conditioned search provides knowledge about that hypothesis, but does not independently prove the patient has it.
+- Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty. Do not let a supported alternative silently disappear.`;
 
-export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback): string {
+export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback, decisionState?: DecisionState): string {
   const skills = renderActiveSkills(context.skills);
-  const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback);
+  const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, decisionState);
   const workingView = renderClinicalWorkingView(view);
   return `${base}\n\n${ACTION_PRINCIPLE}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
 }
@@ -174,6 +217,38 @@ export function computeDecisionImpact(delta: WorkspaceEvent[], errored: boolean)
   return 'none';
 }
 
+/** H9 工具执行角色分类（不改变行为，只用于可观测）。 */
+export function classifyExecutionRole(toolName: string): ExecutionRole {
+  if (isRetrievalTool(toolName)) return 'RETRIEVAL';
+  if (
+    toolName === 'workspace.focus_candidates' ||
+    toolName === 'workspace.record_candidate_assessment' ||
+    toolName === 'workspace.record_candidate_exclusion' ||
+    toolName === 'workspace.record_deliberation'
+  ) {
+    return 'COGNITIVE_MUTATION';
+  }
+  if (toolName === 'formula.validate') return 'VALIDATION';
+  if (toolName === 'proposal.submit') return 'COMMIT';
+  if (toolName === 'capability.discover' || toolName === 'capability.activate') return 'CAPABILITY';
+  return 'OTHER';
+}
+
+function emptyExecutionRoleCosts(): Record<ExecutionRole, ExecutionRoleCost> {
+  return {
+    RETRIEVAL: { toolCalls: 0, nonDecisionChangingCalls: 0, latencyMs: 0, resultTokens: 0 },
+    COGNITIVE_MUTATION: { toolCalls: 0, nonDecisionChangingCalls: 0, latencyMs: 0, resultTokens: 0 },
+    VALIDATION: { toolCalls: 0, nonDecisionChangingCalls: 0, latencyMs: 0, resultTokens: 0 },
+    COMMIT: { toolCalls: 0, nonDecisionChangingCalls: 0, latencyMs: 0, resultTokens: 0 },
+    CAPABILITY: { toolCalls: 0, nonDecisionChangingCalls: 0, latencyMs: 0, resultTokens: 0 },
+    OTHER: { toolCalls: 0, nonDecisionChangingCalls: 0, latencyMs: 0, resultTokens: 0 },
+  };
+}
+
+function emptyRoleCounts(): Record<ExecutionRole, number> {
+  return { RETRIEVAL: 0, COGNITIVE_MUTATION: 0, VALIDATION: 0, COMMIT: 0, CAPABILITY: 0, OTHER: 0 };
+}
+
 function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'): string {
   const skills = context.skills.map((skill) => `### Skill: ${skill.id}\n${skill.instruction}`).join('\n\n');
   return [
@@ -192,33 +267,6 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
       : '按已装配工具完成检索与 Proposal。',
     '',
     `医生输入：\n${context.input}`,
-  ].join('\n');
-}
-
-function buildFinalizePrompt(context: RuntimeContext): string {
-  const evidence = JSON.stringify(buildEvidenceProjection(context.workspace), null, 2);
-  const hypotheses = JSON.stringify(buildHypothesisProjection(context.workspace), null, 2);
-  const deliberation = JSON.stringify(buildComparisonMatrix(context.workspace), null, 2);
-  return [
-    '你的临床探索已完成（或达到资源上限）。现在必须基于已积累的工作台信息提交最终 Proposal，禁止继续检索或调用任何探索工具。',
-    '',
-    `本次交互模式：${context.understanding.interaction.mode}`,
-    `原始病例：\n${context.input}`,
-    '',
-    `当前安全处置：${context.workspace.safetyDisposition}`,
-    `不确定点：${JSON.stringify(context.workspace.uncertainties)}`,
-    `信息缺口：${JSON.stringify(context.workspace.informationGaps)}`,
-    '',
-    '## Evidence Projection',
-    evidence,
-    '',
-    '## Hypothesis Coverage',
-    hypotheses,
-    '',
-    '## Candidate Comparison Matrix (Frontier)',
-    deliberation,
-    '',
-    '只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字。按 system 指令中的四种结构（conversation / clarification / urgent / clinical）选择其一。保留不确定性、允许 clarification / missing_information，不要为了完整度编造。',
   ].join('\n');
 }
 
@@ -274,12 +322,50 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       toolLatencyMsTotal: 0, resultTokensProduced: 0,
       uniqueCandidatesDiscovered: 0, uniqueCandidatesPromoted: 0, uniqueCandidatesHydrated: 0, uniqueCandidatesValidated: 0,
       formulaHydrationCalls: 0, formulaHydrationCacheHitCount: 0, formulaCandidateVisibleTokens: 0, formulaHydratedVisibleTokens: 0,
+      cognitiveMutationCalls: 0, effectiveMutationCalls: 0, noopMutationCalls: 0,
+      workspaceEventsWritten: 0, workspaceEventBatches: 0,
+      workspaceProjectionCount: 0, decisionStateProjectionCount: 0,
+      deliberationCommitCount: 0,
       retrievalsBeforeFirstViableCandidate: 0, retrievalsAfterFirstViableCandidate: 0,
       nonDecisionChangingRetrievalsBeforeViable: 0, nonDecisionChangingRetrievalsAfterViable: 0,
       getSourceReuseCount: 0, formulaSearchReuseCount: 0, evidenceReuseCount: 0,
+      toolCallsByExecutionRole: emptyExecutionRoleCosts(),
+      nonDecisionChangingCallsByExecutionRole: emptyRoleCounts(),
+      latencyMsByExecutionRole: emptyRoleCounts(),
+      resultTokensByExecutionRole: emptyRoleCounts(),
+      requiredNonDecisionChangingCalls: 0,
+      avoidableNonDecisionChangingCalls: 0,
+      capabilityActivationCount: 0,
+      capabilityReuseCount: 0,
+      duplicateCapabilityActivationCount: 0,
+      validationCallCount: 0,
+      validationReuseCount: 0,
+      duplicateValidationCount: 0,
+      projectionWithStateChange: 0,
+      projectionWithoutStateChange: 0,
+      projectionReuseCount: 0,
+    };
+
+    const commitReliability: CommitReliabilityMetrics = {
+      agentProposalSubmitCount: 0,
+      agentProposalSubmitSuccessCount: 0,
+      runtimeForcedFinalizationCount: 0,
+      runtimeForcedFinalizationSuccessCount: 0,
+      finalProposalCommittedCount: 0,
+      proposalParseFailureCount: 0,
+      proposalSchemaFailureCount: 0,
+      proposalRetryCount: 0,
+      proposalRetrySuccessCount: 0,
+      finalizationInputTokens: 0,
+      finalizationOutputTokens: 0,
+      finalizationContextItemCount: 0,
+      proposalDraftFieldCount: 0,
     };
 
     const emit = (stage: LifecycleStage) => onEvent?.({ type: 'lifecycle', stage });
+
+    const projectionCache = new ProjectionCache();
+    let cachedDecisionState: DecisionState | undefined;
 
     const agent = new ToolLoopAgent({
       model: llmModel,
@@ -287,18 +373,24 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
       prepareStep: async ({ initialMessages, steps }) => {
         currentStep = steps.length + 1;
+        metrics.workspaceProjectionCount += 1;
+        metrics.decisionStateProjectionCount += 1;
+        const version = context.workspaceStore.version;
+        cachedDecisionState = projectionCache.getDecisionState(version, context.workspace, context.strategy).decisionState;
         return {
           activeTools: activeToolIds(context, bindings, mode),
-          instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
+          instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback(), cachedDecisionState),
           messages: compactAgentMessages(initialMessages, steps),
         };
       },
       stopWhen: mode === 'harness'
-        ? [hasToolCall(toApiToolName('proposal.submit')), isStepCount(resourceSteps)]
+        ? [proposalSubmitReadyStep(), isStepCount(resourceSteps)]
         : [isStepCount(resourceSteps)],
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const internalName = fromApiToolName(toolCall.toolName);
-        const reused = ledger.isReused(internalName, toolCall.input);
+        const stateKey = internalName === 'capability.discover' ? capabilityStateKey(context) : undefined;
+        const reused = ledger.isReused(internalName, toolCall.input, stateKey);
+        const executionRole = classifyExecutionRole(internalName);
         const actionId = `A_${String(++actionCounter).padStart(4, '0')}`;
         const nowMs = Date.now();
 
@@ -316,6 +408,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
 
         let rawOutput: unknown;
         let error: unknown;
+        let batchResult: WorkspaceBatchResult | undefined;
         if (reused) {
           rawOutput = toolOutput.type === 'tool-result' ? toolOutput.output : undefined;
           error = toolOutput.type === 'tool-error' ? toolOutput.error : undefined;
@@ -323,6 +416,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           const applied = applyToolExecutionResult(internalName, toolCall.input, toolOutput as ToolExecutionEnvelope, context.workspaceStore);
           rawOutput = applied.rawOutput;
           error = applied.error;
+          batchResult = applied.batchResult;
         }
 
         if (internalName === 'proposal.submit' && toolOutput.type === 'tool-result') {
@@ -337,6 +431,21 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         const newEvidenceCount = delta.filter((e) => e.type === 'evidence.added').length;
         const status = error !== undefined ? 'error' : reused ? 'deduplicated' : 'success';
         const resultTokenEstimate = rawOutput === undefined ? 0 : estimateTokens(JSON.stringify(rawOutput));
+
+        // H10：executionNecessity 由 Harness 确定性判定（非模型填写）。
+        const batchWritten = batchResult?.written ?? 0;
+        const capabilityAlreadyActive =
+          internalName === 'capability.activate' &&
+          typeof rawOutput === 'object' && rawOutput !== null &&
+          (rawOutput as Record<string, unknown>).reused === true;
+        const executionNecessity = computeExecutionNecessity({
+          toolName: internalName,
+          executionRole,
+          reused,
+          decisionImpact,
+          batchWritten,
+          capabilityAlreadyActive,
+        });
 
         tracker.recordToolExecution({
           toolName: internalName,
@@ -354,6 +463,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           runId: context.runId,
           toolName: internalName,
           status,
+          executionRole,
           sourceRefs: [],
           evidenceRefs: delta.filter((e) => e.type === 'evidence.added').map((e) => typeof e.payload.id === 'string' ? e.payload.id : '').filter(Boolean),
           stateDeltaRefs: delta.map((e) => `${e.type}:${typeof e.payload.id === 'string' ? e.payload.id : ''}`),
@@ -361,6 +471,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           reusedEvidenceCount: reused ? 1 : 0,
           stateDeltaCount: delta.length,
           decisionImpact,
+          executionNecessity,
           latencyMs: toolExecutionMs ?? 0,
           resultTokenEstimate,
           errorCode: error !== undefined ? 'TOOL_ERROR' : undefined,
@@ -376,6 +487,17 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         else if (decisionImpact === 'none') metrics.nonDecisionChangingToolCalls += 1;
         else metrics.unresolvedToolCalls += 1;
         if (reused) { metrics.deduplicatedCallCount += 1; metrics.cacheHitCount += 1; }
+        if (batchResult) {
+          metrics.workspaceEventsWritten += batchResult.written;
+          metrics.workspaceEventBatches += 1;
+        }
+        if (executionRole === 'COGNITIVE_MUTATION') {
+          metrics.cognitiveMutationCalls += 1;
+          if (internalName === 'workspace.record_deliberation') metrics.deliberationCommitCount += 1;
+          const effective = !reused && batchResult !== undefined && batchResult.written > 0;
+          if (effective) metrics.effectiveMutationCalls += 1;
+          else metrics.noopMutationCalls += 1;
+        }
         if ((internalName === 'knowledge.search' || internalName === 'formula.search_normative') && decisionImpact === 'none' && newEvidenceCount === 0) {
           metrics.redundantSearchCount += 1;
         }
@@ -383,6 +505,27 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         else if (internalName === 'knowledge.get_source') metrics.getSourceCount += 1;
         else if (internalName === 'formula.search_normative') metrics.formulaSearchCount += 1;
         else if (internalName === 'formula.validate') metrics.formulaValidationCalls += 1;
+
+        // H10：execution role cost breakdown + execution necessity 分层。
+        const roleCost = metrics.toolCallsByExecutionRole[executionRole];
+        roleCost.toolCalls += 1;
+        roleCost.latencyMs += toolExecutionMs ?? 0;
+        roleCost.resultTokens += resultTokenEstimate;
+        metrics.latencyMsByExecutionRole[executionRole] += toolExecutionMs ?? 0;
+        metrics.resultTokensByExecutionRole[executionRole] += resultTokenEstimate;
+        if (decisionImpact === 'none') {
+          roleCost.nonDecisionChangingCalls += 1;
+          metrics.nonDecisionChangingCallsByExecutionRole[executionRole] += 1;
+          if (executionNecessity === 'required') metrics.requiredNonDecisionChangingCalls += 1;
+          else if (executionNecessity === 'avoidable') metrics.avoidableNonDecisionChangingCalls += 1;
+        }
+        if (internalName === 'capability.activate') {
+          metrics.capabilityActivationCount += 1;
+          if (capabilityAlreadyActive || reused) {
+            metrics.capabilityReuseCount += 1;
+            metrics.duplicateCapabilityActivationCount += 1;
+          }
+        }
 
         const toolCallTrace = { toolName: internalName, input: toolCall.input, output: rawOutput, error, ms: toolExecutionMs, reused };
         addToolCall(context.runId, toolCallTrace);
@@ -418,16 +561,23 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     finishReason = response.finishReason;
     finalStepHadToolCalls = response.finalStep.toolCalls.length > 0;
     usage = response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens } : usage;
+    const finalDecisionAtMs = Date.now();
 
     if (submittedProposal !== undefined) {
-      proposal = agentResultSchema.parse(submittedProposal);
+      // 主动 submit：canonical candidate 身份由 Runtime ownership，模型只提交选择。
+      commitReliability.agentProposalSubmitCount = 1;
+      proposal = await canonicalizeProposalSubmit(submittedProposal as ProposalSubmitInput, context);
+      commitReliability.agentProposalSubmitSuccessCount = 1;
+      commitReliability.finalProposalCommittedCount = 1;
+      commitReliability.timeFromFinalDecisionToCommitMs = Date.now() - finalDecisionAtMs;
       proposalSubmitted = true;
       forcedFinalization = false;
       terminationReason = 'agent_submitted';
     } else {
-      // Forced Finalization：不进入第二轮临床探索，只基于已有工作台交卷。
+      // Minimal Finalization：只 serialize 已形成的判断，不重新解决病例、不重新检索。
       emit('finalizing');
-      const finalize = await this.forcedFinalization(context);
+      commitReliability.runtimeForcedFinalizationCount = 1;
+      const finalize = await this.minimalFinalization(context, commitReliability);
       proposal = finalize.proposal;
       if (finalize.usage) {
         usage = {
@@ -435,6 +585,9 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           outputTokens: (usage?.outputTokens ?? 0) + (finalize.usage.outputTokens ?? 0),
         };
       }
+      commitReliability.runtimeForcedFinalizationSuccessCount = 1;
+      commitReliability.finalProposalCommittedCount = 1;
+      commitReliability.timeFromFinalDecisionToCommitMs = Date.now() - finalDecisionAtMs;
       forcedFinalization = true;
       proposalSubmitted = false;
       terminationReason = finalStepHadToolCalls ? 'resource_limit_fallback' : 'agent_stopped_without_submit';
@@ -452,6 +605,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       finalStepHadToolCalls,
       toolCallLedger: ledger.entries(),
       promptComponents: computePromptComponents(context, ledger, tracker.feedback()),
+      commitReliability,
     };
 
     const contextMetrics = computeContextMetrics(context, ledger, tracker.feedback());
@@ -464,6 +618,13 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     metrics.formulaHydrationCalls = hydrationStats.formulaHydrationCalls;
     metrics.formulaHydrationCacheHitCount = hydrationStats.formulaHydrationCacheHitCount;
     metrics.formulaValidationCalls = hydrationStats.formulaValidationCalls;
+    metrics.validationCallCount = hydrationStats.formulaValidationCalls;
+    metrics.validationReuseCount = hydrationStats.validationReuseCount;
+    metrics.duplicateValidationCount = hydrationStats.duplicateValidationCount;
+    const projectionMetrics = projectionCache.metrics();
+    metrics.projectionWithStateChange = projectionMetrics.projectionWithStateChange;
+    metrics.projectionWithoutStateChange = projectionMetrics.projectionWithoutStateChange;
+    metrics.projectionReuseCount = projectionMetrics.projectionReuseCount;
     Object.assign(metrics, retrievalMetrics);
     setRunMetrics(context.runId, metrics);
 
@@ -471,24 +632,85 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
   }
 
   /**
-   * Forced Finalization：单独一次模型调用，不开放任何 exploration tool。
-   * 这不是第二轮临床探索，禁止继续 search；只是「根据已有工作台交卷」。
-   *
-   * 实现说明：thinking 模式的 provider 不支持强制 tool_choice，且模型工具调用 JSON 在
-   * 兜底场景下不可靠，因此这里采用「无工具 + 文本 JSON」的确定性收尾，等价于 classic 的
-   * extractJson 路径，但输入是已积累的 workspace 投影（非新探索）。
+   * H11 Minimal Finalization —— 只把 Workspace 中已形成的判断序列化为最小 proposal 结构。
+   * 不重新解决病例、不重新检索、不生成新的 formula identity；模型输出经 parse → schema → canonical fill。
+   * 第一次 parse/schema 失败时，最多做一次 bounded structured retry；再失败则 FAIL CLOSED。
    */
-  private async forcedFinalization(context: RuntimeContext): Promise<{ proposal: AgentResult; usage?: { inputTokens?: number; outputTokens?: number } }> {
-    const result = await generateText({
+  private async minimalFinalization(
+    context: RuntimeContext,
+    commitReliability: CommitReliabilityMetrics,
+  ): Promise<{ proposal: AgentResult; usage?: { inputTokens?: number; outputTokens?: number } }> {
+    const draft = buildProposalDraft(context.workspace);
+    commitReliability.proposalDraftFieldCount = countProposalDraftFields(draft);
+    const decisionState = buildDecisionState(context.workspace, context.strategy);
+    commitReliability.finalizationContextItemCount = countFinalizationContextItems(draft, decisionState);
+
+    const serializationStartedAtMs = Date.now();
+    const prompt = buildMinimalFinalizationPrompt(context, draft, decisionState);
+
+    let result = await generateText({
       model: llmModel,
       system: this.options.instructions,
-      prompt: buildFinalizePrompt(context),
+      prompt,
       timeout: { totalMs: 120_000 },
     });
-    const proposal = extractJson(result.text, agentResultSchema);
-    return {
-      proposal,
-      usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens },
-    };
+    let finInput = result.usage.inputTokens ?? 0;
+    let finOutput = result.usage.outputTokens ?? 0;
+
+    let parsed = tryParseProposalSubmit(result.text);
+    if (parsed.ok) {
+      commitReliability.finalizationInputTokens = finInput;
+      commitReliability.finalizationOutputTokens = finOutput;
+      commitReliability.proposalSerializationLatencyMs = Date.now() - serializationStartedAtMs;
+      const proposal = await canonicalizeProposalSubmit(parsed.value, context);
+      return { proposal, usage: { inputTokens: finInput, outputTokens: finOutput } };
+    }
+
+    // 记录 parse/schema 失败并保留 raw payload 进 Trace。
+    if (parsed.stage === 'parse') commitReliability.proposalParseFailureCount += 1;
+    else commitReliability.proposalSchemaFailureCount += 1;
+    addToolCall(context.runId, {
+      toolName: 'finalization',
+      input: { attempt: 1 },
+      output: parsed.rawPayload,
+      error: parsed.error,
+      ms: 0,
+    });
+
+    // bounded retry：仅一次，最小上下文 + 错误摘要。
+    commitReliability.proposalRetryCount += 1;
+    const retryResult = await generateText({
+      model: llmModel,
+      system: this.options.instructions,
+      prompt: buildRetryPrompt(draft, parsed.error),
+      timeout: { totalMs: 120_000 },
+    });
+    finInput += retryResult.usage.inputTokens ?? 0;
+    finOutput += retryResult.usage.outputTokens ?? 0;
+
+    const retryParsed = tryParseProposalSubmit(retryResult.text);
+    if (retryParsed.ok) {
+      commitReliability.proposalRetrySuccessCount += 1;
+      commitReliability.finalizationInputTokens = finInput;
+      commitReliability.finalizationOutputTokens = finOutput;
+      commitReliability.proposalSerializationLatencyMs = Date.now() - serializationStartedAtMs;
+      const proposal = await canonicalizeProposalSubmit(retryParsed.value, context);
+      return { proposal, usage: { inputTokens: finInput, outputTokens: finOutput } };
+    }
+
+    if (retryParsed.stage === 'parse') commitReliability.proposalParseFailureCount += 1;
+    else commitReliability.proposalSchemaFailureCount += 1;
+    addToolCall(context.runId, {
+      toolName: 'finalization.retry',
+      input: { attempt: 2 },
+      output: retryParsed.rawPayload,
+      error: retryParsed.error,
+      ms: 0,
+    });
+
+    // FAIL CLOSED：不伪造 proposal、不猜测缺失临床字段。
+    throw new Error(
+      `Proposal finalization failed (${retryParsed.stage}): ${retryParsed.error} | raw: ${retryParsed.rawPayload.slice(0, 200)}`,
+    );
   }
 }

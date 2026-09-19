@@ -111,6 +111,10 @@ interface FormulaRunTelemetry {
   hydratedKeys: Set<string>;
   /** 本 run 通过 candidateId 路径 validate 的 unique candidate keys。 */
   validatedKeys: Set<string>;
+  /** H10：formula.validate 复用已有 validation cache 的次数。 */
+  validationReuseCount: number;
+  /** H10：同一 candidateKey 被重复 validate 的次数（>1 次的超额计数）。 */
+  duplicateValidationCount: number;
 }
 
 /**
@@ -128,6 +132,8 @@ function telemetryFor(runId: string): FormulaRunTelemetry {
       formulaValidationCalls: 0,
       hydratedKeys: new Set(),
       validatedKeys: new Set(),
+      validationReuseCount: 0,
+      duplicateValidationCount: 0,
     };
     telemetryByRun.set(runId, t);
   }
@@ -177,11 +183,43 @@ export async function getCanonicalFormula(
   return canonical;
 }
 
-/** formula.validate 执行一次；candidateId 路径额外计入 unique validated candidates。 */
+/** formula.validate 执行一次；candidateId 路径额外计入 unique validated candidates 与重复计数。 */
 export function recordFormulaValidation(runId: string, candidateKey?: string): void {
   const t = telemetryFor(runId);
   t.formulaValidationCalls += 1;
-  if (candidateKey) t.validatedKeys.add(candidateKey);
+  if (candidateKey) {
+    if (t.validatedKeys.has(candidateKey)) t.duplicateValidationCount += 1;
+    else t.validatedKeys.add(candidateKey);
+  }
+}
+
+/** H10：记录一次 validation cache 命中（复用已有 deterministic validation 结果）。 */
+export function recordValidationReuse(runId: string): void {
+  telemetryFor(runId).validationReuseCount += 1;
+}
+
+/**
+ * H10 validation reuse：sourceId + formulaId + composition 相同的确定性 validation
+ * 只执行一次，后续复用缓存结果。canonical knowledge 在 run 内冻结，缓存不失效。
+ */
+const validationCache = new Map<string, ValidationResult>();
+
+export async function validateNormativeFormulaCached(
+  input: { sourceId: string; formulaId: string; composition: string },
+  runId?: string,
+  docs?: KnowledgeDoc[],
+): Promise<{ result: ValidationResult; reused: boolean }> {
+  const key = `${input.sourceId}\u0000${input.formulaId}\u0000${normalize(input.composition)}`;
+  const cached = validationCache.get(key);
+  if (cached) {
+    if (runId) recordValidationReuse(runId);
+    return { result: cached, reused: true };
+  }
+  const result = docs
+    ? validateNormativeFormulaInDocs(docs, input)
+    : await validateNormativeFormula(input);
+  validationCache.set(key, result);
+  return { result, reused: false };
 }
 
 export interface FormulaTelemetry {
@@ -190,6 +228,8 @@ export interface FormulaTelemetry {
   formulaHydrationCalls: number;
   formulaHydrationCacheHitCount: number;
   formulaValidationCalls: number;
+  validationReuseCount: number;
+  duplicateValidationCount: number;
 }
 
 export function getFormulaHydrationStats(runId: string): FormulaTelemetry {
@@ -200,5 +240,7 @@ export function getFormulaHydrationStats(runId: string): FormulaTelemetry {
     formulaHydrationCalls: t.formulaHydrationCalls,
     formulaHydrationCacheHitCount: t.formulaHydrationCacheHitCount,
     formulaValidationCalls: t.formulaValidationCalls,
+    validationReuseCount: t.validationReuseCount,
+    duplicateValidationCount: t.duplicateValidationCount,
   };
 }

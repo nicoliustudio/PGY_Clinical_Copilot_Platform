@@ -1,12 +1,12 @@
 import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
-import { searchNormativeWithDiagnostics, validateNormativeFormula, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
-import { agentResultSchema, type AgentResult } from '../../contracts/result.js';
+import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
+import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses } from '../../platform/workspace/clinical-workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
 export type AiSdkToolBindings = Record<string, AiSdkToolBindingFactory>;
@@ -17,10 +17,27 @@ function assertKnownCandidateRef(context: RuntimeContext, candidateRef: string):
   }
 }
 
+function assertKnownHypothesisRef(context: RuntimeContext, hypothesisRef: string): void {
+  if (!context.workspace.hypothesisState.hypotheses.some((h) => h.id === hypothesisRef)) {
+    throw new Error(`unknown hypothesisRef: ${hypothesisRef}`);
+  }
+}
+
+/** H12：search 发起时的 DecisionState 快照（Debug/Eval 数据）。 */
+function buildRetrievalContext(context: RuntimeContext) {
+  const hyps = context.workspace.hypothesisState.hypotheses;
+  return {
+    decisionQuestion: context.strategy.decisionQuestion,
+    leadingHypothesisRefs: hyps.filter((h) => h.status === 'active').map((h) => h.id),
+    alternativeHypothesisRefs: hyps.filter((h) => h.status === 'alternative').map((h) => h.id),
+  };
+}
+
 /**
- * proposal.submit 的 DeepSeek 兼容 JSON Schema。
- * z.discriminatedUnion 会生成顶层 oneOf（缺 type: "object"），DeepSeek 拒绝。
- * 这里改为顶层 type: "object"；真实结构校验由 validate 回调委托给 agentResultSchema.safeParse。
+ * proposal.submit 的 DeepSeek 兼容 JSON Schema（H11 最小化）。
+ * 模型只提交「选择」：mode + disease/syndrome/treatment + candidate_ref + uncertainty。
+ * formula identity（sourceId/formulaId/composition/authority）与 safety 均由 Runtime 填充。
+ * z.discriminatedUnion 会生成顶层 oneOf（缺 type: "object"），DeepSeek 拒绝，故用顶层 type: "object"。
  */
 const PROPOSAL_SUBMIT_JSON_SCHEMA: JSONSchema7 = {
   type: 'object',
@@ -39,7 +56,6 @@ const PROPOSAL_SUBMIT_JSON_SCHEMA: JSONSchema7 = {
         required: ['description', 'severity'],
       },
     },
-    status: { type: 'string', enum: ['COMPLETED', 'BLOCKED'] },
     disease: {
       type: 'object',
       properties: {
@@ -47,6 +63,7 @@ const PROPOSAL_SUBMIT_JSON_SCHEMA: JSONSchema7 = {
         confidence: { type: 'number' },
         evidence_refs: { type: 'array', items: { type: 'string' } },
       },
+      required: ['name'],
     },
     syndrome: {
       type: 'object',
@@ -55,6 +72,7 @@ const PROPOSAL_SUBMIT_JSON_SCHEMA: JSONSchema7 = {
         confidence: { type: 'number' },
         evidence_refs: { type: 'array', items: { type: 'string' } },
       },
+      required: ['name'],
     },
     treatment: {
       type: 'object',
@@ -62,32 +80,18 @@ const PROPOSAL_SUBMIT_JSON_SCHEMA: JSONSchema7 = {
         text: { type: 'string' },
         evidence_refs: { type: 'array', items: { type: 'string' } },
       },
+      required: ['text'],
     },
-    formula: {
-      type: 'object',
-      properties: {
-        authority: { type: 'string', enum: ['NORMATIVE', 'GENERATED_DRAFT', 'BLOCKED'] },
-        formula_id: { type: 'string' },
-        name: { type: 'string' },
-        composition: { type: 'array', items: { type: 'string' } },
-        source_id: { type: 'string' },
-        evidence_refs: { type: 'array', items: { type: 'string' } },
-        candidate_ref: { type: 'string' },
-      },
-    },
-    missing_information: { type: 'array', items: { type: 'string' } },
-    safety: {
-      type: 'object',
-      properties: { status: { type: 'string', enum: ['PASS', 'BLOCK'] } },
-    },
+    candidate_ref: { type: 'string' },
+    uncertainty: { type: 'array', items: { type: 'string' } },
   },
   required: ['mode'],
 };
 
 function validateProposal(
   value: unknown,
-): { success: true; value: AgentResult } | { success: false; error: Error } {
-  const result = agentResultSchema.safeParse(value);
+): { success: true; value: ProposalSubmitInput } | { success: false; error: Error } {
+  const result = proposalSubmitInputSchema.safeParse(value);
   return result.success
     ? { success: true, value: result.data }
     : { success: false, error: result.error };
@@ -126,7 +130,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     }),
     execute: async ({ query, topK, role, fallbackReason }) => {
       const { hits, diagnostics } = await searchWithDiagnostics(query, topK ?? 10, context.knowledgeScopes, 'knowledge.search', { role, fallbackReason });
-      addRetrievalDiagnostics(context.runId, diagnostics);
+      addRetrievalDiagnostics(context.runId, { ...diagnostics, retrievalContext: buildRetrievalContext(context) });
       return hits;
     },
   }),
@@ -144,7 +148,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       const resolvedHypothesisRef = workItem?.hypothesisRef;
       const refs = resolvedHypothesisRef ? [resolvedHypothesisRef] : [];
       const candidateRefs = results.map((r) => `${r.sourceId}::${r.formulaId}`);
-      addRetrievalDiagnostics(context.runId, { ...diagnostics, promotionWorkItemRef, resolvedHypothesisRef, candidateRefs });
+      addRetrievalDiagnostics(context.runId, { ...diagnostics, promotionWorkItemRef, resolvedHypothesisRef, candidateRefs, retrievalContext: buildRetrievalContext(context) });
       return results.map((r) => ({
         candidateId: `${r.sourceId}::${r.formulaId}`,
         candidateRef: `${r.sourceId}::${r.formulaId}`,
@@ -183,11 +187,19 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           return { valid: false };
         }
         recordFormulaValidation(context.runId, candidateId);
-        return validateNormativeFormula({ sourceId: sid, formulaId: fid, composition: canonical.composition });
+        const { result } = await validateNormativeFormulaCached(
+          { sourceId: sid, formulaId: fid, composition: canonical.composition },
+          context.runId,
+        );
+        return result;
       }
       recordFormulaValidation(context.runId);
       if (!sourceId || !formulaId || !composition) return { valid: false };
-      return validateNormativeFormula({ sourceId, formulaId, composition });
+      const { result } = await validateNormativeFormulaCached(
+        { sourceId, formulaId, composition },
+        context.runId,
+      );
+      return result;
     },
   }),
   'workspace.focus_candidates': (context) => tool({
@@ -224,33 +236,69 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_deliberation': (context) => tool({
-    description: '一次批量提交 Deliberation：focusedCandidates（进入正式比较的候选）、assessments（candidate × hypothesis 评估）、exclusions（有意排除）。引用必须真实存在。用于避免一个候选一次工具调用。',
+    description: '一次批量提交 Deliberation：focusedCandidates（进入正式比较的候选）、assessments（candidate × hypothesis 评估）、exclusions（有意排除）、hypothesisUpdates（假设状态/证据更新）、resolvedUncertaintyRefs（已解决不确定性）。引用必须真实存在。一次认知决定尽量一次提交，避免把 focus/assessment/hypothesis/uncertainty 拆成多次 workspace 写入。',
     inputSchema: z.object({
-      focusedCandidates: z.array(z.string()),
+      focusedCandidates: z.array(z.string()).optional(),
       assessments: z.array(z.object({
         candidateRef: z.string(),
         hypothesisRef: z.string(),
-        supportingEvidenceRefs: z.array(z.string()),
-        contradictingEvidenceRefs: z.array(z.string()),
-        unresolvedQuestions: z.array(z.string()),
-        assessmentSummary: z.string(),
-        assessmentEvidenceRefs: z.array(z.string()),
-      })),
-      exclusions: z.array(z.object({ candidateRef: z.string(), reason: z.string() })),
+        supportingEvidenceRefs: z.array(z.string()).optional(),
+        contradictingEvidenceRefs: z.array(z.string()).optional(),
+        unresolvedQuestions: z.array(z.string()).optional(),
+        assessmentSummary: z.string().optional(),
+        assessmentEvidenceRefs: z.array(z.string()).optional(),
+      })).optional(),
+      exclusions: z.array(z.object({ candidateRef: z.string(), reason: z.string() })).optional(),
+      hypothesisUpdates: z.array(z.object({
+        hypothesisRef: z.string(),
+        status: z.enum(['active', 'alternative', 'rejected', 'preserved_as_uncertainty']).optional(),
+        supportingEvidenceRefs: z.array(z.string()).optional(),
+        contradictingEvidenceRefs: z.array(z.string()).optional(),
+      })).optional(),
+      resolvedUncertaintyRefs: z.array(z.string()).optional(),
+      remainingDecisionChangingUnknowns: z.array(z.string()).optional(),
     }),
-    execute: async ({ focusedCandidates, assessments, exclusions }) => {
-      for (const ref of focusedCandidates) assertKnownCandidateRef(context, ref);
-      for (const a of assessments) {
-        const errors = validateCandidateAssessmentRefs(context.workspace, a);
+    execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns }) => {
+      for (const ref of focusedCandidates ?? []) assertKnownCandidateRef(context, ref);
+      for (const a of assessments ?? []) {
+        const errors = validateCandidateAssessmentRefs(context.workspace, {
+          candidateRef: a.candidateRef,
+          hypothesisRef: a.hypothesisRef,
+          supportingEvidenceRefs: a.supportingEvidenceRefs ?? [],
+          contradictingEvidenceRefs: a.contradictingEvidenceRefs ?? [],
+          assessmentEvidenceRefs: a.assessmentEvidenceRefs ?? [],
+        });
         if (errors.length > 0) throw new Error(errors.join('; '));
       }
-      for (const x of exclusions) assertKnownCandidateRef(context, x.candidateRef);
-      return { focusedCandidates, assessments, exclusions };
+      for (const x of exclusions ?? []) assertKnownCandidateRef(context, x.candidateRef);
+      for (const u of hypothesisUpdates ?? []) assertKnownHypothesisRef(context, u.hypothesisRef);
+      return { focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns };
     },
   }),
-  'proposal.submit': () => tool({
-    description: '当临床探索已充分、可以形成最终 Proposal 时调用。这是终结 reasoning loop 的终结工具，输入即最终 Proposal，调用后立即停止。目标不是穷尽所有信息，而是基于当前证据给出最佳可辩护 Proposal。',
-    inputSchema: jsonSchema<AgentResult>(PROPOSAL_SUBMIT_JSON_SCHEMA, { validate: validateProposal }),
+  'workspace.consider_hypotheses': (context) => tool({
+    description: '显式认领 patient-level hypothesis：把你当前认为可能解释本病例的证型写成 formal hypothesis（leading 或 alternative）。这是「你的临床判断」，不是检索标签。basisRefs 引用支撑该假设的病例事实/证据 ref。一旦认领，提交前必须 resolution（selected / rejected / preserved_as_uncertainty）。',
+    inputSchema: z.object({
+      hypotheses: z.array(z.object({
+        label: z.string(),
+        role: z.enum(['leading', 'alternative']),
+        basisRefs: z.array(z.string()).optional(),
+      })),
+    }),
     execute: async (input) => input,
+  }),
+  'proposal.submit': (context) => tool({
+    description: '当临床决策已充分时调用，提交最终 Proposal 并立即停止。只提交你的选择（mode + disease/syndrome/treatment + 可选 candidate_ref/uncertainty）；formula 的 sourceId/formulaId/composition 与 safety 由 Runtime 自动填充，不要重复生成。',
+    inputSchema: jsonSchema<ProposalSubmitInput>(PROPOSAL_SUBMIT_JSON_SCHEMA, { validate: validateProposal }),
+    execute: async (input) => {
+      const unresolved = findUnresolvedFormalHypotheses(context.workspace);
+      if (unresolved.length > 0) {
+        return {
+          notReady: true,
+          message: 'proposal not ready: unresolved decision-changing hypothesis exists. Resolve it as selected / rejected with basis / preserved as uncertainty.',
+          unresolvedHypotheses: unresolved.map((h) => ({ ref: h.id, label: h.label })),
+        };
+      }
+      return input;
+    },
   }),
 };

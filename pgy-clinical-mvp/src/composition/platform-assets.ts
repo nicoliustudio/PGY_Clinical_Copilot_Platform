@@ -9,6 +9,7 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
   { id: 'workspace.record_candidate_assessment', description: '记录 candidate × hypothesis 的候选评估', risk: 'low' },
   { id: 'workspace.record_candidate_exclusion', description: '记录 candidate 被有意排除的原因', risk: 'low' },
   { id: 'workspace.record_deliberation', description: '批量提交 focus + assessment + exclusion', risk: 'low' },
+  { id: 'workspace.consider_hypotheses', description: '显式认领 patient-level hypothesis（leading/alternative）', risk: 'low' },
 ];
 export const BASELINE_TOOL_IDS: string[] = PLATFORM_TOOLS.map((t) => t.id);
 export const CLASSIC_BASELINE_TOOL_IDS: string[] = BASELINE_TOOL_IDS.filter((id) => id !== 'knowledge.get_source');

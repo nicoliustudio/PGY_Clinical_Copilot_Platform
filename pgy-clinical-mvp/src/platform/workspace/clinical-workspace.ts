@@ -7,8 +7,10 @@ import type {
   HypothesisCandidate,
   PromotionCoverage,
   PromotionWorkItem,
+  WorkspaceBatchResult,
   WorkspaceControlPort,
   WorkspaceEvent,
+  WorkspaceEventDraft,
   WorkspaceEventType,
 } from '../../contracts/workspace.js';
 
@@ -57,6 +59,22 @@ function pushUnique(target: string[], values: string[]): void {
   }
 }
 
+function sameStringArray(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+function sameAssessment(a: CandidateAssessment, b: CandidateAssessment): boolean {
+  return (
+    a.candidateRef === b.candidateRef &&
+    a.hypothesisRef === b.hypothesisRef &&
+    sameStringArray(a.supportingEvidenceRefs, b.supportingEvidenceRefs) &&
+    sameStringArray(a.contradictingEvidenceRefs, b.contradictingEvidenceRefs) &&
+    sameStringArray(a.unresolvedQuestions, b.unresolvedQuestions) &&
+    a.assessmentSummary === b.assessmentSummary &&
+    sameStringArray(a.assessmentEvidenceRefs, b.assessmentEvidenceRefs)
+  );
+}
+
 export class ClinicalWorkspaceStore implements WorkspaceControlPort {
   private readonly events: WorkspaceEvent[] = [];
 
@@ -67,6 +85,14 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
 
   get state(): ClinicalWorkspace {
     return this.workspace;
+  }
+
+  /**
+   * H10 Projection cache key：单调递增的 workspace 版本。
+   * 每次真实写入 event（written++）即 +1；用于判定 projection 是否需要重算。
+   */
+  get version(): number {
+    return this.events.length;
   }
 
   append(type: WorkspaceEventType, payload: Record<string, unknown>): WorkspaceEvent {
@@ -81,49 +107,88 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     return event;
   }
 
+  appendBatch(drafts: WorkspaceEventDraft[], batchId?: string): WorkspaceBatchResult {
+    let written = 0;
+    let deduped = 0;
+    for (const draft of drafts) {
+      const event: WorkspaceEvent = {
+        runId: this.runId,
+        type: draft.type,
+        timestamp: new Date().toISOString(),
+        payload: draft.payload,
+        batchId,
+      };
+      const changed = this.apply(event);
+      if (changed) {
+        this.events.push(event);
+        written += 1;
+      } else {
+        deduped += 1;
+      }
+    }
+    return { written, deduped };
+  }
+
   trace(): WorkspaceEvent[] {
     return [...this.events];
   }
 
-  private apply(event: WorkspaceEvent) {
+  private apply(event: WorkspaceEvent): boolean {
     // candidate.assessed 的 id 由 candidateRef × hypothesisRef 派生，不依赖外部传入 id。
     if (event.type === 'candidate.assessed') {
-      this.applyCandidateAssessed(event.payload);
-      return;
+      return this.applyCandidateAssessed(event.payload);
+    }
+    if (event.type === 'uncertainty.resolved') {
+      return this.applyUncertaintyResolved(event.payload);
+    }
+    // 纯观测事件（不改变认知状态，但必须记录到 trace），始终写入。
+    if (event.type === 'knowledge.search.completed' || event.type === 'workspace.seeded' || event.type === 'safety.updated') {
+      return true;
     }
 
     const id = asString(event.payload.id);
-    if (!id) return;
+    if (!id) return false;
 
     if (event.type === 'evidence.added') {
       this.applyEvidenceAdded(id, event.payload);
+      return true;
     } else if (event.type === 'candidate.presented') {
       this.applyCandidatePresented(id, event.payload);
+      return true;
     } else if (event.type === 'candidate.focused') {
-      this.applyCandidateFocused(id);
+      return this.applyCandidateFocused(id);
     } else if (event.type === 'candidate.selected') {
       this.applyCandidateStatus(id, 'selected');
+      return true;
     } else if (event.type === 'candidate.rejected') {
       this.applyCandidateStatus(id, 'rejected');
+      return true;
     } else if (event.type === 'candidate.excluded') {
-      this.applyCandidateExcluded(id, event.payload);
+      return this.applyCandidateExcluded(id, event.payload);
     } else if (event.type === 'capability.activated') {
       this.applyCapabilityActivated(id, event.payload);
+      return true;
     } else if (event.type === 'hypothesis.presented') {
       this.applyHypothesisPresented(id, event.payload);
+      return true;
     } else if (event.type === 'hypothesis.supported') {
-      this.applyHypothesisEvidence(id, event.payload, 'supportingEvidenceRefs');
+      return this.applyHypothesisEvidence(id, event.payload, 'supportingEvidenceRefs');
     } else if (event.type === 'hypothesis.challenged') {
-      this.applyHypothesisEvidence(id, event.payload, 'contradictingEvidenceRefs');
+      return this.applyHypothesisEvidence(id, event.payload, 'contradictingEvidenceRefs');
     } else if (event.type === 'hypothesis.selected') {
-      this.applyHypothesisStatus(id, 'active');
+      return this.applyHypothesisStatus(id, 'active');
     } else if (event.type === 'hypothesis.rejected') {
-      this.applyHypothesisStatus(id, 'rejected');
+      return this.applyHypothesisStatus(id, 'rejected');
+    } else if (event.type === 'hypothesis.preserved_as_uncertainty') {
+      return this.applyHypothesisStatus(id, 'preserved_as_uncertainty');
     } else if (event.type === 'hypothesis.promotion.requested') {
       this.applyHypothesisPromotion(id, false);
+      return true;
     } else if (event.type === 'hypothesis.promotion.resolved') {
       this.applyHypothesisPromotion(id, true);
+      return true;
     }
+    return false;
   }
 
   private applyEvidenceAdded(id: string, payload: Record<string, unknown>) {
@@ -140,6 +205,10 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       relatedCandidates: asStringArray(payload.relatedCandidates),
       supportingSignals: asStringArray(payload.supportingSignals),
       contradictingSignals: asStringArray(payload.contradictingSignals),
+      sourceInterpretation: {
+        disease: asString(payload.sourceDisease),
+        syndrome: asString(payload.sourceSyndrome),
+      },
     };
 
     const existing = this.workspace.evidenceState.evidenceItems.find((e) => e.id === id);
@@ -204,10 +273,10 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     if (comparison) comparison.status = status;
   }
 
-  private applyCandidateAssessed(payload: Record<string, unknown>) {
+  private applyCandidateAssessed(payload: Record<string, unknown>): boolean {
     const candidateRef = asString(payload.candidateRef);
     const hypothesisRef = asString(payload.hypothesisRef);
-    if (!candidateRef || !hypothesisRef) return;
+    if (!candidateRef || !hypothesisRef) return false;
     const assessment: CandidateAssessment = {
       id: `assess:${candidateRef}::${hypothesisRef}`,
       candidateRef,
@@ -221,29 +290,50 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const existing = this.workspace.deliberationState.assessments.find(
       (a) => a.candidateRef === candidateRef && a.hypothesisRef === hypothesisRef,
     );
-    if (existing) Object.assign(existing, assessment);
-    else this.workspace.deliberationState.assessments.push(assessment);
+    let changed = false;
+    if (existing) {
+      if (!sameAssessment(existing, assessment)) {
+        Object.assign(existing, assessment);
+        changed = true;
+      }
+    } else {
+      this.workspace.deliberationState.assessments.push(assessment);
+      changed = true;
+    }
 
     // 只有已在 Frontier 中的 candidate 才更新 coverage；presented 不自动产生 obligation。
     const coverage = this.workspace.deliberationState.coverage.find((c) => c.candidateRef === candidateRef);
-    if (coverage) {
+    if (coverage && coverage.assessmentStatus !== 'assessed') {
       coverage.assessmentStatus = 'assessed';
       delete coverage.exclusionReason;
+      changed = true;
     }
+    return changed;
   }
 
-  private applyCandidateExcluded(id: string, payload: Record<string, unknown>) {
+  private applyCandidateExcluded(id: string, payload: Record<string, unknown>): boolean {
     const coverage = this.workspace.deliberationState.coverage.find((c) => c.candidateRef === id);
-    if (!coverage) return;
+    if (!coverage) return false;
+    const reason = asString(payload.reason);
+    if (coverage.assessmentStatus === 'intentionally_excluded' && coverage.exclusionReason === reason) {
+      return false;
+    }
     coverage.assessmentStatus = 'intentionally_excluded';
-    coverage.exclusionReason = asString(payload.reason);
+    coverage.exclusionReason = reason;
+    return true;
   }
 
-  private applyCandidateFocused(id: string) {
+  private applyCandidateFocused(id: string): boolean {
+    let changed = false;
     if (!this.workspace.deliberationState.frontier.includes(id)) {
       this.workspace.deliberationState.frontier.push(id);
+      changed = true;
     }
-    this.ensureDeliberationCoverage(id);
+    if (!this.workspace.deliberationState.coverage.some((c) => c.candidateRef === id)) {
+      this.ensureDeliberationCoverage(id);
+      changed = true;
+    }
+    return changed;
   }
 
   private ensureDeliberationCoverage(candidateRef: string): DeliberationCoverage {
@@ -268,10 +358,12 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
 
   private applyHypothesisPresented(id: string, payload: Record<string, unknown>) {
     const label = asString(payload.label) ?? id;
+    const origin = asString(payload.origin) as HypothesisCandidate['origin'] | undefined;
     const existing = this.workspace.hypothesisState.hypotheses.find((h) => h.id === id);
     if (existing) {
       existing.label = label;
       if (asString(payload.description)) existing.description = asString(payload.description);
+      if (origin && existing.origin !== origin) existing.origin = origin;
       pushUnique(existing.supportingEvidenceRefs, asStringArray(payload.supportingEvidenceRefs));
       pushUnique(existing.contradictingEvidenceRefs, asStringArray(payload.contradictingEvidenceRefs));
       pushUnique(existing.missingEvidence, asStringArray(payload.missingEvidence));
@@ -284,6 +376,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         contradictingEvidenceRefs: asStringArray(payload.contradictingEvidenceRefs),
         missingEvidence: asStringArray(payload.missingEvidence),
         status: 'alternative',
+        origin: origin ?? 'agent_reasoning',
       });
     }
     this.ensureCoverage(id);
@@ -295,25 +388,29 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     id: string,
     payload: Record<string, unknown>,
     field: 'supportingEvidenceRefs' | 'contradictingEvidenceRefs',
-  ) {
+  ): boolean {
     const hypothesis = this.workspace.hypothesisState.hypotheses.find((h) => h.id === id);
-    if (!hypothesis) return;
+    if (!hypothesis) return false;
     const refs = asStringArray(payload.evidenceRefs);
     if (refs.length === 0) {
       const single = asString(payload.evidenceRef);
       if (single) refs.push(single);
     }
+    const before = hypothesis[field].length;
     pushUnique(hypothesis[field], refs);
-    if (field === 'supportingEvidenceRefs') {
+    const changed = hypothesis[field].length !== before;
+    if (field === 'supportingEvidenceRefs' && changed) {
       this.ensureCoverage(id);
       this.ensureWorkItem(id);
       this.recomputeGap(id);
     }
+    return changed;
   }
 
-  private applyHypothesisStatus(id: string, status: HypothesisCandidate['status']) {
+  private applyHypothesisStatus(id: string, status: HypothesisCandidate['status']): boolean {
     const hypothesis = this.workspace.hypothesisState.hypotheses.find((h) => h.id === id);
-    if (!hypothesis) return;
+    if (!hypothesis) return false;
+    if (hypothesis.status === status) return false;
     if (status === 'active') {
       for (const other of this.workspace.hypothesisState.hypotheses) {
         if (other.id !== id && other.status === 'active') other.status = 'alternative';
@@ -321,9 +418,30 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     }
     hypothesis.status = status;
     this.recomputeGap(id);
-    if (status === 'rejected') {
+    if (status === 'rejected' || status === 'preserved_as_uncertainty') {
       this.ensureWorkItem(id).status = 'resolved';
     }
+    return true;
+  }
+
+  private applyUncertaintyResolved(payload: Record<string, unknown>): boolean {
+    const resolvedRefs = asStringArray(payload.resolvedRefs);
+    const remainingRefs = asStringArray(payload.remainingRefs);
+    let changed = false;
+
+    if (Array.isArray(payload.remainingRefs)) {
+      if (!sameStringArray(this.workspace.uncertainties, remainingRefs)) {
+        this.workspace.uncertainties = remainingRefs;
+        changed = true;
+      }
+    }
+
+    if (resolvedRefs.length > 0) {
+      const before = this.workspace.uncertainties.length;
+      this.workspace.uncertainties = this.workspace.uncertainties.filter((u) => !resolvedRefs.includes(u));
+      if (this.workspace.uncertainties.length !== before) changed = true;
+    }
+    return changed;
   }
 
   private applyHypothesisPromotion(id: string, resolved: boolean) {
@@ -417,4 +535,17 @@ export function validateCandidateAssessmentRefs(
     if (!evidenceIds.has(ref)) errors.push(`unknown evidenceRef: ${ref}`);
   }
   return errors;
+}
+
+/**
+ * H12：确定性的 Hypothesis Coverage 完整性检查（不是医学判断）。
+ * 只检查「Agent 显式认领的 formal patient hypothesis」是否仍有 unresolved alternative。
+ * retrieval 自动标签（origin=retrieval_suggested）不进入此 invariant，避免制造无限比较。
+ *
+ * unresolved 定义：status === 'alternative'（未被 selected / rejected / preserved_as_uncertainty 明确 resolution）。
+ */
+export function findUnresolvedFormalHypotheses(workspace: ClinicalWorkspace): HypothesisCandidate[] {
+  return workspace.hypothesisState.hypotheses.filter(
+    (h) => h.origin !== 'retrieval_suggested' && h.status === 'alternative',
+  );
 }

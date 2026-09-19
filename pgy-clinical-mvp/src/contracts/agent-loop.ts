@@ -40,6 +40,30 @@ export interface AgentLoopTrace {
   toolCallLedger: ToolCallLedgerEntry[];
   /** 每一步 prompt 构成估算（仅观测，无硬阈值）。 */
   promptComponents?: PromptComponents;
+  /** H11 Proposal Commit Reliability（区分主动 submit 与 runtime forced finalization）。 */
+  commitReliability?: CommitReliabilityMetrics;
+}
+
+/**
+ * H11 Proposal Commit Reliability —— 提交可靠性的明确、逐路径统计。
+ * 不再用模糊的 proposalSubmitted 汇总；主动 submit 与 forced finalization 分开计数。
+ */
+export interface CommitReliabilityMetrics {
+  agentProposalSubmitCount: number;
+  agentProposalSubmitSuccessCount: number;
+  runtimeForcedFinalizationCount: number;
+  runtimeForcedFinalizationSuccessCount: number;
+  finalProposalCommittedCount: number;
+  proposalParseFailureCount: number;
+  proposalSchemaFailureCount: number;
+  proposalRetryCount: number;
+  proposalRetrySuccessCount: number;
+  finalizationInputTokens: number;
+  finalizationOutputTokens: number;
+  finalizationContextItemCount: number;
+  proposalDraftFieldCount: number;
+  timeFromFinalDecisionToCommitMs?: number;
+  proposalSerializationLatencyMs?: number;
 }
 
 /** H4 Prompt Telemetry：估算各部分 token，仅观测不设阈值。 */

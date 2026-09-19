@@ -34,7 +34,7 @@ export function resolveWorkItemRef(
 export function buildHypothesisProjection(workspace: ClinicalWorkspace): HypothesisProjection {
   const hypotheses = workspace.hypothesisState.hypotheses;
   const leading = hypotheses.find((h) => h.status === 'active') ?? hypotheses[0] ?? null;
-  const alternatives = hypotheses.filter((h) => h !== leading && h.status !== 'rejected');
+  const alternatives = hypotheses.filter((h) => h !== leading && h.status !== 'rejected' && h.status !== 'preserved_as_uncertainty');
   const openWorkItems = workspace.promotionState.workItems.filter((w) => w.status === 'open');
   return {
     leading: leading ? { ...leading } : null,

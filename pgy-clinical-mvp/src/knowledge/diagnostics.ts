@@ -38,4 +38,13 @@ export interface RetrievalDiagnostics {
   resolvedHypothesisRef?: string;
   /** 本次搜索返回的 candidateRefs（标识搜索所属 reasoning branch） */
   candidateRefs?: string[];
+  /**
+   * H12：search 发起时的 DecisionState 快照（Debug/Eval 数据，不进入 clinical decision）。
+   * 用于判断该 query 是探索性的，还是已处于某个 hypothesis frame 下。
+   */
+  retrievalContext?: {
+    decisionQuestion?: string;
+    leadingHypothesisRefs: string[];
+    alternativeHypothesisRefs: string[];
+  };
 }

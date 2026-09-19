@@ -79,6 +79,17 @@ for (const marker of ['prepareStep', 'capability.discover', 'capability.activate
   }
 }
 
+// H12 invariant: retrieval must not directly materialize patient hypotheses.
+// provenance.syndrome 是 SOURCE_SYNDROME_LABEL，不得自动升级为 hypothesis.presented。
+const workspaceEventsPath = join(root, 'src/adapters/ai-sdk/workspace-events.ts');
+const workspaceEventsText = await readFile(workspaceEventsPath, 'utf8');
+for (const branch of ["toolName === 'knowledge.search'", "toolName === 'formula.search_normative'"]) {
+  const body = branchBody(workspaceEventsText, branch);
+  if (body.includes('hypothesis.presented')) {
+    violations.push(`src/adapters/ai-sdk/workspace-events.ts: ${branch} directly materializes patient hypothesis (H12 regression)`);
+  }
+}
+
 if (violations.length) {
   console.error(
     'Architecture guard FAILED:\n' + violations.map((x) => `- ${x}`).join('\n'),
@@ -118,4 +129,13 @@ async function walk(dir: string): Promise<string[]> {
     else out.push(p);
   }
   return out;
+}
+
+/** 提取 workspaceEventsForTool 中某个 `if (toolName === '…')` 分支的函数体，用于分支级架构检查。 */
+function branchBody(source: string, branch: string): string {
+  const startIdx = source.indexOf(branch);
+  if (startIdx === -1) return '';
+  const rest = source.slice(startIdx + branch.length);
+  const nextBranchIdx = rest.search(/if \(toolName === '/);
+  return nextBranchIdx === -1 ? rest : rest.slice(0, nextBranchIdx);
 }

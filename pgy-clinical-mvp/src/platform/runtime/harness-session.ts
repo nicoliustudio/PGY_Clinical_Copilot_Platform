@@ -26,6 +26,7 @@ export class HarnessSession implements HarnessControlPort {
     if (descriptor.enabled === false) throw new Error(`Capability disabled: ${id}`);
 
     let resolved = this.context.capabilities.find((c) => c.id === id);
+    const reused = resolved !== undefined;
     if (!resolved) {
       resolved = { id, confidence: 1, reason };
       this.context.capabilities.push(resolved);
@@ -60,6 +61,6 @@ export class HarnessSession implements HarnessControlPort {
       }
     }
 
-    return { capability: resolved, addedKnowledgeScopes, addedSkills, addedToolIds };
+    return { capability: resolved, addedKnowledgeScopes, addedSkills, addedToolIds, reused };
   }
 }

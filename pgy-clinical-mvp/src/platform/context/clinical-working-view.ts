@@ -25,6 +25,13 @@ export interface WorkingCandidate {
   sourceId?: string;
 }
 
+/** H12：检索来源的证型/病名标签（knowledge metadata，NOT patient diagnosis）。 */
+export interface RetrievedInterpretation {
+  sourceId: string;
+  disease?: string;
+  syndrome?: string;
+}
+
 export interface WorkingCaseFact {
   id: string;
   kind: string;
@@ -44,6 +51,8 @@ export interface ClinicalWorkingView {
   decisionState: DecisionState;
   caseFrame: WorkingCaseFact[];
   leadingHypotheses: WorkingHypothesis[];
+  /** H12：检索来源标签（knowledge metadata），与 patient hypothesis 明确分离。 */
+  retrievedInterpretations: RetrievedInterpretation[];
   focusedCandidates: WorkingCandidate[];
   decisionChangingUncertainty: string[];
   activeSkills: string[];
@@ -57,8 +66,9 @@ export function buildClinicalWorkingView(
   strategy: ClinicalStrategy,
   recentActions: RecentAction[] = [],
   retrievalFeedback?: RecentRetrievalFeedback,
+  precomputedDecisionState?: DecisionState,
 ): ClinicalWorkingView {
-  const decisionState = buildDecisionState(workspace, strategy);
+  const decisionState = precomputedDecisionState ?? buildDecisionState(workspace, strategy);
 
   const caseFrame: WorkingCaseFact[] = (workspace.caseFacts ?? []).map((f) => ({
     id: f.id,
@@ -67,7 +77,7 @@ export function buildClinicalWorkingView(
   }));
 
   const leadingHypotheses = (workspace.hypothesisState?.hypotheses ?? [])
-    .filter((h) => h.status !== 'rejected')
+    .filter((h) => h.status !== 'rejected' && h.status !== 'preserved_as_uncertainty')
     .map((h) => ({
       id: h.id,
       label: h.label,
@@ -82,6 +92,14 @@ export function buildClinicalWorkingView(
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
     .map((c) => ({ id: c.id, name: c.name, composition: c.composition, sourceId: c.sourceId }));
 
+  const retrievedInterpretations: RetrievedInterpretation[] = (workspace.evidenceState?.evidenceItems ?? [])
+    .filter((e) => e.sourceInterpretation?.disease || e.sourceInterpretation?.syndrome)
+    .map((e) => ({
+      sourceId: e.id,
+      disease: e.sourceInterpretation?.disease,
+      syndrome: e.sourceInterpretation?.syndrome,
+    }));
+
   const decisionChangingUncertainty = decisionState.decisionChangingUnknowns;
 
   return {
@@ -92,6 +110,7 @@ export function buildClinicalWorkingView(
     decisionState,
     caseFrame,
     leadingHypotheses,
+    retrievedInterpretations,
     focusedCandidates,
     decisionChangingUncertainty,
     activeSkills: workspace.activeSkills ?? [],
@@ -109,6 +128,16 @@ function renderHypotheses(hs: WorkingHypothesis[]): string {
       if (h.supporting.length) lines.push(`    支持: ${h.supporting.join('、')}`);
       if (h.contradicting.length) lines.push(`    反证: ${h.contradicting.join('、')}`);
       return lines.join('\n');
+    })
+    .join('\n');
+}
+
+function renderRetrievedInterpretations(items: RetrievedInterpretation[]): string {
+  if (!items.length) return '（无）';
+  return items
+    .map((i) => {
+      const label = [i.syndrome, i.disease].filter(Boolean).join(' / ');
+      return `- ${label || '（无标签）'}  [source: ${i.sourceId}]`;
     })
     .join('\n');
 }
@@ -156,7 +185,11 @@ export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
     ),
     block('Retrieval Feedback', renderRetrievalFeedback(view.retrievalFeedback)),
     block('Case Frame', renderCaseFrame(view.caseFrame)),
-    block('Leading Hypotheses', renderHypotheses(view.leadingHypotheses)),
+    block('Active Patient Hypotheses', renderHypotheses(view.leadingHypotheses)),
+    block(
+      'Retrieved Knowledge Interpretations (source labels, not patient diagnosis)',
+      renderRetrievedInterpretations(view.retrievedInterpretations),
+    ),
     block(
       'Focused Candidates',
       view.focusedCandidates.length

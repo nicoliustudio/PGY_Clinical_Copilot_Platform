@@ -1,9 +1,4 @@
-import type { WorkspaceControlPort, WorkspaceEventType } from '../../contracts/workspace.js';
-
-export interface WorkspaceEventDraft {
-  type: WorkspaceEventType;
-  payload: Record<string, unknown>;
-}
+import type { WorkspaceBatchResult, WorkspaceControlPort, WorkspaceEventDraft, WorkspaceEventType } from '../../contracts/workspace.js';
 
 function readField(obj: unknown, key: string): unknown {
   return typeof obj === 'object' && obj !== null ? (obj as Record<string, unknown>)[key] : undefined;
@@ -13,6 +8,14 @@ function readPath(obj: unknown, ...keys: string[]): unknown {
   let current = obj;
   for (const key of keys) current = readField(current, key);
   return current;
+}
+
+function firstDefinedField(input: unknown, ...keys: string[]): unknown {
+  for (const key of keys) {
+    const v = readField(input, key);
+    if (v !== undefined) return v;
+  }
+  return undefined;
 }
 
 function formulaIds(value: unknown): string[] {
@@ -41,6 +44,8 @@ function evidenceItemDraft(hit: Record<string, unknown>): WorkspaceEventDraft | 
       sourceSchool: readPath(hit, 'provenance', 'sourceSchool'),
       title: readField(hit, 'title'),
       summary: readField(hit, 'excerpt'),
+      sourceDisease: readPath(hit, 'provenance', 'disease'),
+      sourceSyndrome: readPath(hit, 'provenance', 'syndrome'),
       relatedCandidates: formulaIds(readField(hit, 'formulas')),
       supportingSignals: [],
       contradictingSignals: [],
@@ -81,23 +86,12 @@ export function workspaceEventsForTool(
       .map((hit) => (typeof hit === 'object' && hit !== null ? evidenceItemDraft(hit as Record<string, unknown>) : null))
       .filter((x): x is WorkspaceEventDraft => x !== null);
 
-    const hypotheses: WorkspaceEventDraft[] = [];
+    // H12：knowledge.search 只产生 evidence / presented candidate，不自动产生 patient hypothesis。
+    // provenance.syndrome 是 SOURCE_SYNDROME_LABEL（知识元数据），不是 patient diagnosis。
     const candidates: WorkspaceEventDraft[] = [];
     for (const hit of output) {
       const sourceId = readField(hit, 'sourceId');
       const authority = readField(hit, 'authority');
-      const syndrome = readPath(hit, 'provenance', 'syndrome');
-      if (typeof syndrome === 'string' && syndrome.trim()) {
-        const hid = stableHypothesisId(syndrome);
-        hypotheses.push({
-          type: 'hypothesis.presented',
-          payload: {
-            id: hid,
-            label: syndrome,
-            supportingEvidenceRefs: typeof sourceId === 'string' ? [sourceId] : [],
-          },
-        });
-      }
       // 直接 canonical hydrate：knowledge.search 已返回明确 P1 formula candidate 时，
       // 不要求重复 formula.search_normative。
       if (authority === 'P1' && typeof sourceId === 'string') {
@@ -115,7 +109,7 @@ export function workspaceEventsForTool(
                   sourceId,
                   composition: [composition],
                   name: readField(f, 'name'),
-                  originatingHypothesisRefs: typeof syndrome === 'string' && syndrome.trim() ? [stableHypothesisId(syndrome)] : [],
+                  originatingHypothesisRefs: [],
                 },
               });
             }
@@ -124,7 +118,7 @@ export function workspaceEventsForTool(
       }
     }
 
-    return [completed, ...added, ...hypotheses, ...candidates];
+    return [completed, ...added, ...candidates];
   }
 
   if (toolName === 'knowledge.get_source') {
@@ -152,7 +146,6 @@ export function workspaceEventsForTool(
   if (toolName === 'formula.search_normative') {
     if (!Array.isArray(output)) return [];
     const drafts: WorkspaceEventDraft[] = [];
-    const hypotheses: WorkspaceEventDraft[] = [];
     for (const candidate of output) {
       const id = readField(candidate, 'candidateRef');
       if (typeof id === 'string') {
@@ -169,15 +162,32 @@ export function workspaceEventsForTool(
           },
         });
       }
-      const syndrome = readField(candidate, 'syndromeVariant') ?? readField(candidate, 'syndrome');
-      if (typeof syndrome === 'string' && syndrome.trim()) {
-        hypotheses.push({
-          type: 'hypothesis.presented',
-          payload: { id: stableHypothesisId(syndrome), label: syndrome },
-        });
+      // H12：不再从 syndromeVariant / syndrome 自动生成 patient hypothesis。
+    }
+    return drafts;
+  }
+
+  if (toolName === 'workspace.consider_hypotheses') {
+    const hyps = Array.isArray(readField(input, 'hypotheses')) ? readField(input, 'hypotheses') : [];
+    const drafts: WorkspaceEventDraft[] = [];
+    for (const h of (hyps as unknown[])) {
+      const label = readField(h, 'label');
+      if (typeof label !== 'string' || !label.trim()) continue;
+      const id = stableHypothesisId(label);
+      drafts.push({
+        type: 'hypothesis.presented',
+        payload: {
+          id,
+          label,
+          origin: 'agent_reasoning',
+          supportingEvidenceRefs: Array.isArray(readField(h, 'basisRefs')) ? readField(h, 'basisRefs') : [],
+        },
+      });
+      if (readField(h, 'role') === 'leading') {
+        drafts.push({ type: 'hypothesis.selected', payload: { id } });
       }
     }
-    return [...drafts, ...hypotheses];
+    return drafts;
   }
 
   if (toolName === 'workspace.record_candidate_assessment') {
@@ -223,11 +233,14 @@ export function workspaceEventsForTool(
 
   if (toolName === 'workspace.record_deliberation') {
     const drafts: WorkspaceEventDraft[] = [];
-    const focused = Array.isArray(readField(input, 'focusedCandidates')) ? readField(input, 'focusedCandidates') : [];
+    const focusedField = firstDefinedField(input, 'focusedCandidateRefs', 'focusedCandidates');
+    const focused = Array.isArray(focusedField) ? focusedField : [];
     for (const candidateRef of (focused as unknown[]).filter((x): x is string => typeof x === 'string')) {
       drafts.push({ type: 'candidate.focused', payload: { id: candidateRef, candidateRef } });
     }
-    const assessments = Array.isArray(readField(input, 'assessments')) ? readField(input, 'assessments') : [];
+
+    const assessmentsField = firstDefinedField(input, 'candidateAssessments', 'assessments');
+    const assessments = Array.isArray(assessmentsField) ? assessmentsField : [];
     for (const a of (assessments as Record<string, unknown>[])) {
       const candidateRef = readField(a, 'candidateRef');
       const hypothesisRef = readField(a, 'hypothesisRef');
@@ -245,12 +258,43 @@ export function workspaceEventsForTool(
         },
       });
     }
-    const exclusions = Array.isArray(readField(input, 'exclusions')) ? readField(input, 'exclusions') : [];
+
+    const exclusionsField = firstDefinedField(input, 'exclusions');
+    const exclusions = Array.isArray(exclusionsField) ? exclusionsField : [];
     for (const x of (exclusions as Record<string, unknown>[])) {
       const candidateRef = readField(x, 'candidateRef');
       if (typeof candidateRef !== 'string') continue;
       drafts.push({ type: 'candidate.excluded', payload: { id: candidateRef, candidateRef, reason: readField(x, 'reason') } });
     }
+
+    // H9：batch hypothesis updates（status / evidence）。
+    const hypothesisUpdatesField = firstDefinedField(input, 'hypothesisUpdates');
+    const hypothesisUpdates = Array.isArray(hypothesisUpdatesField) ? hypothesisUpdatesField : [];
+    for (const u of (hypothesisUpdates as Record<string, unknown>[])) {
+      const hypothesisRef = readField(u, 'hypothesisRef');
+      if (typeof hypothesisRef !== 'string') continue;
+      const status = readField(u, 'status');
+      const supporting = Array.isArray(readField(u, 'supportingEvidenceRefs')) ? readField(u, 'supportingEvidenceRefs') : [];
+      const contradicting = Array.isArray(readField(u, 'contradictingEvidenceRefs')) ? readField(u, 'contradictingEvidenceRefs') : [];
+      if (status === 'active') drafts.push({ type: 'hypothesis.selected', payload: { id: hypothesisRef } });
+      if (status === 'rejected') drafts.push({ type: 'hypothesis.rejected', payload: { id: hypothesisRef } });
+      if (status === 'preserved_as_uncertainty') drafts.push({ type: 'hypothesis.preserved_as_uncertainty', payload: { id: hypothesisRef } });
+      if ((supporting as unknown[]).length > 0) drafts.push({ type: 'hypothesis.supported', payload: { id: hypothesisRef, evidenceRefs: supporting } });
+      if ((contradicting as unknown[]).length > 0) drafts.push({ type: 'hypothesis.challenged', payload: { id: hypothesisRef, evidenceRefs: contradicting } });
+    }
+
+    // H9：batch uncertainty resolution。
+    const resolvedUncertaintyRefs = firstDefinedField(input, 'resolvedUncertaintyRefs');
+    const remainingDecisionChangingUnknowns = firstDefinedField(input, 'remainingDecisionChangingUnknowns');
+    const resolvedRefs = Array.isArray(resolvedUncertaintyRefs) ? resolvedUncertaintyRefs.filter((x): x is string => typeof x === 'string') : [];
+    const remainingRefs = Array.isArray(remainingDecisionChangingUnknowns) ? remainingDecisionChangingUnknowns.filter((x): x is string => typeof x === 'string') : undefined;
+    if (resolvedRefs.length > 0 || remainingRefs !== undefined) {
+      drafts.push({
+        type: 'uncertainty.resolved',
+        payload: { resolvedRefs, remainingRefs },
+      });
+    }
+
     return drafts;
   }
 
@@ -273,12 +317,15 @@ export function applyToolExecutionResult(
   input: unknown,
   envelope: ToolExecutionEnvelope,
   store: WorkspaceControlPort,
-): { rawOutput?: unknown; error?: unknown } {
+): { rawOutput?: unknown; error?: unknown; batchResult?: WorkspaceBatchResult } {
   if (envelope.type === 'tool-result') {
     const rawOutput = envelope.output;
     if (rawOutput !== undefined) {
-      for (const draft of workspaceEventsForTool(toolName, input, rawOutput)) {
-        store.append(draft.type, draft.payload);
+      const drafts = workspaceEventsForTool(toolName, input, rawOutput);
+      if (drafts.length > 0) {
+        const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const batchResult = store.appendBatch(drafts, batchId);
+        return { rawOutput, batchResult };
       }
     }
     return { rawOutput };

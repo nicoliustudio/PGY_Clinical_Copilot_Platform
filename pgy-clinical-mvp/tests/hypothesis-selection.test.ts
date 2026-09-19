@@ -8,10 +8,10 @@ test('Evidence supporting alternative hypothesis is preserved', () => {
   const workspace = createClinicalWorkspace();
   const store = new ClinicalWorkspaceStore(workspace, 'run-1');
 
-  const drafts = workspaceEventsForTool('knowledge.search', { query: 'x' }, [
-    { sourceId: 'P1:a', title: 'A', authority: 'P1', excerpt: '', formulas: [], provenance: { syndrome: '气滞血瘀' } },
-    { sourceId: 'P1:b', title: 'B', authority: 'P1', excerpt: '', formulas: [], provenance: { syndrome: '阴虚火旺' } },
-  ]);
+  const drafts = workspaceEventsForTool('workspace.consider_hypotheses', { hypotheses: [
+    { label: '气滞血瘀', role: 'alternative', basisRefs: ['P1:a'] },
+    { label: '阴虚火旺', role: 'alternative', basisRefs: ['P1:b'] },
+  ] }, undefined);
 
   for (const draft of drafts) store.append(draft.type, draft.payload);
 
@@ -47,7 +47,7 @@ test('Multiple supported hypotheses survive to next Agent step', () => {
   assert.equal(projection.alternatives[0].id, 'h2');
 });
 
-test('Formula candidates can originate from more than one supported hypothesis', () => {
+test('formula.search_normative creates candidates but not patient hypotheses (H12)', () => {
   const workspace = createClinicalWorkspace();
   const store = new ClinicalWorkspaceStore(workspace, 'run-1');
 
@@ -59,7 +59,7 @@ test('Formula candidates can originate from more than one supported hypothesis',
   for (const draft of drafts) store.append(draft.type, draft.payload);
 
   assert.equal(workspace.candidates.length, 2);
-  assert.equal(workspace.hypothesisState.hypotheses.length, 2);
+  assert.equal(workspace.hypothesisState.hypotheses.length, 0);
 });
 
 test('Final candidate selection does not erase rejected/presented candidates', () => {
