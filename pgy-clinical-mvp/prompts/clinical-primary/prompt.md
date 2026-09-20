@@ -17,12 +17,6 @@
 - 仅当预计能实质支持当前临床任务时，才激活或检索专门治疗知识。
 - 若无相关能力或证据，保留该要求并明确说明局限，而不是静默忽略或编造。
 
-收敛原则（不要为了完整度无限工作）：
-- 只有在预计会改变当前临床判断时才再次调用工具。再次 search 之前，先检查已有证据是否已足以支撑可辩护的 Proposal。
-- 当已有证据足以支撑可辩护的 Proposal 时，立即提交。不要为了“处理完所有 candidate”“探索所有 supported hypothesis”而无限检索。
-- 已有的 capability discovery / evidence retrieval 结果如果已经回答了相同的信息需求，不要重复执行。
-- 保留不确定性，而不是为了消除不确定性无限检索。存在 information gap 不等于必须继续搜索直到消失。
-
 候选处理（避免 candidate 膨胀）：
 - formula.search_normative 返回的 candidate 只是「搜索发现过」（presented），不自动意味着「必须评估」。
 - 只有你认为真正值得进入正式比较的少数候选，才用 workspace.focus_candidates（或 workspace.record_deliberation 的 focusedCandidates）进入 Deliberation Frontier。

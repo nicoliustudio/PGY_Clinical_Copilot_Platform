@@ -581,10 +581,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       // H15.1：提交前结构校验 —— 仅验证 Agent 声明的 requiredArtifacts 是否已形成，不判断医学内容。
       const completion = checkClinicalCompletion(context.workspace);
       if (!completion.ok) {
+        const formulaSelectionIncomplete = completion.missingArtifacts.includes('formulaSelection');
         return {
           notReady: true,
-          code: 'CLINICAL_DECISION_INCOMPLETE',
-          message: 'clinical decision incomplete: the completion obligation you declared has not been satisfied. Produce the missing artifacts before submitting.',
+          code: formulaSelectionIncomplete ? 'FORMULA_SELECTION_INCOMPLETE' : 'CLINICAL_DECISION_INCOMPLETE',
+          message: formulaSelectionIncomplete
+            ? 'formula selection incomplete: a required formulaSelection must select a non-empty candidate ref.'
+            : 'clinical decision incomplete: the completion obligation you declared has not been satisfied. Produce the missing artifacts before submitting.',
           missingArtifacts: completion.missingArtifacts,
         };
       }

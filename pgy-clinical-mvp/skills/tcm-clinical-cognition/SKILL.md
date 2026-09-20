@@ -1,95 +1,129 @@
-# TCM Clinical Cognition
+# TCM Clinical Cognition (Clinical Mentor)
 
-Method, not medical answer. Governs how the Agent reasons toward a clinical proposal.
+This skill is a clinical mentor, not a workflow script.
 
-## Core Discipline
+- The principles below are clinical thinking tools and available frameworks.
+- They are NOT steps you must execute, and NOT a fixed order of thinking.
+- Choose the methods that have real discriminating value for the current case.
+- You may form an overall clinical judgment first and verify it afterwards; you are not required to complete any fixed analysis table.
 
-1. Form a CaseFrame first, then identify the case spine.
-2. Weight evidence by discriminating value, not by symptom count.
-3. If tongue and pulse clearly conflict, reconsider the primary syndrome / co-patterns.
-4. Resolve only disagreements that would change the treatment method or formula.
-5. A meaningfully supported alternative must be adopted, evidence-excluded, or kept as explicit uncertainty — never silently dropped.
-6. When source-grounded evidence already supports a defensible proposal, submit immediately; do not keep searching because ordinary uncertainty remains.
+## Physician-Authored Chief Complaint
 
-## Retrieval vs Patient Hypothesis (epistemic)
+The chief complaint is physician-authored clinical framing, not raw patient chatter. Treat it as a high-value, compressed clinical representation of the current visit.
 
-- A source's syndrome/disease label describes the knowledge source, not the patient.
-- Retrieved labels are knowledge metadata; they do not diagnose the patient.
-- Do not treat a syndrome returned by retrieval as confirmation merely because the query already contained that syndrome.
-- Patient-level hypotheses must be justified against case facts, treatment context, tongue/pulse, and discriminating evidence.
-- A hypothesis-conditioned search provides knowledge about that hypothesis, but does not independently prove the patient has it.
-- Establish patient hypotheses explicitly (workspace.consider_hypotheses); do not let retrieval labels silently become patient hypotheses.
+When reading it, clarify:
+- what the main problem is,
+- how long it has lasted,
+- the sequence and temporal order of problems,
+- recent aggravation or relief,
+- change before vs after treatment,
+- what this visit mainly aims to resolve.
 
-## Reasoning Discipline
+Order, timing, and change-trend within the complaint usually carry clinical meaning.
 
-- Separate unknown from negative evidence: a missing finding is an information gap, not counter-evidence.
-- Case facts outrank generic associations and retrieval ranking.
-- Do not derive a syndrome from a single symptom, nor a formula from a syndrome label alone.
-- Do not silently drop a supported alternative merely because it is not the current Top-1.
-- Retrieval rank, candidate frequency, and hypothesis-link count are not clinical conclusions.
+But:
+- The chief complaint is not the final diagnosis.
+- The chief complaint is not the final pattern.
+- Do not turn the first sentence into the primary pattern, and do not map a keyword to a syndrome type.
 
-## Pattern Structure (epistemic)
+## Original Text Before Flattened Facts
 
-When multiple mechanisms or pattern signals are supported, do not assume they are mutually exclusive.
+CaseFacts are an indexing and evidence-reference tool, not a full replacement for the semantic meaning of the original chart.
+
+When the fact list cannot express sequence, subordination, temporal change, pre/post-treatment difference, or the physician's original framing, re-read the original physician input before forming a clinical judgment. Do not add a new fact-relation schema; use the existing original text.
+
+## Current State First, Without Discarding History
+
+`current`, `historical`, `post_treatment`, `baseline` carry different interpretive meanings.
+
+- Current pattern discrimination primarily answers what state the patient is in at this visit.
+- Historical manifestations, pre-treatment presentation, and treatment response can explain disease course, mechanism evolution, and root/branch relationships — they must not simply be dropped.
+- A mechanism that was clearly present historically does not equal that mechanism still being the current primary pattern.
+
+Do not assign numeric weights like "current weight = X, historical weight = Y". A missing finding is an information gap, not counter-evidence; an explicitly absent finding (e.g. "无腹痛", "二便正常") is counter-evidence, not missing information.
+
+## Four Diagnostics as Integrated Material
+
+Do not diagnose by symptom counting. Do not diagnose by keyword frequency.
+
+Integrate 望 (inspection), 闻 (listening/smelling), 问 (inquiry), 切 (palpation), disease course, treatment history, tongue, pulse, and examination.
+
+Judge which evidence supports each other, which conflicts, which is merely a disease-common manifestation, and which truly has discriminating value. Case facts outrank generic associations and retrieval ranking.
+
+## Frameworks as Coordinates, Not Checklists
+
+八纲 (eight principles) is an available general coordinate system, not eight fields every case must fill.
+
+Use 寒热 (cold/heat), 虚实 (deficiency/excess), 表里 (exterior/interior), 阴阳 (yin/yang) when they can change the current diagnosis. If a dimension has no discriminating value or insufficient evidence, leave it unjudged and keep uncertainty. Do not mechanically complete the whole table.
+
+Choose among frameworks as relevant to the case: 八纲, 脏腑 (zang-fu), 气血津液 (qi-blood-fluids), 经络 (channels), 病因病机 (etiology & mechanism), 六经 (six channels), 卫气营血 (wei-qi-ying-blood), 三焦 (triple burner), specialty pattern discrimination.
+
+The principle is "choose relevant frameworks", not "apply all frameworks", and not a fixed order such as 八纲 → 气血 → 脏腑.
+
+## Gynecology Observation Dimensions
+
+In gynecological cases, consider (when relevant): 经期 (menstrual timing), 周期 (cycle), 量 (amount), 色 (color), 质 (consistency), 痛 (pain), 带下 (leukorrhea), 胎产 (pregnancy/childbirth), 治疗史 (treatment history).
+
+Consider organ and substance dimensions: 肝/脾/肾 (liver/spleen/kidney), 气/血 (qi/blood), 冲任 (Chong and Ren), 胞宫 (uterus).
+
+Consider accompanying factors such as 瘀 (stasis), 湿 (dampness), 痰 (phlegm).
+
+These are available observation dimensions — not fixed fields, not fixed mechanisms, and not a syndrome mapping table.
+
+## Disease-Common vs Current Dominant Mechanism
 
 Distinguish:
-- the patient's primary pattern,
-- secondary or concurrent patterns,
-- mechanisms shared by the disease generally,
-- root/branch relationships when clinically meaningful,
-- and the mechanism most relevant to the current treatment stage.
+- the disease-common mechanism (what the disease generally involves),
+- the historical dominant mechanism,
+- the current dominant mechanism,
+- the secondary / accompanying mechanism.
 
-Strong evidence for one mechanism does not by itself establish that mechanism as the whole patient-level primary pattern.
+A disease being commonly associated with blood stasis does not mean the patient's current primary pattern is blood stasis. Previous prominent blood clots do not mean blood stasis is currently the primary pattern. A disease-common mechanism may be preserved as a shared or secondary mechanism without becoming the primary.
 
-Disease-level pathomechanism evidence describes the disease, not automatically the patient's primary syndrome.
+## Hypothesis Competition
 
-Compare supporting and contradicting patient evidence for the candidate primary and secondary patterns.
+You may form hypotheses directly; there is no fixed analysis table that must be completed first.
 
-Do not choose the primary pattern by counting matching symptoms.
+When multiple plausible hypotheses exist, compare:
+- what facts support A,
+- what facts oppose A,
+- what A cannot explain,
+- what facts support B,
+- what actually discriminates A from B.
 
-Historical manifestations and current manifestations may have different diagnostic significance.
+Discriminating evidence outweighs symptom count. If the strongest alternative still has sufficient current patient evidence, it must not silently disappear just because a leading hypothesis has already formed. Before finalizing, resolve every formal alternative you raised — adopt it as primary, record it as a secondary / accompanying pattern, reject it with basis, or preserve it as uncertainty. Uncertainty is an acceptable outcome; do not force a single answer. Do not derive a syndrome from a single symptom, nor a formula from a syndrome label alone.
 
-Establish the current treatment target from the patient-level pattern structure before formula selection.
+## Tongue and Pulse
+
+There is no tongue→syndrome table and no pulse→syndrome table.
+
+Use tongue and pulse to support, refute, calibrate, and detect when the current state is inconsistent with the described history. When the symptom narrative supports a pattern but the current tongue and pulse are clearly discordant, re-examine the primary pattern, co-patterns, and stage change — do not merely accumulate supporting items.
+
+## Retrieval vs Patient Hypothesis
+
+A source's syndrome/disease label describes the knowledge source, not the patient. Retrieved labels are knowledge metadata; they do not diagnose the patient. A hypothesis-conditioned search provides knowledge about that hypothesis but does not independently prove the patient has it. Establish patient hypotheses explicitly (workspace.consider_hypotheses); do not let retrieval labels silently become patient hypotheses.
 
 ## Knowledge Use
 
-- `NORMATIVE_TREATMENT` (P1) is the core treatment knowledge.
+- `NORMATIVE_TREATMENT` (P1) is core treatment knowledge.
 - Use `DIAGNOSTIC_DIFFERENTIAL` (S1) only when syndrome divergence would change treatment.
 - Use `DIAGNOSTIC_STANDARD` only when disease boundary / diagnostic basis is materially uncertain.
-- `CLINICAL_CASE` (P2): P1 usable → skip P2; P1 insufficient → fallback P2.
+- `CLINICAL_CASE` (P2): P1 usable → skip P2; P1 insufficient → fall back to P2.
 - There is no fixed S1 → Standard → P1 → P2 pipeline; choose the path the current decision requires.
 
-## TCM Clinical Reasoning Spine
+## Clinical Reasoning Dependencies
 
-Clinical treatment should be organized around the following professional dependencies:
+Clinical treatment is organized around professional dependencies:
 
-Patient presentation and treatment purpose
-→ disease assessment
-→ formal pattern hypotheses
-→ patient-level pattern structure
-→ treatment principle and treatment target
-→ formula or modality evidence
-→ formula/modality selection
-→ individualized modification
-→ formula-pattern-treatment review.
+patient presentation and treatment purpose → disease assessment → formal pattern hypotheses → patient-level pattern structure → treatment principle and target → formula/modality evidence → selection → individualized modification → review.
 
-These are dependencies between clinical decisions, not fixed medical answers.
+These are dependencies between clinical decisions, not fixed medical answers. Multiple patterns may remain active when evidence is insufficient. Treatment evidence must not create a patient syndrome merely because a formula, case, or modality is associated with that syndrome.
 
-Multiple pattern hypotheses may remain active when evidence is insufficient.
+## Completion Obligation
 
-Treatment evidence must not be used to create a patient syndrome merely because a formula, case, medicine, or modality is associated with that syndrome.
+Before finishing, declare the completion obligation via `workspace.record_deliberation.completionObligation`: the requested outcome, and the clinical artifacts this request must produce (chosen from the existing artifact types: `diseaseAssessment`, `formalHypotheses`, `patternAssessment`, `treatmentPlan`, `formulaSelection`, `formulaReview`).
 
-Formula retrieval should answer: "Given the current disease assessment, patient-level pattern structure, and treatment principle, what formula evidence is relevant?"
-
-Formula evidence may challenge a treatment decision, but a change in patient diagnosis or pattern requires patient or diagnostic evidence, not formula association alone.
-
-## Convergence
-
-Use the shortest defensible path to a clinical proposal.
-
-Before another tool call, determine whether the result is likely to materially change: disease framing, syndrome judgment, treatment method, or formula selection. If not, do not call the tool. Do not resolve every uncertainty.
-
-When existing evidence already supports a defensible source-grounded proposal, submit.
+Choose artifacts from the requested outcome, not a fixed pipeline. A "differentiate pattern only" request must not force formula selection or review; a request that requires formula treatment must include formula selection and review; an acupuncture request must not force a base formula. If you declare an artifact but do not produce it, submission returns `CLINICAL_DECISION_INCOMPLETE`.
 
 <!-- H14:START -->
 ## Treatment Decision Causality
@@ -111,67 +145,3 @@ Prefer treatment retrieval when it can materially clarify or support:
 
 If further treatment retrieval is unlikely to change the current decision, do not retrieve merely to collect more examples.
 <!-- H14:END -->
-
-<!-- H15.1:START -->
-## Completion Obligation
-
-Before finishing, declare the completion obligation for this request via `workspace.record_deliberation.completionObligation`:
-
-- `requestedOutcome`: what the patient/user asked for, in open text.
-- `requiredArtifacts`: the clinical artifacts this request must produce, chosen from the system's existing artifact types (`diseaseAssessment`, `formalHypotheses`, `patternAssessment`, `treatmentPlan`, `formulaSelection`, `formulaReview`).
-
-Choose required artifacts from the requested outcome, not from a fixed pipeline:
-
-- A request to "only differentiate the pattern" (`帮我辨证`) must NOT force `formulaSelection` or `formulaReview`.
-- A request that explicitly requires formula treatment (`辨证并开方`) must include `formulaSelection` and `formulaReview`.
-- A request for acupuncture must not force a TCM base formula.
-
-The runtime only verifies that the artifacts you declared actually exist before submit; it never judges what the disease, pattern, or formula should be. If you declare an artifact but do not produce it, submission returns `CLINICAL_DECISION_INCOMPLETE`.
-
-## Formula Retrieval (Two-stage, Evidence-backed)
-
-When the request requires base-formula selection, retrieve formula evidence from your already-formed clinical judgment, not from the patient's raw symptoms:
-
-1. `formula.search_candidates` — returns a small number (Top 3~5) of light candidate cards, each with matched disease/syndrome/treatment-principle contexts and source provenance. This is a retrieval budget, not a medical Top-N rule.
-2. `formula.get_evidence` — expand the full evidence of a candidate worth comparing (composition, indication, source text, related treatment principle, inline modification text).
-
-Rules:
-
-- The retrieval query is derived from disease assessment + pattern assessment + treatment plan, not the patient's free-text chart.
-- A candidate card tells you *why* it was retrieved (knowledge association), never a patient-fit score.
-- If you finally select a formula, `formulaSelection.selectedCandidateRef` must point to a candidate you actually retrieved this round. Do not select a formula from memory that was not retrieved as evidence. If evidence is insufficient, record `UNCERTAIN` rather than forcing a formula.
-- When formula selection is involved, `formulaReview` is mandatory: answer whether the base formula covers the primary treatment principle and primary pattern, note secondary treatment targets and mismatches, then record `SUPPORTED` / `REVISE` / `UNCERTAIN`.
-- This stage shows inline modification evidence only; do not build a modification plan or add/remove medicines.
-- Efficiency: do not call the legacy `formula.search_normative` for base-formula selection (it returns many candidates without matched-context transparency). Use `formula.search_candidates` once, expand evidence for only 1–3 truly comparable candidates via `formula.get_evidence`, then select and review. Do not re-search the same query or over-expand candidates. Once the completion obligation is satisfied, submit immediately — the runtime blocks premature submit and you should complete the remaining artifacts and submit, not keep retrieving.
-<!-- H15.1:END -->
-
-<!-- H15.2:START -->
-## Current-Stage Pattern Discrimination
-
-The primary patient pattern should represent the patient's current clinical state and current treatment stage, not merely the disease's common mechanism or the most dramatic historical manifestation.
-
-Historical findings remain clinically relevant, but should be distinguished from current findings after treatment or intervention.
-
-Explicitly absent current findings may act as counter-evidence when they are relevant to a candidate pattern.
-
-A disease-level shared mechanism may be preserved as a shared or secondary mechanism without automatically becoming the patient's primary pattern.
-
-When multiple formal hypotheses remain plausible, compare them using patient-level supporting evidence, contradicting evidence, temporal role, and the current treatment objective before selecting a primary pattern.
-
-Treatment or formula evidence must not be used to resolve this diagnostic comparison.
-
-Before retrieving formula evidence, make your pattern assessment structurally ready: the `primary` claim must link to a formal hypothesis via `hypothesisRef`, cite at least one patient-derived evidence ref (`CF_xxx`), and every formal alternative must be accounted for — selected, rejected, recorded as a `secondary` pattern, or preserved as uncertainty. Otherwise formula retrieval returns `PATTERN_ASSESSMENT_INCOMPLETE`.
-
-## Evidence Provenance & Temporal Role
-
-Every patient fact carries a temporal role (`current` / `historical` / `post_treatment` / `baseline` / `uncertain_time`) and a polarity (`present` / `explicitly_absent` / `unknown`).
-
-- "无腹痛", "无明显腰酸", "无烦躁", "食欲可", "寐安", "二便正常" are explicit-absence evidence, not missing information. Keep them.
-- A mechanism being common to the disease does not by itself establish that mechanism as the patient's primary current pattern. Use the dedicated `sharedMechanisms` slot for disease-common mechanisms and reserve `primary` for the patient's current dominant pattern.
-- The primary pattern must cite at least one patient-derived supporting evidence ref (`CF_xxx`); disease standards, formula knowledge, or case knowledge alone are not sufficient.
-
-## Minimum Clinical Core
-
-For any clinical case, the submission must at least form: `clinicalQuestion`, `diseaseAssessment`, `formalHypotheses`, and `patternAssessment`. Your completion obligation may add more (e.g. `treatmentPlan`, `formulaSelection`, `formulaReview`), but cannot remove this minimum core.
-<!-- H15.2:END -->
-

@@ -150,8 +150,7 @@ const ACTION_PRINCIPLE = `## Action Principle
 - Choose the clinical action you need. Do not manually perform deterministic preparation (canonical hydrate, formula validation, source binding) that the Harness completes automatically before submit.
 - Reuse already activated capabilities, validated candidates, and existing deterministic results when still valid. Do not repeat execution chores that do not change the business objective.
 - When the clinical decision is sufficiently complete, submit the proposal instead of continuing exploration. Do not repeat deterministic preparation already handled by the Harness.
-- Retrieved syndrome labels describe knowledge sources, not the patient's diagnosis. Do not treat a syndrome returned by retrieval as confirmation merely because the query already contained that syndrome. Patient-level hypotheses must be justified against case facts, treatment context, tongue/pulse, and discriminating evidence. A hypothesis-conditioned search provides knowledge about that hypothesis, but does not independently prove the patient has it.
-- Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty. Do not let a supported alternative silently disappear.`;
+- Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty.`;
 
 /** Diagnostic Pattern Set Spike：domain-general epistemic rules（仅开关 ON 时注入）。 */
 const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence

@@ -829,7 +829,11 @@ function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: string): bo
     case 'diseaseAssessment': return spine.diseaseAssessment !== undefined;
     case 'patternAssessment': return spine.patternAssessmentRef !== undefined;
     case 'treatmentPlan': return spine.treatmentPlan !== undefined;
-    case 'formulaSelection': return spine.formulaSelection !== undefined;
+    case 'formulaSelection': {
+      // H15.2.1：已声明的 formulaSelection 必须具有非空 selectedCandidateRef，关闭「空选方仍判定完成」。
+      const sel = spine.formulaSelection;
+      return sel !== undefined && typeof sel.selectedCandidateRef === 'string' && sel.selectedCandidateRef.trim() !== '';
+    }
     case 'formulaReview': return spine.formulaReview !== undefined;
     case 'formalHypotheses': return spine.patternHypothesisRefs.length > 0;
     default: return false;
