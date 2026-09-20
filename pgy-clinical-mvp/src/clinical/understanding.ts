@@ -28,10 +28,28 @@ export const interactionModeSchema = z.enum([
   'unknown',
 ]);
 
+export const temporalRoleSchema = z.enum([
+  'current',
+  'historical',
+  'post_treatment',
+  'baseline',
+  'uncertain_time',
+]);
+
+export const evidencePolaritySchema = z.enum([
+  'present',
+  'explicitly_absent',
+  'unknown',
+]);
+
 export const factCandidateSchema = z.object({
   kind: factKindSchema,
   value: z.string(),
   source: z.string().optional(),
+  /** H15.2：时间角色。current=当前 / historical=既往病史 / post_treatment=治疗或术后 / baseline=基线 / uncertain_time=时间不明。 */
+  temporalRole: temporalRoleSchema.optional(),
+  /** H15.2：极性。explicitly_absent 用于「无/不/未/正常/可」这类显性阴性表述。 */
+  polarity: evidencePolaritySchema.optional(),
 });
 
 export const semanticIntentSchema = z.object({
@@ -96,6 +114,8 @@ const UNDERSTAND_PROMPT = `你是中医临床的语义理解层。理解输入�
 字段说明：
 - interaction.mode：clinical（正式问诊/病例）、conversation（闲聊/生活）、clarification（补充/追问）、unknown。
 - facts[].kind：sex/age/chief_complaint/symptom/tongue_pulse/examination/past_diagnosis/past_treatment/other。只提取文中明确出现的。
+- facts[].temporalRole：current（当前就诊时的表现）、historical（既往/病史，如"既往经期…"）、post_treatment（治疗或术后，如"海扶术后一月"）、baseline（作为对照基线的原始状态）、uncertain_time（无法判断时间）。默认 current。
+- facts[].polarity：present（阳性/出现）、explicitly_absent（显性阴性，如"无腹痛/不烦躁/二便正常/食欲可/寐安"）、unknown（无法判断）。显性阴性也是证据，不要丢弃。
 - intents[].kind：语义意图（如 clinical_inquiry、gaofang_request、chitchat），confidence 取 0~1。
 - risks[]：风险假设（非事实）。severity 只描述问题本身严重程度；disposition 只回答当前是否必须改变常规处置路径，取 routine/urgent/uncertain。严重的慢性问题可以是 high + routine；只有当前存在需要立即改变处置路径的语义证据才用 urgent；证据不足时用 uncertain。禁止按疾病名称或关键词直接映射 disposition。
 - informationGaps[]：影响判断的关键信息缺口。

@@ -1,12 +1,18 @@
 import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
+import { searchRuntimeCards, getRuntimeAsset } from '../../knowledge/runtime-catalog.js';
+import { getDiagnosticPatterns } from '../../knowledge/diagnostic-patterns.js';
+import { getDiseaseStandard, getSyndromeStandard, getDiseaseStandards } from '../../knowledge/standard-runtime.js';
+import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
+import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
 import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkTreatmentRetrievalContext, checkClinicalCompletion, checkClinicalCoreCompletion, checkPatternAssessmentReadiness } from '../../platform/workspace/clinical-workspace.js';
+import type { PatternAssessment } from '../../contracts/workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
 export type AiSdkToolBindings = Record<string, AiSdkToolBindingFactory>;
@@ -32,6 +38,25 @@ function buildRetrievalContext(context: RuntimeContext) {
     alternativeHypothesisRefs: hyps.filter((h) => h.status === 'alternative').map((h) => h.id),
   };
 }
+
+/** H15/H15.2：treatmentSpecific 检索门禁。缺失 context 或 PatternAssessment 未就绪时返回 deterministic receipt。 */
+function gateTreatmentRetrieval(context: RuntimeContext): { ok: true } | { ok: false; code: string; missing: string[] } {
+  const base = checkTreatmentRetrievalContext(context.workspace);
+  if (!base.ok) return { ok: false, code: 'TREATMENT_CONTEXT_INCOMPLETE', missing: base.missing };
+  // H15.2：治疗层消费前，PatternAssessment 必须结构就绪（primary 有 patient evidence 等）。
+  const readiness = checkPatternAssessmentReadiness(context.workspace);
+  if (!readiness.ok) return { ok: false, code: 'PATTERN_ASSESSMENT_INCOMPLETE', missing: readiness.missing };
+  return { ok: true };
+}
+
+function incompleteTreatmentContext(result: { code: string; missing: string[] }) {
+  return { notReady: true, code: result.code, missing: result.missing };
+}
+
+// H15.2 Formula Retrieval Reuse：per-run 缓存（按 runId 隔离，避免跨 run 污染）。
+type CandidateSearchCacheEntry = { signature: string; candidates: unknown[]; projection: unknown };
+const candidateSearchCache = new Map<string, CandidateSearchCacheEntry>();
+const formulaEvidenceCache = new Map<string, unknown>();
 
 /**
  * proposal.submit 的 DeepSeek 兼容 JSON Schema（H11 最小化）。
@@ -97,6 +122,76 @@ function validateProposal(
     : { success: false, error: result.error };
 }
 
+/** H13 PatternClaim / PatternAssessment 的 zod schema（开放文本，无 enum）。 */
+const patternClaimSchema = z.object({
+  hypothesisRef: z.string().optional(),
+  statement: z.string(),
+  supportingEvidenceRefs: z.array(z.string()).optional(),
+  contradictingEvidenceRefs: z.array(z.string()).optional(),
+  rationale: z.string().optional(),
+});
+
+const patternAssessmentSchema = z.object({
+  primary: patternClaimSchema.optional(),
+  secondary: z.array(patternClaimSchema).optional(),
+  sharedMechanisms: z.array(patternClaimSchema).optional(),
+  rootBranch: z.object({
+    root: z.string().optional(),
+    branch: z.string().optional(),
+    relationship: z.string().optional(),
+    supportingEvidenceRefs: z.array(z.string()).optional(),
+  }).optional(),
+  currentDominantMechanism: patternClaimSchema.optional(),
+  treatmentTarget: z.string().optional(),
+  uncertainty: z.array(z.string()).optional(),
+});
+
+/** H15 Clinical Decision Spine 各层的开放文本 schema（不含医学 enum）。 */
+const diseaseAssessmentSchema = z.object({
+  statement: z.string(),
+  diseaseRefs: z.array(z.string()).optional(),
+  evidenceRefs: z.array(z.string()).optional(),
+  uncertainty: z.array(z.string()).optional(),
+});
+
+const treatmentPlanSchema = z.object({
+  primaryPrinciple: z.string(),
+  adjunctPrinciples: z.array(z.string()).optional(),
+  treatmentTarget: z.string(),
+  priority: z.string().optional(),
+  rationale: z.string().optional(),
+  evidenceRefs: z.array(z.string()).optional(),
+});
+
+const formulaSelectionSchema = z.object({
+  selectedCandidateRef: z.string().optional(),
+  rationale: z.string().optional(),
+  supportingEvidenceRefs: z.array(z.string()).optional(),
+  contradictingEvidenceRefs: z.array(z.string()).optional(),
+});
+
+const modificationPlanSchema = z.object({
+  items: z.array(z.object({
+    statement: z.string(),
+    patientEvidenceRefs: z.array(z.string()).optional(),
+    sourceEvidenceRefs: z.array(z.string()).optional(),
+  })).optional(),
+});
+
+const formulaReviewSchema = z.object({
+  assessment: z.string(),
+  coveredTargets: z.array(z.string()).optional(),
+  uncoveredProblems: z.array(z.string()).optional(),
+  conflicts: z.array(z.string()).optional(),
+  disposition: z.enum(['SUPPORTED', 'REVISE', 'UNCERTAIN']),
+});
+
+/** H15.1：完成义务。requiredArtifacts 只允许系统已存在的临床过程产物类型。 */
+const completionObligationSchema = z.object({
+  requestedOutcome: z.string(),
+  requiredArtifacts: z.array(z.enum(['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection', 'formulaReview'])),
+});
+
 /** Adapter-owned bindings. Agent runtime consumes this registry generically. */
 export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
   'capability.discover': (context) => tool({
@@ -139,10 +234,105 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     inputSchema: z.object({ sourceId: z.string(), detailLevel: z.enum(['excerpt', 'full']).optional() }),
     execute: async ({ sourceId, detailLevel }) => getSource(sourceId, context.knowledgeScopes, detailLevel ?? 'excerpt'),
   }),
+  'knowledge.search_cards': (context) => tool({
+    description: '在当前已激活的 Runtime Catalog scope 中做 focused 检索：结合病例疾病上下文与现有 indexes 收敛候选后返回少量相关卡片。只返回卡片级摘要 + asset_id + 知识相关性排序；选定需要佐证的具体证据后，再用 knowledge.get_asset 按 asset_id 精确获取完整资产。仅在相应业务能力已激活、且该证据能减少当前 open question 或支撑当前 treatment target 时才检索。',
+    inputSchema: z.object({ query: z.string(), topK: z.number().optional() }),
+    execute: async ({ query, topK }) => {
+      if (context.capabilities.some((c) => c.treatmentSpecific === true)) {
+        const gate = gateTreatmentRetrieval(context);
+        if (!gate.ok) return incompleteTreatmentContext(gate);
+      }
+      const caseDiseaseContext = context.understanding.facts
+        .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
+        .map((f) => f.value);
+      const { cards, telemetry } = searchRuntimeCards(query, context.knowledgeScopes, {
+        diseaseContext: caseDiseaseContext,
+        topK,
+      });
+      addRetrievalDiagnostics(context.runId, {
+        tool: 'knowledge.search_cards',
+        query,
+        scopes: context.knowledgeScopes,
+        topK: topK ?? config.kb.runtimeCardLimit,
+        dense: [],
+        reranked: [],
+        runtimeCatalog: {
+          requestedCapability: telemetry.activeScopes.join(','),
+          ...telemetry,
+        },
+      });
+      return cards;
+    },
+  }),
+  'knowledge.get_asset': (context) => tool({
+    description: '按 asset_id 精确获取一条 Runtime Catalog 完整资产详情。仅用于读取 knowledge.search_cards 返回的、且属于当前激活 scope 的卡片。',
+    inputSchema: z.object({ assetId: z.string() }),
+    execute: async ({ assetId }) => {
+      if (context.capabilities.some((c) => c.treatmentSpecific === true)) {
+        const gate = gateTreatmentRetrieval(context);
+        if (!gate.ok) return incompleteTreatmentContext(gate);
+      }
+      const asset = getRuntimeAsset(assetId, context.knowledgeScopes);
+      addRetrievalDiagnostics(context.runId, {
+        tool: 'knowledge.get_asset',
+        query: assetId,
+        scopes: context.knowledgeScopes,
+        topK: 1,
+        dense: [],
+        reranked: [],
+        runtimeCatalog: {
+          activeScopes: context.knowledgeScopes,
+          catalogTotalCount: 0,
+          candidateCount: 0,
+          cardsReturnedCount: 0,
+          cardsReturnedAssetIds: [],
+          narrowedBy: 'none',
+          fullAssetsFetched: asset ? 1 : 0,
+          fullAssetIds: asset ? [assetId] : [],
+        },
+      });
+      return asset;
+    },
+  }),
+  'knowledge.get_diagnostic_patterns': (context) => tool({
+    description: '读取某规范病种下全部 P1 规范证候诊断记录（证型、症状、舌脉、治法）。这是「病种规范证候空间」的中性知识查询，用于在辨证前看清规范鉴别空间；不包含方剂，不比较患者，不给出最佳证型。方剂信息请用 formula.search_normative 单独获取。',
+    inputSchema: z.object({
+      disease: z.string(),
+      sourceSchool: z.string().optional(),
+    }),
+    execute: async ({ disease, sourceSchool }) => {
+      const caseDiseaseContext = context.understanding.facts
+        .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
+        .map((f) => f.value);
+      return getDiagnosticPatterns(disease, {
+        sourceSchool,
+        scopes: context.knowledgeScopes,
+        caseDiseaseContext,
+        crosswalkEnabled: config.experiment.diseaseCrosswalk,
+      });
+    },
+  }),
+  'knowledge.get_disease_standard': (context) => tool({
+    description: '读取《中医病证诊断疗效标准（2024版）》及已启用的诊断知识 release 中某规范病名的诊断标准：病名定义、诊断依据、鉴别诊断、证候分类（每证含 criteria）、来源。按 source 分组返回，不 merge source text；不包含方剂、不比较患者、不给出最佳证型。',
+    inputSchema: z.object({ disease: z.string() }),
+    execute: async ({ disease }) => {
+      const caseDiseaseContext = context.understanding.facts
+        .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
+        .map((f) => f.value);
+      return getDiseaseStandards(disease, { caseDiseaseContext });
+    },
+  }),
+  'knowledge.get_syndrome_standard': (context) => tool({
+    description: '读取 GB/T 16751.2-2021 证候本体中某规范证型（canonical name）的标准定义：证名、定义、病因病机、特征证据（主症）、舌象证据、脉象证据、来源。这是「证候规范证据」的中性知识查询，不包含方剂、不返回最佳证型/匹配分。',
+    inputSchema: z.object({ syndrome: z.string() }),
+    execute: async ({ syndrome }) => getSyndromeStandard(syndrome),
+  }),
   'formula.search_normative': (context) => tool({
-    description: '在当前已激活 scope 中检索真实 P1 规范方。若为某个受支持的 hypothesis 探索候选方，请传入其 promotion work item 的 ref（promotionWorkItemRef）；不要手写 hypothesis 身份或 id 数组。',
+    description: '[legacy] 检索当前已激活 scope 中真实 P1 规范方。H15.1 起，基础方选择请优先使用两阶段 formula.search_candidates（轻量 Top 3~5 候选卡）→ formula.get_evidence（展开完整证据）；本工具仅在需要按 promotion work item 探索时才用，且不要重复大范围检索。',
     inputSchema: z.object({ query: z.string(), searchIntent: z.string().optional(), topK: z.number().optional(), promotionWorkItemRef: z.string().optional() }),
     execute: async ({ query, searchIntent, topK, promotionWorkItemRef }) => {
+      const gate = gateTreatmentRetrieval(context);
+      if (!gate.ok) return incompleteTreatmentContext(gate);
       const { results, diagnostics } = await searchNormativeWithDiagnostics(query, topK ?? 10, context.knowledgeScopes);
       const workItem = resolveWorkItemRef(context.workspace, promotionWorkItemRef);
       const resolvedHypothesisRef = workItem?.hypothesisRef;
@@ -164,6 +354,72 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         score: r.score,
         originatingHypothesisRefs: refs,
       }));
+    },
+  }),
+  'formula.search_candidates': (context) => tool({
+    description: '两阶段方剂检索第一阶段：根据已完成临床判断（病 + 证 + 治法 projection）召回少量（Top 3~5）基础方候选卡。只返回轻量候选卡 + 知识关联（matched disease/syndrome/treatment principle），不给患者适配评分、不给证型评分。对真正值得比较的候选再调用 formula.get_evidence 展开完整证据。',
+    inputSchema: z.object({ topK: z.number().optional() }),
+    execute: async ({ topK }) => {
+      const gate = gateTreatmentRetrieval(context);
+      if (!gate.ok) return incompleteTreatmentContext(gate);
+      // H15.2：状态未变化时复用已有候选集，不重新检索。
+      const signature = formulaSearchStateSignature(context.workspace);
+      const cacheKey = `${context.runId}::${context.knowledgeScopes.join(',')}`;
+      const cached = candidateSearchCache.get(cacheKey);
+      if (cached && cached.signature === signature) {
+        addRetrievalDiagnostics(context.runId, {
+          tool: 'formula.search_candidates',
+          query: '',
+          scopes: context.knowledgeScopes,
+          topK: topK ?? 5,
+          dense: [],
+          reranked: [],
+          candidateRefs: (cached.candidates as { candidateRef?: string }[]).map((c) => c.candidateRef ?? '').filter(Boolean),
+          retrievalContext: buildRetrievalContext(context),
+        });
+        return { projection: cached.projection, candidates: cached.candidates, reused: 'REUSED_EXISTING_CANDIDATES' };
+      }
+      const { candidates, projection, diagnostics } = await searchFormulaCandidates(context.workspace, context.knowledgeScopes, topK ?? 5);
+      candidateSearchCache.set(cacheKey, { signature, candidates, projection });
+      addRetrievalDiagnostics(context.runId, {
+        ...(diagnostics ?? { tool: 'formula.search_candidates' as const, query: '', scopes: context.knowledgeScopes, topK: topK ?? 5, dense: [], reranked: [] }),
+        candidateRefs: candidates.map((c) => c.candidateRef),
+        retrievalContext: buildRetrievalContext(context),
+      });
+      return { projection, candidates };
+    },
+  }),
+  'formula.get_evidence': (context) => tool({
+    description: '两阶段方剂检索第二阶段：展开一张 formula.search_candidates 候选卡的完整方剂证据（组成、适应证、来源原文、相关治法、已有 inline modification 文本）。只用于读取本轮检索过的候选，禁止凭模型记忆引用未检索候选。',
+    inputSchema: z.object({ candidateRef: z.string() }),
+    execute: async ({ candidateRef }) => {
+      const gate = gateTreatmentRetrieval(context);
+      if (!gate.ok) return incompleteTreatmentContext(gate);
+      assertKnownCandidateRef(context, candidateRef);
+      const cacheKey = `${context.runId}::${candidateRef}`;
+      const cachedEvidence = formulaEvidenceCache.get(cacheKey);
+      if (cachedEvidence !== undefined) {
+        addRetrievalDiagnostics(context.runId, {
+          tool: 'formula.get_evidence',
+          query: candidateRef,
+          scopes: context.knowledgeScopes,
+          topK: 1,
+          dense: [],
+          reranked: [],
+        });
+        return { ...(cachedEvidence as object), reused: true };
+      }
+      const card = await getFormulaEvidence(candidateRef, context.knowledgeScopes);
+      if (card) formulaEvidenceCache.set(cacheKey, card);
+      addRetrievalDiagnostics(context.runId, {
+        tool: 'formula.get_evidence',
+        query: candidateRef,
+        scopes: context.knowledgeScopes,
+        topK: 1,
+        dense: [],
+        reranked: [],
+      });
+      return card;
     },
   }),
   'formula.validate': (context) => tool({
@@ -236,7 +492,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_deliberation': (context) => tool({
-    description: '一次批量提交 Deliberation：focusedCandidates（进入正式比较的候选）、assessments（candidate × hypothesis 评估）、exclusions（有意排除）、hypothesisUpdates（假设状态/证据更新）、resolvedUncertaintyRefs（已解决不确定性）。引用必须真实存在。一次认知决定尽量一次提交，避免把 focus/assessment/hypothesis/uncertainty 拆成多次 workspace 写入。',
+    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）' + (config.experiment.patternAssessment ? '、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）' : '') + '。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
     inputSchema: z.object({
       focusedCandidates: z.array(z.string()).optional(),
       assessments: z.array(z.object({
@@ -257,8 +513,15 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       })).optional(),
       resolvedUncertaintyRefs: z.array(z.string()).optional(),
       remainingDecisionChangingUnknowns: z.array(z.string()).optional(),
+      diseaseAssessment: diseaseAssessmentSchema.optional(),
+      treatmentPlan: treatmentPlanSchema.optional(),
+      formulaSelection: formulaSelectionSchema.optional(),
+      modificationPlan: modificationPlanSchema.optional(),
+      formulaReview: formulaReviewSchema.optional(),
+      completionObligation: completionObligationSchema.optional(),
+      ...(config.experiment.patternAssessment ? { patternAssessment: patternAssessmentSchema.optional() } : {}),
     }),
-    execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns }) => {
+    execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment }) => {
       for (const ref of focusedCandidates ?? []) assertKnownCandidateRef(context, ref);
       for (const a of assessments ?? []) {
         const errors = validateCandidateAssessmentRefs(context.workspace, {
@@ -272,7 +535,12 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       }
       for (const x of exclusions ?? []) assertKnownCandidateRef(context, x.candidateRef);
       for (const u of hypothesisUpdates ?? []) assertKnownHypothesisRef(context, u.hypothesisRef);
-      return { focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns };
+      if (patternAssessment) {
+        const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
+        if (errors.length > 0) throw new Error(errors.join('; '));
+      }
+      if (formulaSelection?.selectedCandidateRef) assertKnownCandidateRef(context, formulaSelection.selectedCandidateRef);
+      return { focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment };
     },
   }),
   'workspace.consider_hypotheses': (context) => tool({
@@ -296,6 +564,28 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           notReady: true,
           message: 'proposal not ready: unresolved decision-changing hypothesis exists. Resolve it as selected / rejected with basis / preserved as uncertainty.',
           unresolvedHypotheses: unresolved.map((h) => ({ ref: h.id, label: h.label })),
+        };
+      }
+      // H15.2：Minimum Clinical Core —— 关闭 Empty-Spine Submit（clinical case 模式下提交至少需要最低 spine）。
+      if (context.understanding.interaction.mode === 'clinical') {
+        const core = checkClinicalCoreCompletion(context.workspace);
+        if (!core.ok) {
+          return {
+            notReady: true,
+            code: 'CLINICAL_CORE_INCOMPLETE',
+            message: 'clinical core incomplete: the minimum clinical spine has not been formed. Produce the missing core artifacts before submitting.',
+            missing: core.missing,
+          };
+        }
+      }
+      // H15.1：提交前结构校验 —— 仅验证 Agent 声明的 requiredArtifacts 是否已形成，不判断医学内容。
+      const completion = checkClinicalCompletion(context.workspace);
+      if (!completion.ok) {
+        return {
+          notReady: true,
+          code: 'CLINICAL_DECISION_INCOMPLETE',
+          message: 'clinical decision incomplete: the completion obligation you declared has not been satisfied. Produce the missing artifacts before submitting.',
+          missingArtifacts: completion.missingArtifacts,
         };
       }
       return input;

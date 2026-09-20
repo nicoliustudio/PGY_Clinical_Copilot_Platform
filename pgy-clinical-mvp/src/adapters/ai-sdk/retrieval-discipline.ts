@@ -21,7 +21,11 @@ import type { ClinicalWorkspace } from '../../contracts/workspace.js';
 export const RETRIEVAL_TOOL_NAMES = [
   'knowledge.search',
   'knowledge.get_source',
+  'knowledge.search_cards',
+  'knowledge.get_asset',
   'formula.search_normative',
+  'formula.search_candidates',
+  'formula.get_evidence',
 ] as const;
 export type RetrievalToolName = (typeof RETRIEVAL_TOOL_NAMES)[number];
 
@@ -68,6 +72,19 @@ export function isFormulaSearchReuse(
   candidateIdsBefore: ReadonlySet<string>,
 ): boolean {
   const refs = candidateRefsFromFormulaSearch(output);
+  return refs.length > 0 && refs.every((r) => candidateIdsBefore.has(r));
+}
+
+/** formula.search_candidates 复用：输出为 { candidates: [...] }，返回的 candidateRef 都已存在。 */
+export function isFormulaSearchCandidatesReuse(
+  output: unknown,
+  candidateIdsBefore: ReadonlySet<string>,
+): boolean {
+  if (typeof output !== 'object' || output === null) return false;
+  const candidates = (output as Record<string, unknown>).candidates;
+  const refs = Array.isArray(candidates)
+    ? candidates.map((c) => stringField(c, 'candidateRef')).filter((x): x is string => !!x)
+    : [];
   return refs.length > 0 && refs.every((r) => candidateIdsBefore.has(r));
 }
 
@@ -139,6 +156,10 @@ export class RetrievalDisciplineTracker {
       retrievalReused = true;
     }
     if (toolName === 'formula.search_normative' && (reused || isFormulaSearchReuse(rawOutput, candidateIdsBefore))) {
+      this.formulaSearchReuseCount += 1;
+      retrievalReused = true;
+    }
+    if (toolName === 'formula.search_candidates' && (reused || isFormulaSearchCandidatesReuse(rawOutput, candidateIdsBefore))) {
       this.formulaSearchReuseCount += 1;
       retrievalReused = true;
     }

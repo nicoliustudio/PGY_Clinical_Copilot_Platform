@@ -3,7 +3,7 @@ import type { CandidateAssessment, CandidateComparison, DeliberationCoverage, Hy
 import type { RetrievalDiagnostics } from './knowledge/diagnostics.js';
 import type { AgentLoopTrace, ContextMetrics } from './contracts/agent-loop.js';
 import type { ClinicalStrategy } from './contracts/clinical-strategy.js';
-import type { ActionReceipt, RunExecutionMetrics } from './contracts/execution.js';
+import type { ActionReceipt, RunExecutionMetrics, H14TreatmentRetrieval } from './contracts/execution.js';
 
 export interface ToolCallTrace { toolName: string; input: unknown; output: unknown; error?: unknown; ms: number; reused?: boolean; }
 
@@ -36,6 +36,7 @@ export interface RunTrace {
   actionReceipts: ActionReceipt[];
   runMetrics?: RunExecutionMetrics;
   formulaIdentityTrace?: FormulaIdentityTrace;
+  h14TreatmentRetrievals?: H14TreatmentRetrieval[];
   activeSkills?: string[];
   skillVersions?: SkillVersion[];
   skillPromptSections?: string[];
@@ -71,6 +72,7 @@ export function newTrace(input: string): RunTrace {
 export function getTrace(runId: string): RunTrace | null { return traces.get(runId) ?? null; }
 export function addToolCall(runId: string, t: ToolCallTrace): void { traces.get(runId)?.toolCalls.push(t); }
 export function addRetrievalDiagnostics(runId: string, d: RetrievalDiagnostics): void { traces.get(runId)?.retrievalDiagnostics.push(d); }
+export function addH14TreatmentRetrieval(runId: string, r: H14TreatmentRetrieval): void { const t = traces.get(runId); if (t) (t.h14TreatmentRetrievals ??= []).push(r); }
 export function addActionReceipt(runId: string, r: ActionReceipt): void { traces.get(runId)?.actionReceipts.push(r); }
 export function setRunMetrics(runId: string, m: RunExecutionMetrics): void { const t = traces.get(runId); if (t) t.runMetrics = m; }
 export function setFormulaIdentityTrace(runId: string, ft: FormulaIdentityTrace): void { const t = traces.get(runId); if (t) t.formulaIdentityTrace = ft; }

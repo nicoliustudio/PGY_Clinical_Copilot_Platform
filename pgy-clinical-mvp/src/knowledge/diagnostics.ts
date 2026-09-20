@@ -7,8 +7,20 @@ export interface RankItem {
   score: number;
 }
 
+export interface RuntimeCatalogRetrievalTelemetry {
+  requestedCapability?: string;
+  activeScopes: string[];
+  catalogTotalCount: number;
+  candidateCount: number;
+  cardsReturnedCount: number;
+  cardsReturnedAssetIds: string[];
+  narrowedBy: 'disease' | 'medicine' | 'point' | 'none';
+  fullAssetsFetched?: number;
+  fullAssetIds?: string[];
+}
+
 export interface RetrievalDiagnostics {
-  tool: 'knowledge.search' | 'formula.search_normative';
+  tool: 'knowledge.search' | 'formula.search_normative' | 'knowledge.search_cards' | 'knowledge.get_asset' | 'formula.search_candidates' | 'formula.get_evidence';
   query: string;
   scopes: string[];
   topK: number;
@@ -47,4 +59,6 @@ export interface RetrievalDiagnostics {
     leadingHypothesisRefs: string[];
     alternativeHypothesisRefs: string[];
   };
+  /** Runtime Catalog specialized retrieval 的观测（不含患者/证型/方剂评分）。 */
+  runtimeCatalog?: RuntimeCatalogRetrievalTelemetry;
 }

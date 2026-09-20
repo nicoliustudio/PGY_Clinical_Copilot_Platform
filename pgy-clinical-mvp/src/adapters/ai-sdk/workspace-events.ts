@@ -23,6 +23,13 @@ function formulaIds(value: unknown): string[] {
   return value.map((f) => readField(f, 'id')).filter((x): x is string => typeof x === 'string');
 }
 
+/** H15.2：knowledgeRole → evidenceKind（结构性映射，非医学 enum）。 */
+function evidenceKindForRole(role: unknown): 'diagnostic_knowledge' | 'treatment_knowledge' | undefined {
+  if (role === 'DIAGNOSTIC_DIFFERENTIAL' || role === 'DIAGNOSTIC_STANDARD') return 'diagnostic_knowledge';
+  if (role === 'NORMATIVE_TREATMENT' || role === 'CLINICAL_CASE') return 'treatment_knowledge';
+  return undefined;
+}
+
 /** 稳定 hypothesis 身份：由语义标签派生确定性 H_xxx（跨多次检索保持一致，不与 sourceId/label 混用）。 */
 function stableHypothesisId(label: string): string {
   let h = 5381;
@@ -44,6 +51,7 @@ function evidenceItemDraft(hit: Record<string, unknown>): WorkspaceEventDraft | 
       sourceSchool: readPath(hit, 'provenance', 'sourceSchool'),
       title: readField(hit, 'title'),
       summary: readField(hit, 'excerpt'),
+      evidenceKind: evidenceKindForRole(readField(hit, 'knowledgeRole')),
       sourceDisease: readPath(hit, 'provenance', 'disease'),
       sourceSyndrome: readPath(hit, 'provenance', 'syndrome'),
       relatedCandidates: formulaIds(readField(hit, 'formulas')),
@@ -136,7 +144,49 @@ export function workspaceEventsForTool(
         sourceSchool: readField(doc, 'sourceSchool'),
         title: readField(doc, 'title'),
         summary: typeof summary === 'string' ? summary.slice(0, 400) : undefined,
+        evidenceKind: evidenceKindForRole(readField(doc, 'knowledgeRole')),
         relatedCandidates: formulaIds(readField(doc, 'formulas')),
+        supportingSignals: [],
+        contradictingSignals: [],
+      },
+    }];
+  }
+
+  if (toolName === 'knowledge.search_cards') {
+    if (!Array.isArray(output)) return [];
+    const assetIds = output
+      .map((hit) => readField(hit, 'asset_id'))
+      .filter((x): x is string => typeof x === 'string');
+    return [{
+      type: 'knowledge.search.completed',
+      payload: {
+        query: readField(input, 'query'),
+        count: output.length,
+        assetIds,
+        surface: 'runtime-catalog',
+      },
+    }];
+  }
+
+  if (toolName === 'knowledge.get_asset') {
+    if (typeof output !== 'object' || output === null) return [];
+    const doc = output as Record<string, unknown>;
+    const assetId = readField(doc, 'asset_id');
+    if (typeof assetId !== 'string') return [];
+    const summary = readField(doc, 'indication_text') ?? readField(doc, 'treatment_method') ?? readField(doc, 'title');
+    return [{
+      type: 'evidence.added',
+      payload: {
+        id: assetId,
+        sourceRef: assetId,
+        sourceType: readField(doc, 'asset_type') ?? 'runtime-catalog',
+        sourceSchool: readPath(doc, 'provenance', 'book'),
+        title: readField(doc, 'title'),
+        summary: typeof summary === 'string' ? summary.slice(0, 400) : undefined,
+        evidenceKind: 'treatment_knowledge',
+        sourceDisease: readPath(doc, 'disease', 'name'),
+        sourceSyndrome: readField(doc, 'syndrome_pattern'),
+        relatedCandidates: [],
         supportingSignals: [],
         contradictingSignals: [],
       },
@@ -165,6 +215,52 @@ export function workspaceEventsForTool(
       // H12：不再从 syndromeVariant / syndrome 自动生成 patient hypothesis。
     }
     return drafts;
+  }
+
+  if (toolName === 'formula.search_candidates') {
+    const result = typeof output === 'object' && output !== null ? (output as Record<string, unknown>) : undefined;
+    const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+    const drafts: WorkspaceEventDraft[] = [];
+    for (const c of candidates as Record<string, unknown>[]) {
+      const id = readField(c, 'candidateRef');
+      if (typeof id !== 'string') continue;
+      drafts.push({
+        type: 'candidate.presented',
+        payload: {
+          id,
+          formulaId: readField(c, 'formulaId'),
+          sourceId: readField(c, 'sourceId'),
+          name: readField(c, 'formulaName'),
+          originatingHypothesisRefs: [],
+        },
+      });
+    }
+    return drafts;
+  }
+
+  if (toolName === 'formula.get_evidence') {
+    if (typeof output !== 'object' || output === null) return [];
+    const doc = output as Record<string, unknown>;
+    const sourceId = readField(doc, 'sourceId');
+    if (typeof sourceId !== 'string') return [];
+    const formulaName = readField(doc, 'formulaName');
+    return [{
+      type: 'evidence.added',
+      payload: {
+        id: sourceId,
+        sourceRef: sourceId,
+        sourceType: readField(doc, 'sourceTier') ?? 'knowledge',
+        sourceSchool: readPath(doc, 'provenance', 'sourceSchool'),
+        title: typeof formulaName === 'string' ? formulaName : readField(doc, 'formulaId'),
+        summary: readField(doc, 'indicationText'),
+        evidenceKind: 'treatment_knowledge',
+        sourceDisease: readPath(doc, 'provenance', 'disease'),
+        sourceSyndrome: readPath(doc, 'provenance', 'syndrome'),
+        relatedCandidates: [`${sourceId}::${readField(doc, 'formulaId')}`].filter((x): x is string => typeof x === 'string'),
+        supportingSignals: [],
+        contradictingSignals: [],
+      },
+    }];
   }
 
   if (toolName === 'workspace.consider_hypotheses') {
@@ -293,6 +389,41 @@ export function workspaceEventsForTool(
         type: 'uncertainty.resolved',
         payload: { resolvedRefs, remainingRefs },
       });
+    }
+
+    // H13：PatternAssessment 结构（开放语义患者级辨证结构）。
+    const patternAssessment = firstDefinedField(input, 'patternAssessment');
+    if (typeof patternAssessment === 'object' && patternAssessment !== null) {
+      drafts.push({
+        type: 'pattern.assessment.recorded',
+        payload: patternAssessment as Record<string, unknown>,
+      });
+    }
+
+    // H15：Clinical Decision Spine 各层（开放文本，不生成医学 enum）。
+    const diseaseAssessment = firstDefinedField(input, 'diseaseAssessment');
+    if (typeof diseaseAssessment === 'object' && diseaseAssessment !== null) {
+      drafts.push({ type: 'disease.assessment.recorded', payload: diseaseAssessment as Record<string, unknown> });
+    }
+    const treatmentPlan = firstDefinedField(input, 'treatmentPlan');
+    if (typeof treatmentPlan === 'object' && treatmentPlan !== null) {
+      drafts.push({ type: 'treatment.plan.recorded', payload: treatmentPlan as Record<string, unknown> });
+    }
+    const formulaSelection = firstDefinedField(input, 'formulaSelection');
+    if (typeof formulaSelection === 'object' && formulaSelection !== null) {
+      drafts.push({ type: 'formula.selection.recorded', payload: formulaSelection as Record<string, unknown> });
+    }
+    const modificationPlan = firstDefinedField(input, 'modificationPlan');
+    if (typeof modificationPlan === 'object' && modificationPlan !== null) {
+      drafts.push({ type: 'modification.plan.recorded', payload: modificationPlan as Record<string, unknown> });
+    }
+    const formulaReview = firstDefinedField(input, 'formulaReview');
+    if (typeof formulaReview === 'object' && formulaReview !== null) {
+      drafts.push({ type: 'formula.review.recorded', payload: formulaReview as Record<string, unknown> });
+    }
+    const completionObligation = firstDefinedField(input, 'completionObligation');
+    if (typeof completionObligation === 'object' && completionObligation !== null) {
+      drafts.push({ type: 'completion.obligation.recorded', payload: completionObligation as Record<string, unknown> });
     }
 
     return drafts;

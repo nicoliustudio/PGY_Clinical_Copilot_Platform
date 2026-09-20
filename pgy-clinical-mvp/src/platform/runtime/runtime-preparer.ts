@@ -53,11 +53,16 @@ export class RuntimePreparer implements RuntimePreparationPort {
       kind: f.kind,
       value: f.value,
       source: f.source,
+      evidenceKind: 'patient',
+      temporalRole: f.temporalRole,
+      polarity: f.polarity,
     }));
     workspace.informationGaps = understanding.informationGaps.map((g) => g.question);
     workspace.uncertainties = understanding.uncertainties.map((u) => u.item);
     workspace.safetyDisposition =
       safety.status === 'BLOCK' ? 'urgent' : safety.status === 'CAUTION' ? 'uncertain' : 'routine';
+    // H15：Clinical Decision Spine 的 clinical question 从规划层初始化为当前临床判断。
+    workspace.clinicalDecisionSpine.clinicalQuestion = { statement: strategy.decisionQuestion ?? '', version: 0 };
     workspaceStore.append('workspace.seeded', { input });
 
     const context = {

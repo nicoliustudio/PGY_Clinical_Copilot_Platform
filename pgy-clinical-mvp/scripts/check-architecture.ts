@@ -90,6 +90,24 @@ for (const branch of ["toolName === 'knowledge.search'", "toolName === 'formula.
   }
 }
 
+// Diagnostic Pattern Set + Disease Crosswalk Spike invariant：诊断模式查询/病名解析必须只读知识，不得读取 gold/eval。
+for (const rel of ['src/knowledge/diagnostic-patterns.ts', 'src/knowledge/disease-concepts.ts', 'src/knowledge/standard-runtime.ts', 'src/knowledge/diagnostic-release.ts']) {
+  const path = join(root, rel);
+  const text = await readFile(path, 'utf8');
+  for (const line of text.split('\n').filter((l) => l.trim().startsWith('import'))) {
+    if (/(gold|eval)/i.test(line)) {
+      violations.push(`${rel}: imports evaluation data "${line.trim()}"`);
+    }
+  }
+}
+
+// Diagnostic Knowledge Schema invariant：Open World 中医语义（证型/病机/病位/病性/治法）不得被枚举。
+const diagnosticSchemaPath = join(root, 'src/knowledge/diagnostic-schema.ts');
+const diagnosticSchemaText = await readFile(diagnosticSchemaPath, 'utf8');
+if (/enum\s+(Syndrome|Mechanism|Organ|Pattern|TreatmentPrinciple|Disease|RootBranch)\s*\{/.test(diagnosticSchemaText)) {
+  violations.push('src/knowledge/diagnostic-schema.ts: Open World semantics enumerated (enum Syndrome/Mechanism/Organ/Pattern/TreatmentPrinciple/Disease)');
+}
+
 if (violations.length) {
   console.error(
     'Architecture guard FAILED:\n' + violations.map((x) => `- ${x}`).join('\n'),

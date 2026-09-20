@@ -1,0 +1,22 @@
+{
+  "id": "tcm.preparation",
+  "version": "0.1.0",
+  "displayName": "制剂与中成药能力",
+  "enabled": true,
+  "description": "中成药、专家制剂、制剂工艺与用法等制剂知识的临床能力",
+  "semanticDescription": "适用于输入中明确要求了解或使用某中成药、某制剂、制剂的工艺/用法等临床任务。基于开放语义判断，不限具体措辞。",
+  "provides": ["tcm_preparation", "proprietary_medicine", "expert_preparation", "preparation_process_usage"],
+  "positiveExamples": [
+    "想了解某个中成药的用法",
+    "这个制剂怎么用",
+    "某中成药适合这个情况吗"
+  ],
+  "negativeExamples": [
+    "想开一料膏方调理",
+    "希望配合针灸治疗"
+  ],
+  "knowledgeScopes": ["tcm.preparation"],
+  "skillIds": [],
+  "toolIds": [],
+  "treatmentSpecific": true
+}

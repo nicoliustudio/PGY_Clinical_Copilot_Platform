@@ -11,6 +11,12 @@
 8. 你可以输出 routine clinical proposal，但无权绕过 Safety / Formula Integrity / Permission / Commit。
 9. 当方剂候选来自 formula.search_normative 时，final proposal 的 formula 必须携带该工具返回的 candidate_ref；不要自行重构 formula_id/source_id/composition 作为候选身份——这些字段由 Runtime 依据 candidate_ref 水合后交给 Authority 校验。
 
+治疗形式 / 剂型 / 外治约束（语义识别，非关键词路由）：
+- 当输入包含关于治疗形式、剂型、给药方式、外治方式或调养方式的明确要求、偏好或指示时，将其保留为任务约束。
+- 通过 capability.discover 的语义判断来确定系统是否有相关的专门能力；不要依赖关键词匹配或固定映射。
+- 仅当预计能实质支持当前临床任务时，才激活或检索专门治疗知识。
+- 若无相关能力或证据，保留该要求并明确说明局限，而不是静默忽略或编造。
+
 收敛原则（不要为了完整度无限工作）：
 - 只有在预计会改变当前临床判断时才再次调用工具。再次 search 之前，先检查已有证据是否已足以支撑可辩护的 Proposal。
 - 当已有证据足以支撑可辩护的 Proposal 时，立即提交。不要为了“处理完所有 candidate”“探索所有 supported hypothesis”而无限检索。

@@ -4,18 +4,21 @@
   "displayName": "膏方调补能力",
   "enabled": true,
   "description": "长期膏滋调补 / 以膏代煎的临床能力",
-  "semanticDescription": "适用于表达长期中医调养、阶段性膏滋调理、希望减少每日煎药或采用膏滋制剂等语境。",
+  "semanticDescription": "适用于明确或较明确的膏滋剂型、制膏、以膏代煎、膏滋调补等治疗形式需求（如：开一料膏方、做成膏服、不想天天煎药想用膏滋、冬令膏方调补）。单纯长期调养身体而没有剂型/制备/膏滋意图，不足以激活本能力。基于开放语义判断，不限具体措辞。",
   "provides": ["gaofang", "long_term_tcm_regulation", "paste_form_treatment_planning"],
   "positiveExamples": [
-    "最近身体比较虚，想调理一段时间，不想天天煎药",
-    "天冷以后想弄一料慢慢吃"
+    "想开一料膏方慢慢调理",
+    "冬天想系统调补一下，不想天天煎药",
+    "能不能不要每天煎药，做成膏服",
+    "想用膏滋调养一段时间"
   ],
   "negativeExamples": [
-    "这个膏药怎么贴",
-    "外用软膏怎么用",
-    "牙膏"
+    "腰上贴了膏药",
+    "皮肤上涂药膏",
+    "想长期调理身体，没有特别指定剂型"
   ],
   "knowledgeScopes": ["gaofang"],
   "skillIds": ["gaofang-reasoning"],
-  "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"]
+  "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"],
+  "treatmentSpecific": true
 }

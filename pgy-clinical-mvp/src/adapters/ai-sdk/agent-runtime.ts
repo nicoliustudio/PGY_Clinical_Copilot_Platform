@@ -1,13 +1,14 @@
 import { ToolLoopAgent, isStepCount, generateText, type ToolSet, type ModelMessage } from 'ai';
 import { llmModel } from '../../model/adapter.js';
+import { config } from '../../config.js';
 import { extractJson } from '../../util/json.js';
 import { agentResultSchema, type AgentResult, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { PrimaryAgentOutput, PrimaryAgentPort } from '../../contracts/ports.js';
 import type { AgentStreamEvent, LifecycleStage } from '../../contracts/stream.js';
 import type { AgentLoopTrace, CommitReliabilityMetrics, TerminationReason, ContextMetrics, PromptComponents } from '../../contracts/agent-loop.js';
-import { addToolCall, addActionReceipt, setRunMetrics } from '../../trace.js';
-import { executionProtocolVersion, type ActionReceipt, type DecisionImpact, type ExecutionRole, type ExecutionRoleCost, type RunExecutionMetrics, type RecentRetrievalFeedback } from '../../contracts/execution.js';
+import { addToolCall, addActionReceipt, setRunMetrics, addH14TreatmentRetrieval } from '../../trace.js';
+import { executionProtocolVersion, type ActionReceipt, type DecisionImpact, type ExecutionRole, type ExecutionRoleCost, type RunExecutionMetrics, type RecentRetrievalFeedback, type H14TreatmentRetrieval } from '../../contracts/execution.js';
 import { DEFAULT_AI_SDK_TOOL_BINDINGS, type AiSdkToolBindings } from './tool-bindings.js';
 import { applyToolExecutionResult, type ToolExecutionEnvelope } from './workspace-events.js';
 import { ToolCallLedger } from './tool-call-ledger.js';
@@ -26,6 +27,7 @@ import { buildEvidenceProjection } from '../../platform/workspace/evidence-proje
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
+import { checkClinicalCompletion } from '../../platform/workspace/clinical-workspace.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
@@ -151,11 +153,23 @@ const ACTION_PRINCIPLE = `## Action Principle
 - Retrieved syndrome labels describe knowledge sources, not the patient's diagnosis. Do not treat a syndrome returned by retrieval as confirmation merely because the query already contained that syndrome. Patient-level hypotheses must be justified against case facts, treatment context, tongue/pulse, and discriminating evidence. A hypothesis-conditioned search provides knowledge about that hypothesis, but does not independently prove the patient has it.
 - Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty. Do not let a supported alternative silently disappear.`;
 
+/** Diagnostic Pattern Set Spike：domain-general epistemic rules（仅开关 ON 时注入）。 */
+const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence
+- For diseases with structured diagnostic-pattern knowledge, you may inspect the normative pattern set (knowledge.get_diagnostic_patterns) before committing to a patient-level syndrome.
+- Normative pattern definitions are diagnostic evidence, not the patient's diagnosis.
+- Before choosing a patient syndrome, distinguish: findings explicitly present, findings explicitly absent, findings not reported or unknown. Absence of mention is not negative evidence.
+- Do not select a syndrome by symptom-count matching.
+- Consider whether multiple mechanisms may coexist. A manifestation such as blood stasis may be a component of the case without necessarily being the primary pattern.
+- Use discriminating evidence, current clinical context, treatment history, tongue/pulse, and contradictions.
+- Establish the patient-level pattern assessment before using formula evidence as the main basis for treatment selection.
+- Formula evidence must not be used to create the syndrome that the formula is intended to treat.`;
+
 export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback, decisionState?: DecisionState): string {
   const skills = renderActiveSkills(context.skills);
   const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, decisionState);
   const workingView = renderClinicalWorkingView(view);
-  return `${base}\n\n${ACTION_PRINCIPLE}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
+  const patternPrinciple = config.experiment.diagnosticPatternSet ? `\n\n${DIAGNOSTIC_PATTERN_PRINCIPLE}` : '';
+  return `${base}\n\n${ACTION_PRINCIPLE}${patternPrinciple}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
 }
 
 /** 度量「目标驱动工作上下文」相对「全量投影」的收缩程度（估算）。 */
@@ -232,6 +246,24 @@ export function classifyExecutionRole(toolName: string): ExecutionRole {
   if (toolName === 'proposal.submit') return 'COMMIT';
   if (toolName === 'capability.discover' || toolName === 'capability.activate') return 'CAPABILITY';
   return 'OTHER';
+}
+
+/**
+ * H14：是否「治疗知识检索」。由 metadata 驱动，Core 不判断业务语义。
+ * - 工具自身标记 treatmentSpecific（formula.search_normative）。
+ * - Runtime Catalog 工具（knowledge.search_cards / get_asset）继承激活 capability 的 treatmentSpecific。
+ */
+function isTreatmentRetrieval(internalName: string, context: RuntimeContext): boolean {
+  const tool = context.tools.find((t) => t.id === internalName);
+  if (tool?.treatmentSpecific) return true;
+  if (internalName === 'knowledge.search_cards' || internalName === 'knowledge.get_asset') {
+    return context.capabilities.some((c) => c.treatmentSpecific === true);
+  }
+  return false;
+}
+
+function cardsReturnedFor(rawOutput: unknown): number {
+  return Array.isArray(rawOutput) ? rawOutput.length : 0;
 }
 
 function emptyExecutionRoleCosts(): Record<ExecutionRole, ExecutionRoleCost> {
@@ -315,6 +347,36 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     let actionCounter = 0;
     let currentStep = 0;
     const tracker = new RetrievalDisciplineTracker();
+    // Diagnostic Pattern Set Spike：时序追踪局部状态（run 内）。
+    let firstKnowledgeQuery: string | undefined;
+    let formulaSearchTimingRecorded = false;
+    let patternSetUsed = false;
+    let standardEvidenceUsed = false;
+    // H13 Pattern Assessment 时序追踪局部状态。
+    let patternAssessmentRecorded = false;
+    let patternAssessmentTimingRecorded = false;
+    let leadingAtFirstPatternAssessment: string | undefined;
+    // H14 Treatment Decision Causality 时序追踪局部状态。
+    let firstTreatmentRetrievalStep: number | undefined;
+    let treatmentRetrievalCount = 0;
+    let specializedTreatmentRetrievalCount = 0;
+    let formulaRetrievalCount = 0;
+    let treatmentRetrievalBeforePatternAssessmentCount = 0;
+    let treatmentRetrievalBeforeTreatmentTargetCount = 0;
+    let hypothesisTransitionsAfterTreatmentRetrieval = 0;
+    let hasHadTreatmentRetrieval = false;
+    let patternAssessmentAtFirstTreatmentRetrieval = false;
+    let treatmentTargetAtFirstTreatmentRetrieval = false;
+    let openQuestionAtFirstTreatmentRetrieval = false;
+    // H15 Clinical Decision Spine 时序追踪局部状态。
+    let diseaseAssessmentAtFirstTreatmentRetrieval = false;
+    let formalHypothesisAtFirstTreatmentRetrieval = false;
+    let treatmentPlanAtFirstTreatmentRetrieval = false;
+    let formulaRetrievalRejectedForMissingContext = 0;
+    // H15.1 局部状态：Completion Obligation / Formula Decision Quality。
+    let formulaCandidateRetrievalCount = 0;
+    let formulaEvidenceRetrievalCount = 0;
+    let falseCompletionAttemptCount = 0;
     const metrics: RunExecutionMetrics = {
       totalToolCalls: 0, decisionChangingToolCalls: 0, reinforcingToolCalls: 0, nonDecisionChangingToolCalls: 0, unresolvedToolCalls: 0,
       redundantSearchCount: 0, deduplicatedCallCount: 0, cacheHitCount: 0, parallelGroupCount: 0, parallelToolCallCount: 0,
@@ -344,6 +406,58 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       projectionWithStateChange: 0,
       projectionWithoutStateChange: 0,
       projectionReuseCount: 0,
+      diagnosticPatternSetUsed: false,
+      diagnosticPatternSetFirstClinicalRetrieval: false,
+      returnedPatternRefs: [],
+      formalHypothesisRefsAfterPatternSet: [],
+      formulaSearchBeforeFormalHypothesis: false,
+      diagnosticPatternQueryDisease: undefined,
+      resolvedDiseaseConcepts: [],
+      diagnosticSyndromesReturned: [],
+      diseaseStandardUsed: false,
+      syndromeStandardUsed: false,
+      syndromeConceptsReturned: [],
+      formalHypothesesAfterStandardEvidence: [],
+      diagnosticReleaseUsed: false,
+      diagnosticReleaseSourcesUsed: [],
+      diseaseStandardSourceIds: [],
+      diagnosticPatternSourceIds: [],
+      patternAssessmentRecorded: false,
+      primaryPatternRef: undefined,
+      secondaryPatternRefs: [],
+      sharedMechanismCount: 0,
+      rootBranchRecorded: false,
+      currentDominantMechanismRecorded: false,
+      treatmentTargetRecorded: false,
+      patternAssessmentBeforeFormulaSearch: false,
+      primaryPatternChangedAfterAssessment: undefined,
+      h14Enabled: config.experiment.h14,
+      firstTreatmentRetrievalStep: undefined,
+      patternAssessmentBeforeFirstTreatmentRetrieval: undefined,
+      treatmentTargetBeforeFirstTreatmentRetrieval: undefined,
+      openQuestionPresentBeforeTreatmentRetrieval: undefined,
+      treatmentRetrievalCount: 0,
+      specializedTreatmentRetrievalCount: 0,
+      formulaRetrievalCount: 0,
+      treatmentRetrievalBeforePatternAssessmentCount: 0,
+      treatmentRetrievalBeforeTreatmentTargetCount: 0,
+      hypothesisTransitionsAfterTreatmentRetrieval: 0,
+      diseaseAssessmentBeforeTreatmentRetrieval: undefined,
+      formalHypothesisBeforeTreatmentRetrieval: undefined,
+      treatmentPlanBeforeTreatmentRetrieval: undefined,
+      formulaRetrievalRejectedForMissingContext: 0,
+      formulaReviewRecorded: false,
+      modificationItemsWithPatientEvidence: 0,
+      clinicalCompletionObligationCreated: false,
+      completionRequestedOutcome: undefined,
+      completionRequiredArtifacts: [],
+      completionMissingArtifactsAtEnd: [],
+      falseCompletionAttemptCount: 0,
+      formulaCandidateRetrievalCount: 0,
+      formulaEvidenceRetrievalCount: 0,
+      formulaSelectionFromEvidence: undefined,
+      selectedCandidateRef: undefined,
+      retrievalSuggestedHypothesisCount: 0,
     };
 
     const commitReliability: CommitReliabilityMetrics = {
@@ -420,13 +534,185 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         }
 
         if (internalName === 'proposal.submit' && toolOutput.type === 'tool-result') {
-          submittedProposal = toolCall.input;
+          const submitOutput = rawOutput;
+          const isNotReady = typeof submitOutput === 'object' && submitOutput !== null && (submitOutput as Record<string, unknown>).notReady === true;
+          if (isNotReady) {
+            // H15.1：不把「未完成的 submit 尝试」当作最终 proposal。
+            if ((submitOutput as Record<string, unknown>).code === 'CLINICAL_DECISION_INCOMPLETE') falseCompletionAttemptCount += 1;
+          } else {
+            submittedProposal = toolCall.input;
+          }
           tracker.recordSubmit(currentStep, nowMs);
         }
 
         // H5：计算 workspace state delta 与 decision impact，生成 ActionReceipt。
         const all = context.workspaceStore.trace();
         const delta = reused ? [] : all.slice(workspaceEventCursor);
+
+        // Diagnostic Pattern Set Spike telemetry（Debug/Eval，不进入 clinical decision）。
+        const isKnowledgeQuery =
+          internalName === 'knowledge.search' ||
+          internalName === 'knowledge.get_source' ||
+          internalName === 'formula.search_normative' ||
+          internalName === 'knowledge.get_diagnostic_patterns';
+        if (isKnowledgeQuery && firstKnowledgeQuery === undefined) firstKnowledgeQuery = internalName;
+        if (internalName === 'knowledge.get_diagnostic_patterns') {
+          patternSetUsed = true;
+          metrics.diagnosticPatternSetUsed = true;
+          const qd = (toolCall.input as Record<string, unknown>)?.disease;
+          if (typeof qd === 'string') metrics.diagnosticPatternQueryDisease = qd;
+          if (Array.isArray(rawOutput)) {
+            for (const rec of rawOutput) {
+              const r = (rec && typeof rec === 'object' ? rec : {}) as Record<string, unknown>;
+              const ref = r.patternRef;
+              if (typeof ref === 'string' && !metrics.returnedPatternRefs!.includes(ref)) metrics.returnedPatternRefs!.push(ref);
+              const rr = r.retrievalRelation as Record<string, unknown> | undefined;
+              const matched = rr?.matchedDisease;
+              if (typeof matched === 'string' && !metrics.resolvedDiseaseConcepts!.includes(matched)) metrics.resolvedDiseaseConcepts!.push(matched);
+              const syn = r.syndrome;
+              if (typeof syn === 'string' && !metrics.diagnosticSyndromesReturned!.includes(syn)) metrics.diagnosticSyndromesReturned!.push(syn);
+            }
+          }
+        }
+        if (internalName === 'formula.search_normative' && !formulaSearchTimingRecorded) {
+          formulaSearchTimingRecorded = true;
+          const hasFormalHypothesis = context.workspace.hypothesisState.hypotheses.some((h) => h.origin !== 'retrieval_suggested');
+          metrics.formulaSearchBeforeFormalHypothesis = !hasFormalHypothesis;
+        }
+        if (patternSetUsed) {
+          for (const e of delta) {
+            if (e.type === 'hypothesis.presented' && typeof e.payload.id === 'string' && !metrics.formalHypothesisRefsAfterPatternSet!.includes(e.payload.id)) {
+              metrics.formalHypothesisRefsAfterPatternSet!.push(e.payload.id);
+            }
+          }
+        }
+
+        // Existing Standards Runtime telemetry（Debug/Eval）。
+        if (internalName === 'knowledge.get_disease_standard') {
+          standardEvidenceUsed = true;
+          metrics.diseaseStandardUsed = true;
+        }
+        if (internalName === 'knowledge.get_syndrome_standard') {
+          standardEvidenceUsed = true;
+          metrics.syndromeStandardUsed = true;
+          const cn = (rawOutput as Record<string, unknown>)?.canonicalName;
+          if (typeof cn === 'string' && !metrics.syndromeConceptsReturned!.includes(cn)) metrics.syndromeConceptsReturned!.push(cn);
+        }
+        if (standardEvidenceUsed) {
+          for (const e of delta) {
+            if (e.type === 'hypothesis.presented' && typeof e.payload.id === 'string' && !metrics.formalHypothesesAfterStandardEvidence!.includes(e.payload.id)) {
+              metrics.formalHypothesesAfterStandardEvidence!.push(e.payload.id);
+            }
+          }
+        }
+
+        // Diagnostic Release telemetry：区分 2024 标准 / GB/T ontology / ZY/T 3.1-2025 / T/GDACM 0117-2022。
+        const isReleaseSourceId = (sid: string) => sid.startsWith('ZY_T_3_1') || sid.startsWith('T_GDACM') || sid.startsWith('DKP_');
+        if (internalName === 'knowledge.get_disease_standard' && Array.isArray(rawOutput)) {
+          for (const rec of rawOutput) {
+            const src = (rec as Record<string, unknown>)?.source as Record<string, unknown> | undefined;
+            const sid = src?.sourceId;
+            if (typeof sid === 'string') {
+              if (!metrics.diseaseStandardSourceIds!.includes(sid)) metrics.diseaseStandardSourceIds!.push(sid);
+              if (isReleaseSourceId(sid)) {
+                metrics.diagnosticReleaseUsed = true;
+                if (!metrics.diagnosticReleaseSourcesUsed!.includes(sid)) metrics.diagnosticReleaseSourcesUsed!.push(sid);
+              }
+            }
+          }
+        }
+        if (internalName === 'knowledge.get_diagnostic_patterns' && Array.isArray(rawOutput)) {
+          for (const rec of rawOutput) {
+            const sid = (rec as Record<string, unknown>)?.sourceId;
+            if (typeof sid === 'string' && isReleaseSourceId(sid)) {
+              metrics.diagnosticReleaseUsed = true;
+              if (!metrics.diagnosticPatternSourceIds!.includes(sid)) metrics.diagnosticPatternSourceIds!.push(sid);
+              if (!metrics.diagnosticReleaseSourcesUsed!.includes(sid)) metrics.diagnosticReleaseSourcesUsed!.push(sid);
+            }
+          }
+        }
+
+        // H13 Pattern Assessment telemetry：从本次 workspace delta 检测 pattern.assessment.recorded。
+        if (delta.some((e) => e.type === 'pattern.assessment.recorded')) {
+          patternAssessmentRecorded = true;
+          metrics.patternAssessmentRecorded = true;
+          if (!patternAssessmentTimingRecorded) {
+            patternAssessmentTimingRecorded = true;
+            metrics.patternAssessmentBeforeFormulaSearch = !formulaSearchTimingRecorded;
+            leadingAtFirstPatternAssessment = context.workspace.hypothesisState.hypotheses.find((h) => h.status === 'active')?.id;
+          }
+        }
+
+        // H14 Treatment Decision Causality：只观察，不做临床裁决。
+        if (isTreatmentRetrieval(internalName, context)) {
+          const isGateRejection = typeof rawOutput === 'object' && rawOutput !== null && (rawOutput as Record<string, unknown>).code === 'TREATMENT_CONTEXT_INCOMPLETE';
+          if (isGateRejection) {
+            // H15：被门禁拒绝的尝试不算「真实治疗检索」，只计 rejection。
+            formulaRetrievalRejectedForMissingContext += 1;
+          } else {
+            const pa = context.workspace.patternAssessment;
+            const paPresent = pa !== null && pa !== undefined;
+            const ttPresent = typeof pa?.treatmentTarget === 'string' && pa.treatmentTarget.trim() !== '';
+            const openQuestions = context.workspace.uncertainties ?? [];
+            const openQuestionPresent = openQuestions.length > 0;
+            const spine = context.workspace.clinicalDecisionSpine;
+            const diseasePresent = spine.diseaseAssessment !== undefined;
+            const hypothesisPresent = spine.patternHypothesisRefs.length > 0;
+            const treatmentPlanPresent = spine.treatmentPlan !== undefined;
+
+            treatmentRetrievalCount += 1;
+            if (internalName === 'formula.search_normative') formulaRetrievalCount += 1;
+            else if (internalName === 'knowledge.search_cards' || internalName === 'knowledge.get_asset') specializedTreatmentRetrievalCount += 1;
+            if (internalName === 'formula.search_candidates') formulaCandidateRetrievalCount += 1;
+            if (internalName === 'formula.get_evidence') formulaEvidenceRetrievalCount += 1;
+
+            if (firstTreatmentRetrievalStep === undefined) {
+              firstTreatmentRetrievalStep = currentStep;
+              patternAssessmentAtFirstTreatmentRetrieval = paPresent;
+              treatmentTargetAtFirstTreatmentRetrieval = ttPresent;
+              openQuestionAtFirstTreatmentRetrieval = openQuestionPresent;
+              diseaseAssessmentAtFirstTreatmentRetrieval = diseasePresent;
+              formalHypothesisAtFirstTreatmentRetrieval = hypothesisPresent;
+              treatmentPlanAtFirstTreatmentRetrieval = treatmentPlanPresent;
+            }
+            if (!paPresent) treatmentRetrievalBeforePatternAssessmentCount += 1;
+            if (!ttPresent) treatmentRetrievalBeforeTreatmentTargetCount += 1;
+
+            const activeCapability = context.capabilities.find((c) => c.treatmentSpecific === true)?.id ?? '';
+            const activeScope = context.knowledgeScopes
+              .filter((s) => context.capabilities.some((c) => c.id === s && c.treatmentSpecific === true))
+              .join(',');
+            const assetIdsFetched = internalName === 'knowledge.get_asset' && rawOutput !== null && rawOutput !== undefined ? 1 : 0;
+
+            const h14Event: H14TreatmentRetrieval = {
+              tool: internalName,
+              step: currentStep,
+              activeCapability,
+              activeScope,
+              patternAssessmentPresent: paPresent,
+              treatmentTargetPresent: ttPresent,
+              openQuestionsSnapshot: openQuestions,
+              cardsReturned: cardsReturnedFor(rawOutput),
+              assetIdsFetched,
+              workspaceStateVersion: context.workspaceStore.version,
+            };
+            addH14TreatmentRetrieval(context.runId, h14Event);
+            hasHadTreatmentRetrieval = true;
+          }
+        }
+
+        // H14：治疗检索后、无新证据时的 hypothesis 转变（只记录，不拦截）。
+        if (hasHadTreatmentRetrieval) {
+          const hypChange = delta.some((e) =>
+            e.type === 'hypothesis.presented' ||
+            e.type === 'hypothesis.selected' ||
+            e.type === 'hypothesis.rejected' ||
+            e.type === 'hypothesis.preserved_as_uncertainty',
+          );
+          const hasNewEvidence = delta.some((e) => e.type === 'evidence.added');
+          if (hypChange && !hasNewEvidence) hypothesisTransitionsAfterTreatmentRetrieval += 1;
+        }
+
         const decisionImpact = computeDecisionImpact(delta, error !== undefined);
         const newEvidenceCount = delta.filter((e) => e.type === 'evidence.added').length;
         const status = error !== undefined ? 'error' : reused ? 'deduplicated' : 'success';
@@ -626,6 +912,60 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     metrics.projectionWithoutStateChange = projectionMetrics.projectionWithoutStateChange;
     metrics.projectionReuseCount = projectionMetrics.projectionReuseCount;
     Object.assign(metrics, retrievalMetrics);
+    metrics.diagnosticPatternSetFirstClinicalRetrieval = firstKnowledgeQuery === 'knowledge.get_diagnostic_patterns';
+
+    // H13：从最终 workspace.patternAssessment 派生结构指标 + consistency（仅记录，不纠正）。
+    const pa = context.workspace.patternAssessment;
+    if (pa) {
+      metrics.primaryPatternRef = pa.primary?.hypothesisRef;
+      metrics.secondaryPatternRefs = (pa.secondary ?? [])
+        .map((s) => s.hypothesisRef)
+        .filter((x): x is string => typeof x === 'string');
+      metrics.sharedMechanismCount = (pa.sharedMechanisms ?? []).length;
+      metrics.rootBranchRecorded = pa.rootBranch !== undefined;
+      metrics.currentDominantMechanismRecorded = pa.currentDominantMechanism !== undefined;
+      metrics.treatmentTargetRecorded = typeof pa.treatmentTarget === 'string' && pa.treatmentTarget.trim() !== '';
+      if (pa.primary?.hypothesisRef && leadingAtFirstPatternAssessment) {
+        metrics.primaryPatternChangedAfterAssessment = pa.primary.hypothesisRef !== leadingAtFirstPatternAssessment;
+      }
+    }
+
+    // H14：固化治疗检索时序指标（仅观察，不做临床裁决）。
+    metrics.firstTreatmentRetrievalStep = firstTreatmentRetrievalStep;
+    metrics.patternAssessmentBeforeFirstTreatmentRetrieval = firstTreatmentRetrievalStep === undefined ? undefined : patternAssessmentAtFirstTreatmentRetrieval;
+    metrics.treatmentTargetBeforeFirstTreatmentRetrieval = firstTreatmentRetrievalStep === undefined ? undefined : treatmentTargetAtFirstTreatmentRetrieval;
+    metrics.openQuestionPresentBeforeTreatmentRetrieval = firstTreatmentRetrievalStep === undefined ? undefined : openQuestionAtFirstTreatmentRetrieval;
+    metrics.treatmentRetrievalCount = treatmentRetrievalCount;
+    metrics.specializedTreatmentRetrievalCount = specializedTreatmentRetrievalCount;
+    metrics.formulaRetrievalCount = formulaRetrievalCount;
+    metrics.treatmentRetrievalBeforePatternAssessmentCount = treatmentRetrievalBeforePatternAssessmentCount;
+    metrics.treatmentRetrievalBeforeTreatmentTargetCount = treatmentRetrievalBeforeTreatmentTargetCount;
+    metrics.hypothesisTransitionsAfterTreatmentRetrieval = hypothesisTransitionsAfterTreatmentRetrieval;
+
+    // H15：固化 Clinical Decision Spine 时序指标 + 门禁观测（只观察）。
+    metrics.diseaseAssessmentBeforeTreatmentRetrieval = firstTreatmentRetrievalStep === undefined ? undefined : diseaseAssessmentAtFirstTreatmentRetrieval;
+    metrics.formalHypothesisBeforeTreatmentRetrieval = firstTreatmentRetrievalStep === undefined ? undefined : formalHypothesisAtFirstTreatmentRetrieval;
+    metrics.treatmentPlanBeforeTreatmentRetrieval = firstTreatmentRetrievalStep === undefined ? undefined : treatmentPlanAtFirstTreatmentRetrieval;
+    metrics.formulaRetrievalRejectedForMissingContext = formulaRetrievalRejectedForMissingContext;
+    metrics.formulaReviewRecorded = context.workspace.clinicalDecisionSpine.formulaReview !== undefined;
+    metrics.modificationItemsWithPatientEvidence = (context.workspace.clinicalDecisionSpine.modificationPlan?.items ?? []).filter((it) => it.patientEvidenceRefs.length > 0).length;
+
+    // H15.1：固化 Completion Obligation & Formula Decision Quality 指标（只观察）。
+    const obligation = context.workspace.clinicalDecisionSpine.completionObligation;
+    metrics.clinicalCompletionObligationCreated = obligation !== undefined;
+    metrics.completionRequestedOutcome = obligation?.requestedOutcome;
+    metrics.completionRequiredArtifacts = obligation?.requiredArtifacts ?? [];
+    metrics.completionMissingArtifactsAtEnd = checkClinicalCompletion(context.workspace).missingArtifacts;
+    metrics.falseCompletionAttemptCount = falseCompletionAttemptCount;
+    metrics.formulaCandidateRetrievalCount = formulaCandidateRetrievalCount;
+    metrics.formulaEvidenceRetrievalCount = formulaEvidenceRetrievalCount;
+    const selectedRef = context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
+    metrics.selectedCandidateRef = selectedRef;
+    metrics.formulaSelectionFromEvidence = selectedRef === undefined
+      ? undefined
+      : context.workspace.candidates.some((c) => c.id === selectedRef);
+    metrics.retrievalSuggestedHypothesisCount = context.workspace.hypothesisState.hypotheses.filter((h) => h.origin === 'retrieval_suggested').length;
+
     setRunMetrics(context.runId, metrics);
 
     return { proposal, usage, agentLoop, contextMetrics };

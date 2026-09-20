@@ -1,0 +1,22 @@
+{
+  "id": "tcm.external-therapy",
+  "version": "0.1.0",
+  "displayName": "中医外治能力",
+  "enabled": true,
+  "description": "针刺、艾灸、穴位、耳穴等中医外治方式的语义发现能力",
+  "semanticDescription": "适用于输入中明确要求或计划使用针刺、艾灸、穴位、耳穴等中医外治方式的临床任务。基于开放语义判断，不限具体措辞。",
+  "provides": ["external_therapy"],
+  "positiveExamples": [
+    "希望配合针灸治疗",
+    "这次想加针刺方案",
+    "请给出穴位和艾灸建议"
+  ],
+  "negativeExamples": [
+    "针灸科怎么走",
+    "以前做过针灸，现在只想开中药"
+  ],
+  "knowledgeScopes": ["tcm.external-therapy"],
+  "skillIds": [],
+  "toolIds": [],
+  "treatmentSpecific": true
+}

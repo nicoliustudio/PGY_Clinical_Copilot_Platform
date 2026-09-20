@@ -180,4 +180,79 @@ export interface RunExecutionMetrics extends RetrievalDisciplineMetrics {
   projectionWithStateChange: number;
   projectionWithoutStateChange: number;
   projectionReuseCount: number;
+  /** Diagnostic Pattern Set Spike telemetry（Debug/Eval，不进入 clinical decision；旧 run 可能缺失）。 */
+  diagnosticPatternSetUsed?: boolean;
+  diagnosticPatternSetFirstClinicalRetrieval?: boolean;
+  returnedPatternRefs?: string[];
+  formalHypothesisRefsAfterPatternSet?: string[];
+  formulaSearchBeforeFormalHypothesis?: boolean;
+  /** Disease Crosswalk Spike telemetry。 */
+  diagnosticPatternQueryDisease?: string;
+  resolvedDiseaseConcepts?: string[];
+  diagnosticSyndromesReturned?: string[];
+  /** Existing Standards Runtime telemetry。 */
+  diseaseStandardUsed?: boolean;
+  syndromeStandardUsed?: boolean;
+  syndromeConceptsReturned?: string[];
+  formalHypothesesAfterStandardEvidence?: string[];
+  /** Diagnostic Release telemetry（区分 2024 标准 / GB/T ontology / ZY/T 3.1-2025 / T/GDACM 0117-2022）。 */
+  diagnosticReleaseUsed?: boolean;
+  diagnosticReleaseSourcesUsed?: string[];
+  diseaseStandardSourceIds?: string[];
+  diagnosticPatternSourceIds?: string[];
+  /** H13 Pattern Assessment telemetry。 */
+  patternAssessmentRecorded?: boolean;
+  primaryPatternRef?: string;
+  secondaryPatternRefs?: string[];
+  sharedMechanismCount?: number;
+  rootBranchRecorded?: boolean;
+  currentDominantMechanismRecorded?: boolean;
+  treatmentTargetRecorded?: boolean;
+  patternAssessmentBeforeFormulaSearch?: boolean;
+  /** H13 consistency：初次 leading hypothesis 与最终 primary 是否发生变化（仅记录，不纠正）。 */
+  primaryPatternChangedAfterAssessment?: boolean;
+  /** H14 Treatment Decision Causality telemetry（仅观察，不做临床裁决）。 */
+  h14Enabled?: boolean;
+  firstTreatmentRetrievalStep?: number;
+  patternAssessmentBeforeFirstTreatmentRetrieval?: boolean;
+  treatmentTargetBeforeFirstTreatmentRetrieval?: boolean;
+  openQuestionPresentBeforeTreatmentRetrieval?: boolean;
+  treatmentRetrievalCount?: number;
+  specializedTreatmentRetrievalCount?: number;
+  formulaRetrievalCount?: number;
+  treatmentRetrievalBeforePatternAssessmentCount?: number;
+  treatmentRetrievalBeforeTreatmentTargetCount?: number;
+  hypothesisTransitionsAfterTreatmentRetrieval?: number;
+  /** H15 Clinical Decision Spine telemetry（只观察，不做临床裁决）。 */
+  diseaseAssessmentBeforeTreatmentRetrieval?: boolean;
+  formalHypothesisBeforeTreatmentRetrieval?: boolean;
+  treatmentPlanBeforeTreatmentRetrieval?: boolean;
+  formulaRetrievalRejectedForMissingContext?: number;
+  formulaReviewRecorded?: boolean;
+  modificationItemsWithPatientEvidence?: number;
+  /** H15.1 Completion Obligation & Formula Decision Quality telemetry（只观察，不做临床裁决）。 */
+  clinicalCompletionObligationCreated?: boolean;
+  completionRequestedOutcome?: string;
+  completionRequiredArtifacts?: string[];
+  completionMissingArtifactsAtEnd?: string[];
+  falseCompletionAttemptCount?: number;
+  formulaCandidateRetrievalCount?: number;
+  formulaEvidenceRetrievalCount?: number;
+  formulaSelectionFromEvidence?: boolean;
+  selectedCandidateRef?: string;
+  retrievalSuggestedHypothesisCount?: number;
+}
+
+/** H14：每次治疗知识检索的观测快照（不含 hidden CoT）。 */
+export interface H14TreatmentRetrieval {
+  tool: string;
+  step: number;
+  activeCapability: string;
+  activeScope: string;
+  patternAssessmentPresent: boolean;
+  treatmentTargetPresent: boolean;
+  openQuestionsSnapshot: string[];
+  cardsReturned: number;
+  assetIdsFetched: number;
+  workspaceStateVersion: number;
 }

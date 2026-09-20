@@ -1,6 +1,7 @@
 import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
-import type { ClinicalWorkspace, DecisionState } from '../../contracts/workspace.js';
+import type { ClinicalWorkspace, DecisionState, PatternAssessment } from '../../contracts/workspace.js';
 import type { RecentRetrievalFeedback } from '../../contracts/execution.js';
+import { config } from '../../config.js';
 import { buildDecisionState } from '../workspace/decision-state-projection.js';
 
 /**
@@ -55,6 +56,8 @@ export interface ClinicalWorkingView {
   retrievedInterpretations: RetrievedInterpretation[];
   focusedCandidates: WorkingCandidate[];
   decisionChangingUncertainty: string[];
+  /** H13：患者级辨证结构（Pattern Structure ON 时可见）。 */
+  patternStructure?: PatternAssessment;
   activeSkills: string[];
   activeCapabilities: string[];
   recentUsefulActions: string[];
@@ -113,6 +116,7 @@ export function buildClinicalWorkingView(
     retrievedInterpretations,
     focusedCandidates,
     decisionChangingUncertainty,
+    patternStructure: config.experiment.patternAssessment ? (workspace.patternAssessment ?? undefined) : undefined,
     activeSkills: workspace.activeSkills ?? [],
     activeCapabilities: workspace.activeCapabilities ?? [],
     recentUsefulActions: recentActions.map((a) => `${a.toolName}: ${a.summary}`),
@@ -145,6 +149,41 @@ function renderRetrievedInterpretations(items: RetrievedInterpretation[]): strin
 function renderCaseFrame(facts: WorkingCaseFact[]): string {
   if (!facts.length) return '（无）';
   return facts.map((f) => `- [${f.id}] ${f.kind}：${f.value}`).join('\n');
+}
+
+function renderClaim(c: NonNullable<PatternAssessment['primary']>, prefix: string): string {
+  const lines = [`${prefix}: ${c.statement}${c.hypothesisRef ? ` [${c.hypothesisRef}]` : ''}`];
+  if (c.supportingEvidenceRefs.length) lines.push(`  支持: ${c.supportingEvidenceRefs.join('、')}`);
+  if (c.contradictingEvidenceRefs?.length) lines.push(`  反证: ${c.contradictingEvidenceRefs.join('、')}`);
+  if (c.rationale) lines.push(`  理由: ${c.rationale}`);
+  return lines.join('\n');
+}
+
+function renderPatternStructure(pa?: PatternAssessment): string {
+  if (!pa) return '（未记录）';
+  const lines: string[] = [];
+  if (pa.primary) lines.push(renderClaim(pa.primary, 'Primary Pattern'));
+  if (pa.secondary?.length) {
+    lines.push('Secondary Patterns:');
+    for (const s of pa.secondary) {
+      lines.push(`  - ${s.statement}${s.hypothesisRef ? ` [${s.hypothesisRef}]` : ''}`);
+      if (s.supportingEvidenceRefs.length) lines.push(`      支持: ${s.supportingEvidenceRefs.join('、')}`);
+      if (s.contradictingEvidenceRefs?.length) lines.push(`      反证: ${s.contradictingEvidenceRefs.join('、')}`);
+    }
+  }
+  if (pa.sharedMechanisms?.length) {
+    lines.push('Shared / Common Mechanisms:');
+    for (const s of pa.sharedMechanisms) lines.push(`  - ${s.statement}${s.hypothesisRef ? ` [${s.hypothesisRef}]` : ''}`);
+  }
+  if (pa.rootBranch) {
+    lines.push(`Root / Branch: root=${pa.rootBranch.root ?? '—'} branch=${pa.rootBranch.branch ?? '—'} relationship=${pa.rootBranch.relationship ?? '—'}`);
+  }
+  if (pa.currentDominantMechanism) {
+    lines.push(`Current Dominant Mechanism: ${pa.currentDominantMechanism.statement}${pa.currentDominantMechanism.hypothesisRef ? ` [${pa.currentDominantMechanism.hypothesisRef}]` : ''}`);
+  }
+  if (pa.treatmentTarget) lines.push(`Treatment Target: ${pa.treatmentTarget}`);
+  if (pa.uncertainty?.length) lines.push(`Uncertainty: ${pa.uncertainty.join('; ')}`);
+  return lines.join('\n');
 }
 
 function renderRetrievalFeedback(fb?: RecentRetrievalFeedback): string {
@@ -186,6 +225,9 @@ export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
     block('Retrieval Feedback', renderRetrievalFeedback(view.retrievalFeedback)),
     block('Case Frame', renderCaseFrame(view.caseFrame)),
     block('Active Patient Hypotheses', renderHypotheses(view.leadingHypotheses)),
+    ...(config.experiment.patternAssessment
+      ? [block('Pattern Structure', renderPatternStructure(view.patternStructure))]
+      : []),
     block(
       'Retrieved Knowledge Interpretations (source labels, not patient diagnosis)',
       renderRetrievedInterpretations(view.retrievedInterpretations),

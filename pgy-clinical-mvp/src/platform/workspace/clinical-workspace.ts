@@ -5,8 +5,12 @@ import type {
   DeliberationCoverage,
   EvidenceItem,
   HypothesisCandidate,
+  PatternAssessment,
+  PatternClaim,
   PromotionCoverage,
   PromotionWorkItem,
+  RootBranchAssessment,
+  TreatmentRetrievalContext,
   WorkspaceBatchResult,
   WorkspaceControlPort,
   WorkspaceEvent,
@@ -41,6 +45,10 @@ export function createClinicalWorkspace(): ClinicalWorkspace {
       assessments: [],
       coverage: [],
       frontier: [],
+    },
+    patternAssessment: null,
+    clinicalDecisionSpine: {
+      patternHypothesisRefs: [],
     },
   };
 }
@@ -141,6 +149,27 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     if (event.type === 'uncertainty.resolved') {
       return this.applyUncertaintyResolved(event.payload);
     }
+    if (event.type === 'pattern.assessment.recorded') {
+      return this.applyPatternAssessment(event.payload);
+    }
+    if (event.type === 'disease.assessment.recorded') {
+      return this.applyDiseaseAssessment(event.payload);
+    }
+    if (event.type === 'treatment.plan.recorded') {
+      return this.applyTreatmentPlan(event.payload);
+    }
+    if (event.type === 'formula.selection.recorded') {
+      return this.applyFormulaSelection(event.payload);
+    }
+    if (event.type === 'modification.plan.recorded') {
+      return this.applyModificationPlan(event.payload);
+    }
+    if (event.type === 'formula.review.recorded') {
+      return this.applyFormulaReview(event.payload);
+    }
+    if (event.type === 'completion.obligation.recorded') {
+      return this.applyCompletionObligation(event.payload);
+    }
     // 纯观测事件（不改变认知状态，但必须记录到 trace），始终写入。
     if (event.type === 'knowledge.search.completed' || event.type === 'workspace.seeded' || event.type === 'safety.updated') {
       return true;
@@ -202,6 +231,9 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       sourceSchool: asString(payload.sourceSchool),
       title: asString(payload.title),
       summary: asString(payload.summary),
+      evidenceKind: asString(payload.evidenceKind) as EvidenceItem['evidenceKind'],
+      temporalRole: asString(payload.temporalRole) as EvidenceItem['temporalRole'],
+      polarity: asString(payload.polarity) as EvidenceItem['polarity'],
       relatedCandidates: asStringArray(payload.relatedCandidates),
       supportingSignals: asStringArray(payload.supportingSignals),
       contradictingSignals: asStringArray(payload.contradictingSignals),
@@ -382,6 +414,9 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     this.ensureCoverage(id);
     this.ensureWorkItem(id);
     this.recomputeGap(id);
+    if (!this.workspace.clinicalDecisionSpine.patternHypothesisRefs.includes(id)) {
+      this.workspace.clinicalDecisionSpine.patternHypothesisRefs.push(id);
+    }
   }
 
   private applyHypothesisEvidence(
@@ -449,6 +484,105 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     if (coverage) coverage.unresolvedPromotionGap = !resolved;
   }
 
+  private applyPatternAssessment(payload: Record<string, unknown>): boolean {
+    this.workspace.patternAssessment = parsePatternAssessment(payload);
+    const version = this.events.length + 1;
+    this.workspace.clinicalDecisionSpine.patternAssessmentRef = `PA_${version}`;
+    this.workspace.clinicalDecisionSpine.patternAssessmentVersion = version;
+    return true;
+  }
+
+  private applyDiseaseAssessment(payload: Record<string, unknown>): boolean {
+    const statement = asString(payload.statement);
+    if (!statement) return false;
+    this.workspace.clinicalDecisionSpine.diseaseAssessment = {
+      statement,
+      diseaseRefs: asStringArray(payload.diseaseRefs),
+      evidenceRefs: asStringArray(payload.evidenceRefs),
+      uncertainty: asStringArray(payload.uncertainty),
+      version: this.events.length + 1,
+    };
+    return true;
+  }
+
+  private applyTreatmentPlan(payload: Record<string, unknown>): boolean {
+    const primaryPrinciple = asString(payload.primaryPrinciple);
+    const treatmentTarget = asString(payload.treatmentTarget);
+    if (!primaryPrinciple || !treatmentTarget) return false;
+    this.workspace.clinicalDecisionSpine.treatmentPlan = {
+      primaryPrinciple,
+      adjunctPrinciples: asStringArray(payload.adjunctPrinciples),
+      treatmentTarget,
+      priority: asString(payload.priority),
+      rationale: asString(payload.rationale),
+      evidenceRefs: asStringArray(payload.evidenceRefs),
+      version: this.events.length + 1,
+    };
+    return true;
+  }
+
+  private applyFormulaSelection(payload: Record<string, unknown>): boolean {
+    this.workspace.clinicalDecisionSpine.formulaSelection = {
+      selectedCandidateRef: asString(payload.selectedCandidateRef),
+      rationale: asString(payload.rationale),
+      supportingEvidenceRefs: asStringArray(payload.supportingEvidenceRefs),
+      contradictingEvidenceRefs: asStringArray(payload.contradictingEvidenceRefs),
+      version: this.events.length + 1,
+    };
+    return true;
+  }
+
+  private applyModificationPlan(payload: Record<string, unknown>): boolean {
+    const items = Array.isArray(payload.items)
+      ? payload.items
+          .map((it) => {
+            if (typeof it !== 'object' || it === null) return undefined;
+            const o = it as Record<string, unknown>;
+            const statement = asString(o.statement);
+            if (!statement) return undefined;
+            return {
+              statement,
+              patientEvidenceRefs: asStringArray(o.patientEvidenceRefs),
+              sourceEvidenceRefs: asStringArray(o.sourceEvidenceRefs),
+            };
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== undefined)
+      : [];
+    this.workspace.clinicalDecisionSpine.modificationPlan = {
+      items,
+      version: this.events.length + 1,
+    };
+    return true;
+  }
+
+  private applyFormulaReview(payload: Record<string, unknown>): boolean {
+    const assessment = asString(payload.assessment);
+    const disposition = asString(payload.disposition) as 'SUPPORTED' | 'REVISE' | 'UNCERTAIN' | undefined;
+    if (!assessment || !disposition) return false;
+    this.workspace.clinicalDecisionSpine.formulaReview = {
+      assessment,
+      coveredTargets: asStringArray(payload.coveredTargets),
+      uncoveredProblems: asStringArray(payload.uncoveredProblems),
+      conflicts: asStringArray(payload.conflicts),
+      disposition,
+    };
+    return true;
+  }
+
+  private applyCompletionObligation(payload: Record<string, unknown>): boolean {
+    const requestedOutcome = asString(payload.requestedOutcome);
+    if (!requestedOutcome) return false;
+    const requiredArtifacts = asStringArray(payload.requiredArtifacts);
+    this.workspace.clinicalDecisionSpine.completionObligation = {
+      requestedOutcome,
+      requiredArtifacts,
+      satisfiedArtifacts: [],
+      missingArtifacts: [...requiredArtifacts],
+      version: this.events.length + 1,
+    };
+    return true;
+  }
+
   private ensureCoverage(id: string): PromotionCoverage {
     let coverage = this.workspace.promotionState.coverage.find((c) => c.hypothesisRef === id);
     if (!coverage) {
@@ -495,6 +629,56 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
   }
 }
 
+function parsePatternClaim(v: unknown): PatternClaim | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  const statement = asString(o.statement);
+  if (!statement) return undefined;
+  return {
+    hypothesisRef: asString(o.hypothesisRef),
+    statement,
+    supportingEvidenceRefs: asStringArray(o.supportingEvidenceRefs),
+    contradictingEvidenceRefs: asStringArray(o.contradictingEvidenceRefs),
+    rationale: asString(o.rationale),
+  };
+}
+
+function parseRootBranch(v: unknown): RootBranchAssessment | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  return {
+    root: asString(o.root),
+    branch: asString(o.branch),
+    relationship: asString(o.relationship),
+    supportingEvidenceRefs: asStringArray(o.supportingEvidenceRefs),
+  };
+}
+
+function parsePatternAssessment(v: unknown): PatternAssessment | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as Record<string, unknown>;
+  const assessment: PatternAssessment = {};
+  const primary = parsePatternClaim(o.primary);
+  if (primary) assessment.primary = primary;
+  const secondary = Array.isArray(o.secondary)
+    ? o.secondary.map(parsePatternClaim).filter((x): x is PatternClaim => x !== undefined)
+    : [];
+  if (secondary.length) assessment.secondary = secondary;
+  const shared = Array.isArray(o.sharedMechanisms)
+    ? o.sharedMechanisms.map(parsePatternClaim).filter((x): x is PatternClaim => x !== undefined)
+    : [];
+  if (shared.length) assessment.sharedMechanisms = shared;
+  const rootBranch = parseRootBranch(o.rootBranch);
+  if (rootBranch) assessment.rootBranch = rootBranch;
+  const cdm = parsePatternClaim(o.currentDominantMechanism);
+  if (cdm) assessment.currentDominantMechanism = cdm;
+  const treatmentTarget = asString(o.treatmentTarget);
+  if (treatmentTarget) assessment.treatmentTarget = treatmentTarget;
+  const uncertainty = asStringArray(o.uncertainty);
+  if (uncertainty.length) assessment.uncertainty = uncertainty;
+  return assessment;
+}
+
 /**
  * Runtime 边界校验：候选评估引用的 candidate / hypothesis / evidence 必须真实存在于 workspace。
  * 禁止模型伪造 identity。返回错误列表，空数组表示通过。
@@ -537,6 +721,48 @@ export function validateCandidateAssessmentRefs(
   return errors;
 }
 
+/** H13：PatternAssessment 引用校验（只验证 identity 合法性，不验证中医医学含义）。 */
+export function validatePatternAssessmentRefs(
+  workspace: ClinicalWorkspace,
+  assessment: PatternAssessment,
+): string[] {
+  const errors: string[] = [];
+  const evidenceIds = new Set<string>();
+  for (const e of workspace.evidenceState.evidenceItems) {
+    evidenceIds.add(e.id);
+    evidenceIds.add(e.sourceRef);
+  }
+  for (const e of workspace.evidenceRefs) {
+    evidenceIds.add(e.id);
+    if (e.sourceId) evidenceIds.add(e.sourceId);
+  }
+  for (const f of workspace.caseFacts) evidenceIds.add(f.id);
+  for (const h of workspace.hypothesisState.hypotheses) {
+    for (const r of [...h.supportingEvidenceRefs, ...h.contradictingEvidenceRefs]) evidenceIds.add(r);
+  }
+
+  const checkClaim = (claim: PatternClaim | undefined, label: string) => {
+    if (!claim) return;
+    if (claim.hypothesisRef && !workspace.hypothesisState.hypotheses.some((h) => h.id === claim.hypothesisRef)) {
+      errors.push(`unknown hypothesisRef in ${label}: ${claim.hypothesisRef}`);
+    }
+    for (const ref of [...claim.supportingEvidenceRefs, ...(claim.contradictingEvidenceRefs ?? [])]) {
+      if (!evidenceIds.has(ref)) errors.push(`unknown evidenceRef in ${label}: ${ref}`);
+    }
+  };
+
+  checkClaim(assessment.primary, 'primary');
+  for (const s of assessment.secondary ?? []) checkClaim(s, 'secondary');
+  for (const s of assessment.sharedMechanisms ?? []) checkClaim(s, 'sharedMechanisms');
+  checkClaim(assessment.currentDominantMechanism, 'currentDominantMechanism');
+  if (assessment.rootBranch?.supportingEvidenceRefs) {
+    for (const ref of assessment.rootBranch.supportingEvidenceRefs) {
+      if (!evidenceIds.has(ref)) errors.push(`unknown evidenceRef in rootBranch: ${ref}`);
+    }
+  }
+  return errors;
+}
+
 /**
  * H12：确定性的 Hypothesis Coverage 完整性检查（不是医学判断）。
  * 只检查「Agent 显式认领的 formal patient hypothesis」是否仍有 unresolved alternative。
@@ -547,5 +773,140 @@ export function validateCandidateAssessmentRefs(
 export function findUnresolvedFormalHypotheses(workspace: ClinicalWorkspace): HypothesisCandidate[] {
   return workspace.hypothesisState.hypotheses.filter(
     (h) => h.origin !== 'retrieval_suggested' && h.status === 'alternative',
+  );
+}
+
+/**
+ * H15 Treatment Retrieval Gate —— 结构性门禁，不做医学判断。
+ * treatmentSpecific 检索必须已具备：clinical question / disease assessment /
+ * formal pattern hypotheses / pattern assessment / treatment plan。
+ * 版本校验只验证 ref/version 是否为当前，不验证医学内容。
+ */
+export interface TreatmentRetrievalGateResult {
+  ok: boolean;
+  missing: string[];
+}
+
+export function checkTreatmentRetrievalContext(
+  workspace: ClinicalWorkspace,
+  context?: Partial<TreatmentRetrievalContext>,
+): TreatmentRetrievalGateResult {
+  const spine = workspace.clinicalDecisionSpine;
+  const missing: string[] = [];
+  if (!spine.clinicalQuestion?.statement) missing.push('clinical question');
+  if (!spine.diseaseAssessment) missing.push('disease assessment');
+  if (spine.patternHypothesisRefs.length === 0) missing.push('formal pattern hypotheses');
+  if (!spine.patternAssessmentRef) missing.push('pattern assessment');
+  if (!spine.treatmentPlan) missing.push('treatment plan');
+  if (missing.length > 0) return { ok: false, missing };
+
+  if (context) {
+    if (context.diseaseAssessmentVersion !== undefined && context.diseaseAssessmentVersion !== spine.diseaseAssessment!.version) {
+      return { ok: false, missing: ['stale disease assessment version'] };
+    }
+    if (context.patternAssessmentRef && context.patternAssessmentRef !== spine.patternAssessmentRef) {
+      return { ok: false, missing: ['stale pattern assessment ref'] };
+    }
+    if (context.treatmentPlanVersion !== undefined && context.treatmentPlanVersion !== spine.treatmentPlan!.version) {
+      return { ok: false, missing: ['stale treatment plan version'] };
+    }
+  }
+  return { ok: true, missing: [] };
+}
+
+/**
+ * H15.1 Completion Check —— 提交前结构校验。
+ * Agent 声明的 requiredArtifacts 是否全部已形成。只判断结构，不判断医学答案。
+ */
+export interface ClinicalCompletionResult {
+  ok: boolean;
+  missingArtifacts: string[];
+}
+
+function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: string): boolean {
+  const spine = workspace.clinicalDecisionSpine;
+  switch (artifact) {
+    case 'diseaseAssessment': return spine.diseaseAssessment !== undefined;
+    case 'patternAssessment': return spine.patternAssessmentRef !== undefined;
+    case 'treatmentPlan': return spine.treatmentPlan !== undefined;
+    case 'formulaSelection': return spine.formulaSelection !== undefined;
+    case 'formulaReview': return spine.formulaReview !== undefined;
+    case 'formalHypotheses': return spine.patternHypothesisRefs.length > 0;
+    default: return false;
+  }
+}
+
+export function checkClinicalCompletion(workspace: ClinicalWorkspace): ClinicalCompletionResult {
+  const obligation = workspace.clinicalDecisionSpine.completionObligation;
+  if (!obligation || obligation.requiredArtifacts.length === 0) return { ok: true, missingArtifacts: [] };
+  const missing = obligation.requiredArtifacts.filter((a) => !isArtifactSatisfied(workspace, a));
+  return { ok: missing.length === 0, missingArtifacts: missing };
+}
+
+/**
+ * H15.2 Minimum Clinical Core Completion —— 关闭 Empty-Spine Submit。
+ * clinical case 模式下，提交至少需要：clinicalQuestion / diseaseAssessment /
+ * formal hypotheses / pattern assessment。不要求 formulaSelection（不破坏只辨证/针灸/膏方）。
+ * Runtime 只检查结构，不判断医学答案。
+ */
+export interface ClinicalCoreResult {
+  ok: boolean;
+  missing: string[];
+}
+
+export function checkClinicalCoreCompletion(workspace: ClinicalWorkspace): ClinicalCoreResult {
+  const spine = workspace.clinicalDecisionSpine;
+  const missing: string[] = [];
+  if (!spine.clinicalQuestion?.statement) missing.push('clinicalQuestion');
+  if (!spine.diseaseAssessment) missing.push('diseaseAssessment');
+  if (spine.patternHypothesisRefs.length === 0) missing.push('formalHypotheses');
+  if (!spine.patternAssessmentRef) missing.push('patternAssessment');
+  return { ok: missing.length === 0, missing };
+}
+
+/** H15.2：某 evidence ref 是否为 patient-derived。 */
+function isPatientEvidenceRef(workspace: ClinicalWorkspace, ref: string): boolean {
+  if (workspace.caseFacts.some((f) => f.id === ref)) return true;
+  const ev = workspace.evidenceState.evidenceItems.find((e) => e.id === ref || e.sourceRef === ref);
+  return ev?.evidenceKind === 'patient';
+}
+
+/**
+ * H15.2 PatternAssessment Readiness —— 治疗层消费前结构校验。
+ * 只检查可稳定满足的结构（primary 存在 + 非空 supportingEvidenceRefs + 至少 patient-derived evidence）。
+ * hypothesisRef 与 alternatives 是否 account 属于「可观测指标」，在 proposal.submit 由
+ * findUnresolvedFormalHypotheses 兜底（不做为治疗检索硬门禁，避免非确定性过度阻塞）。
+ */
+export interface PatternAssessmentReadinessResult {
+  ok: boolean;
+  missing: string[];
+}
+
+export function checkPatternAssessmentReadiness(workspace: ClinicalWorkspace): PatternAssessmentReadinessResult {
+  const pa = workspace.patternAssessment;
+  const missing: string[] = [];
+  if (!pa?.primary) {
+    return { ok: false, missing: ['primary'] };
+  }
+  const refs = pa.primary.supportingEvidenceRefs ?? [];
+  if (refs.length === 0) {
+    missing.push('primary.supportingEvidenceRefs');
+  } else if (!refs.some((ref) => isPatientEvidenceRef(workspace, ref))) {
+    missing.push('patient-derived evidence ref');
+  }
+  return { ok: missing.length === 0, missing };
+}
+
+/** H15.2：primary 是否关联 formal hypothesis（可观测指标，非硬门禁）。 */
+export function primaryHasHypothesisRef(workspace: ClinicalWorkspace): boolean {
+  return typeof workspace.patternAssessment?.primary?.hypothesisRef === 'string';
+}
+
+/** H15.2：active formal alternative 是否已 account（selected/rejected/secondary/preserved）。可观测指标。 */
+export function activeAlternativesAccounted(workspace: ClinicalWorkspace): boolean {
+  const pa = workspace.patternAssessment;
+  const secondaryRefs = new Set((pa?.secondary ?? []).map((s) => s.hypothesisRef).filter((x): x is string => typeof x === 'string'));
+  return !workspace.hypothesisState.hypotheses.some(
+    (h) => h.origin !== 'retrieval_suggested' && h.status === 'alternative' && !secondaryRefs.has(h.id),
   );
 }

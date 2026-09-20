@@ -2,7 +2,18 @@ export interface EvidenceReference {
   id: string;
   sourceId?: string;
   summary?: string;
+  /** H15.2：证据来源类别（patient / diagnostic_knowledge / treatment_knowledge）。 */
+  evidenceKind?: EvidenceKind;
 }
+
+/** H15.2：证据来源类别（结构性区分，非医学 enum）。 */
+export type EvidenceKind = 'patient' | 'diagnostic_knowledge' | 'treatment_knowledge';
+
+/** H15.2：患者证据的时间角色（不新增时间规则，只标注）。 */
+export type TemporalRole = 'current' | 'historical' | 'post_treatment' | 'baseline' | 'uncertain_time';
+
+/** H15.2：证据极性（显性阴性也作为证据保留）。 */
+export type EvidencePolarity = 'present' | 'explicitly_absent' | 'unknown';
 
 export interface EvidenceItem {
   id: string;
@@ -15,6 +26,12 @@ export interface EvidenceItem {
   relatedCandidates: string[];
   supportingSignals: string[];
   contradictingSignals: string[];
+  /** H15.2：证据来源类别。 */
+  evidenceKind?: EvidenceKind;
+  /** H15.2：患者证据的时间角色（知识证据为空）。 */
+  temporalRole?: TemporalRole;
+  /** H15.2：证据极性（知识证据为空）。 */
+  polarity?: EvidencePolarity;
   /**
    * H12：knowledge metadata（NOT patient diagnosis）。
    * 来源自身的病名/证型标签，仅用于「检索到的是什么知识」，不得自动升级为 patient hypothesis。
@@ -126,6 +143,117 @@ export interface DeliberationState {
   frontier: string[];
 }
 
+/**
+ * H13 PatternAssessment —— 开放语义的患者级辨证结构。
+ * 只表达「病机 / 主证 / 兼证 / 共病机 / 标本 / 当前主导病机」之间的结构关系，
+ * 不建立中医证型/病机 enum。statement/root/branch/relationship/treatmentTarget 全部开放文本。
+ */
+export interface PatternClaim {
+  /** 可选：指向 workspace.consider_hypotheses 认领的 formal hypothesis。 */
+  hypothesisRef?: string;
+  statement: string;
+  supportingEvidenceRefs: string[];
+  contradictingEvidenceRefs?: string[];
+  rationale?: string;
+}
+
+export interface RootBranchAssessment {
+  root?: string;
+  branch?: string;
+  relationship?: string;
+  supportingEvidenceRefs?: string[];
+}
+
+export interface PatternAssessment {
+  primary?: PatternClaim;
+  secondary?: PatternClaim[];
+  sharedMechanisms?: PatternClaim[];
+  rootBranch?: RootBranchAssessment;
+  currentDominantMechanism?: PatternClaim;
+  treatmentTarget?: string;
+  uncertainty?: string[];
+}
+
+/**
+ * H15 Clinical Decision Spine —— 引用型临床决策主干。
+ * 固定「临床判断的因果顺序」，不固定医学答案。所有字段开放文本。
+ * version 用于 Dependency Versioning（上游变化 → 下游候选 STALE）。
+ */
+export interface DiseaseAssessment {
+  statement: string;
+  diseaseRefs?: string[];
+  evidenceRefs: string[];
+  uncertainty?: string[];
+  version: number;
+}
+
+export interface TreatmentPlan {
+  primaryPrinciple: string;
+  adjunctPrinciples?: string[];
+  treatmentTarget: string;
+  priority?: string;
+  rationale?: string;
+  evidenceRefs: string[];
+  version: number;
+}
+
+export interface FormulaSelection {
+  selectedCandidateRef?: string;
+  rationale?: string;
+  supportingEvidenceRefs?: string[];
+  contradictingEvidenceRefs?: string[];
+  version: number;
+}
+
+export interface ModificationPlan {
+  items: Array<{
+    statement: string;
+    patientEvidenceRefs: string[];
+    sourceEvidenceRefs?: string[];
+  }>;
+  version: number;
+}
+
+export interface FormulaReview {
+  assessment: string;
+  coveredTargets?: string[];
+  uncoveredProblems?: string[];
+  conflicts?: string[];
+  disposition: 'SUPPORTED' | 'REVISE' | 'UNCERTAIN';
+}
+
+export interface ClinicalDecisionSpine {
+  clinicalQuestion?: { statement: string; version: number };
+  diseaseAssessment?: DiseaseAssessment;
+  patternHypothesisRefs: string[];
+  patternAssessmentRef?: string;
+  patternAssessmentVersion?: number;
+  treatmentPlan?: TreatmentPlan;
+  formulaSelection?: FormulaSelection;
+  modificationPlan?: ModificationPlan;
+  formulaReview?: FormulaReview;
+  /** H15.1：Agent 声明的完成义务（求诊目的 → 必须产出的临床过程产物）。 */
+  completionObligation?: ClinicalCompletionObligation;
+}
+
+/** H15.1：完成义务。requiredArtifacts 只引用系统已存在的临床过程产物类型。 */
+export interface ClinicalCompletionObligation {
+  requestedOutcome: string;
+  requiredArtifacts: string[];
+  satisfiedArtifacts: string[];
+  missingArtifacts: string[];
+  version: number;
+}
+
+/** H15：治疗知识检索必须携带的临床上下文（ref + version）。 */
+export interface TreatmentRetrievalContext {
+  clinicalQuestionRef: string;
+  diseaseAssessmentVersion: number;
+  patternAssessmentRef: string;
+  treatmentPlanVersion: number;
+  hypothesisRefs?: string[];
+}
+
 export interface HypothesisProjection {
   leading: HypothesisCandidate | null;
   alternatives: HypothesisCandidate[];
@@ -167,6 +295,12 @@ export interface CaseFact {
   kind: string;
   value: string;
   source?: string;
+  /** H15.2：证据来源类别（病例事实恒为 patient）。 */
+  evidenceKind?: EvidenceKind;
+  /** H15.2：时间角色。 */
+  temporalRole?: TemporalRole;
+  /** H15.2：极性（present / explicitly_absent / unknown）。 */
+  polarity?: EvidencePolarity;
 }
 
 /**
@@ -226,6 +360,10 @@ export interface ClinicalWorkspace {
   hypothesisState: HypothesisState;
   promotionState: PromotionState;
   deliberationState: DeliberationState;
+  /** H13 患者级辨证结构（最新一次 PatternAssessment；开放语义，不做中医 enum）。 */
+  patternAssessment: PatternAssessment | null;
+  /** H15 临床决策主干（引用型；固定因果顺序，不固定医学答案）。 */
+  clinicalDecisionSpine: ClinicalDecisionSpine;
 }
 
 export type WorkspaceEventType =
@@ -248,7 +386,14 @@ export type WorkspaceEventType =
   | 'hypothesis.preserved_as_uncertainty'
   | 'hypothesis.promotion.requested'
   | 'hypothesis.promotion.resolved'
-  | 'uncertainty.resolved';
+  | 'uncertainty.resolved'
+  | 'pattern.assessment.recorded'
+  | 'disease.assessment.recorded'
+  | 'treatment.plan.recorded'
+  | 'formula.selection.recorded'
+  | 'modification.plan.recorded'
+  | 'formula.review.recorded'
+  | 'completion.obligation.recorded';
 
 export interface WorkspaceEvent {
   runId: string;

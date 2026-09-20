@@ -23,10 +23,14 @@ export interface CapabilityDescriptor {
   skillIds: string[];
   /** 需要暴露的 tool id */
   toolIds: string[];
+  /** H14：该能力是否为治疗形式能力（由 manifest 数据标注）。Core 不做业务判断。 */
+  treatmentSpecific?: boolean;
 }
 
 export interface ResolvedCapability {
   id: string;
   confidence: number;
   reason: string;
+  /** H14：从 CapabilityDescriptor 透传，供治疗检索观测使用。 */
+  treatmentSpecific?: boolean;
 }
