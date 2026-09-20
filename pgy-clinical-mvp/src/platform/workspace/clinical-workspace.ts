@@ -764,16 +764,33 @@ export function validatePatternAssessmentRefs(
 }
 
 /**
- * H12：确定性的 Hypothesis Coverage 完整性检查（不是医学判断）。
- * 只检查「Agent 显式认领的 formal patient hypothesis」是否仍有 unresolved alternative。
+ * H12/H15.2.3：确定性的 Hypothesis Disposition 完整性检查（不是医学判断）。
+ * 只检查「Agent 显式认领的 formal patient hypothesis」是否仍缺少最终 disposition。
  * retrieval 自动标签（origin=retrieval_suggested）不进入此 invariant，避免制造无限比较。
  *
- * unresolved 定义：status === 'alternative'（未被 selected / rejected / preserved_as_uncertainty 明确 resolution）。
+ * 已有最终 disposition 的不再视为 unresolved：
+ * - status 已为 active（最终 primary）/ rejected / preserved_as_uncertainty；或
+ * - 已被 PatternAssessment 通过 hypothesisRef 引用为 primary / secondary。
+ *
+ * 复用已有 hypothesisRef 稳定 identity；不做证型名称/字符串匹配，不做医学近义判断。
  */
 export function findUnresolvedFormalHypotheses(workspace: ClinicalWorkspace): HypothesisCandidate[] {
+  const dispositioned = collectPatternDispositionedHypothesisRefs(workspace);
   return workspace.hypothesisState.hypotheses.filter(
-    (h) => h.origin !== 'retrieval_suggested' && h.status === 'alternative',
+    (h) => h.origin !== 'retrieval_suggested' && h.status === 'alternative' && !dispositioned.has(h.id),
   );
+}
+
+/** 收集 PatternAssessment 中已获得 primary / secondary disposition 的 hypothesisRef（纯 identity 链接，无医学判断）。 */
+function collectPatternDispositionedHypothesisRefs(workspace: ClinicalWorkspace): Set<string> {
+  const refs = new Set<string>();
+  const pa = workspace.patternAssessment;
+  const push = (r: string | undefined) => {
+    if (typeof r === 'string' && r.trim() !== '') refs.add(r);
+  };
+  push(pa?.primary?.hypothesisRef);
+  for (const s of pa?.secondary ?? []) push(s.hypothesisRef);
+  return refs;
 }
 
 /**

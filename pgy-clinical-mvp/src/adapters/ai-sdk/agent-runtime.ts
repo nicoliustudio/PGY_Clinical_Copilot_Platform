@@ -376,6 +376,22 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     let formulaCandidateRetrievalCount = 0;
     let formulaEvidenceRetrievalCount = 0;
     let falseCompletionAttemptCount = 0;
+    // H15.2.3 no-progress correction 追踪（仅观测，不设 hard gate）。
+    let lastCorrectionCode: string | undefined;
+    let workspaceVersionAtLastCorrection = -1;
+    let repeatedNoProgressCorrectionCount = 0;
+    let repeatedUnresolvedHypothesisCorrectionCount = 0;
+    let repeatedTreatmentContextCorrectionCount = 0;
+    const recordCorrection = (code: string) => {
+      const v = context.workspaceStore.version;
+      if (code === lastCorrectionCode && v === workspaceVersionAtLastCorrection) {
+        repeatedNoProgressCorrectionCount += 1;
+        if (code === 'UNRESOLVED_HYPOTHESES') repeatedUnresolvedHypothesisCorrectionCount += 1;
+        else if (code === 'TREATMENT_CONTEXT_INCOMPLETE') repeatedTreatmentContextCorrectionCount += 1;
+      }
+      lastCorrectionCode = code;
+      workspaceVersionAtLastCorrection = v;
+    };
     const metrics: RunExecutionMetrics = {
       totalToolCalls: 0, decisionChangingToolCalls: 0, reinforcingToolCalls: 0, nonDecisionChangingToolCalls: 0, unresolvedToolCalls: 0,
       redundantSearchCount: 0, deduplicatedCallCount: 0, cacheHitCount: 0, parallelGroupCount: 0, parallelToolCallCount: 0,
@@ -537,7 +553,9 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           const isNotReady = typeof submitOutput === 'object' && submitOutput !== null && (submitOutput as Record<string, unknown>).notReady === true;
           if (isNotReady) {
             // H15.1：不把「未完成的 submit 尝试」当作最终 proposal。
-            if ((submitOutput as Record<string, unknown>).code === 'CLINICAL_DECISION_INCOMPLETE') falseCompletionAttemptCount += 1;
+            const submitCode = (submitOutput as Record<string, unknown>).code;
+            recordCorrection(typeof submitCode === 'string' ? submitCode : 'UNRESOLVED_HYPOTHESES');
+            if (submitCode === 'CLINICAL_DECISION_INCOMPLETE') falseCompletionAttemptCount += 1;
           } else {
             submittedProposal = toolCall.input;
           }
@@ -647,6 +665,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           const isGateRejection = typeof rawOutput === 'object' && rawOutput !== null && (rawOutput as Record<string, unknown>).code === 'TREATMENT_CONTEXT_INCOMPLETE';
           if (isGateRejection) {
             // H15：被门禁拒绝的尝试不算「真实治疗检索」，只计 rejection。
+            recordCorrection('TREATMENT_CONTEXT_INCOMPLETE');
             formulaRetrievalRejectedForMissingContext += 1;
           } else {
             const pa = context.workspace.patternAssessment;
@@ -964,6 +983,9 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       ? undefined
       : context.workspace.candidates.some((c) => c.id === selectedRef);
     metrics.retrievalSuggestedHypothesisCount = context.workspace.hypothesisState.hypotheses.filter((h) => h.origin === 'retrieval_suggested').length;
+    metrics.repeatedNoProgressCorrectionCount = repeatedNoProgressCorrectionCount;
+    metrics.repeatedUnresolvedHypothesisCorrectionCount = repeatedUnresolvedHypothesisCorrectionCount;
+    metrics.repeatedTreatmentContextCorrectionCount = repeatedTreatmentContextCorrectionCount;
 
     setRunMetrics(context.runId, metrics);
 

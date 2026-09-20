@@ -11,7 +11,7 @@ import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contr
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkTreatmentRetrievalContext, checkClinicalCompletion, checkClinicalCoreCompletion, checkPatternAssessmentReadiness } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkClinicalCompletion, checkClinicalCoreCompletion } from '../../platform/workspace/clinical-workspace.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
@@ -37,20 +37,6 @@ function buildRetrievalContext(context: RuntimeContext) {
     leadingHypothesisRefs: hyps.filter((h) => h.status === 'active').map((h) => h.id),
     alternativeHypothesisRefs: hyps.filter((h) => h.status === 'alternative').map((h) => h.id),
   };
-}
-
-/** H15/H15.2：treatmentSpecific 检索门禁。缺失 context 或 PatternAssessment 未就绪时返回 deterministic receipt。 */
-function gateTreatmentRetrieval(context: RuntimeContext): { ok: true } | { ok: false; code: string; missing: string[] } {
-  const base = checkTreatmentRetrievalContext(context.workspace);
-  if (!base.ok) return { ok: false, code: 'TREATMENT_CONTEXT_INCOMPLETE', missing: base.missing };
-  // H15.2：治疗层消费前，PatternAssessment 必须结构就绪（primary 有 patient evidence 等）。
-  const readiness = checkPatternAssessmentReadiness(context.workspace);
-  if (!readiness.ok) return { ok: false, code: 'PATTERN_ASSESSMENT_INCOMPLETE', missing: readiness.missing };
-  return { ok: true };
-}
-
-function incompleteTreatmentContext(result: { code: string; missing: string[] }) {
-  return { notReady: true, code: result.code, missing: result.missing };
 }
 
 // H15.2 Formula Retrieval Reuse：per-run 缓存（按 runId 隔离，避免跨 run 污染）。
@@ -238,10 +224,6 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '在当前已激活的 Runtime Catalog scope 中做 focused 检索：结合病例疾病上下文与现有 indexes 收敛候选后返回少量相关卡片。只返回卡片级摘要 + asset_id + 知识相关性排序；选定需要佐证的具体证据后，再用 knowledge.get_asset 按 asset_id 精确获取完整资产。仅在相应业务能力已激活、且该证据能减少当前 open question 或支撑当前 treatment target 时才检索。',
     inputSchema: z.object({ query: z.string(), topK: z.number().optional() }),
     execute: async ({ query, topK }) => {
-      if (context.capabilities.some((c) => c.treatmentSpecific === true)) {
-        const gate = gateTreatmentRetrieval(context);
-        if (!gate.ok) return incompleteTreatmentContext(gate);
-      }
       const caseDiseaseContext = context.understanding.facts
         .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
         .map((f) => f.value);
@@ -268,10 +250,6 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '按 asset_id 精确获取一条 Runtime Catalog 完整资产详情。仅用于读取 knowledge.search_cards 返回的、且属于当前激活 scope 的卡片。',
     inputSchema: z.object({ assetId: z.string() }),
     execute: async ({ assetId }) => {
-      if (context.capabilities.some((c) => c.treatmentSpecific === true)) {
-        const gate = gateTreatmentRetrieval(context);
-        if (!gate.ok) return incompleteTreatmentContext(gate);
-      }
       const asset = getRuntimeAsset(assetId, context.knowledgeScopes);
       addRetrievalDiagnostics(context.runId, {
         tool: 'knowledge.get_asset',
@@ -331,8 +309,6 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '[legacy] 检索当前已激活 scope 中真实 P1 规范方。H15.1 起，基础方选择请优先使用两阶段 formula.search_candidates（轻量 Top 3~5 候选卡）→ formula.get_evidence（展开完整证据）；本工具仅在需要按 promotion work item 探索时才用，且不要重复大范围检索。',
     inputSchema: z.object({ query: z.string(), searchIntent: z.string().optional(), topK: z.number().optional(), promotionWorkItemRef: z.string().optional() }),
     execute: async ({ query, searchIntent, topK, promotionWorkItemRef }) => {
-      const gate = gateTreatmentRetrieval(context);
-      if (!gate.ok) return incompleteTreatmentContext(gate);
       const { results, diagnostics } = await searchNormativeWithDiagnostics(query, topK ?? 10, context.knowledgeScopes);
       const workItem = resolveWorkItemRef(context.workspace, promotionWorkItemRef);
       const resolvedHypothesisRef = workItem?.hypothesisRef;
@@ -360,8 +336,6 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '两阶段方剂检索第一阶段：根据已完成临床判断（病 + 证 + 治法 projection）召回少量（Top 3~5）基础方候选卡。只返回轻量候选卡 + 知识关联（matched disease/syndrome/treatment principle），不给患者适配评分、不给证型评分。对真正值得比较的候选再调用 formula.get_evidence 展开完整证据。',
     inputSchema: z.object({ topK: z.number().optional() }),
     execute: async ({ topK }) => {
-      const gate = gateTreatmentRetrieval(context);
-      if (!gate.ok) return incompleteTreatmentContext(gate);
       // H15.2：状态未变化时复用已有候选集，不重新检索。
       const signature = formulaSearchStateSignature(context.workspace);
       const cacheKey = `${context.runId}::${context.knowledgeScopes.join(',')}`;
@@ -393,8 +367,6 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '两阶段方剂检索第二阶段：展开一张 formula.search_candidates 候选卡的完整方剂证据（组成、适应证、来源原文、相关治法、已有 inline modification 文本）。只用于读取本轮检索过的候选，禁止凭模型记忆引用未检索候选。',
     inputSchema: z.object({ candidateRef: z.string() }),
     execute: async ({ candidateRef }) => {
-      const gate = gateTreatmentRetrieval(context);
-      if (!gate.ok) return incompleteTreatmentContext(gate);
       assertKnownCandidateRef(context, candidateRef);
       const cacheKey = `${context.runId}::${candidateRef}`;
       const cachedEvidence = formulaEvidenceCache.get(cacheKey);

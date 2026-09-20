@@ -241,6 +241,10 @@ export interface RunExecutionMetrics extends RetrievalDisciplineMetrics {
   formulaSelectionFromEvidence?: boolean;
   selectedCandidateRef?: string;
   retrievalSuggestedHypothesisCount?: number;
+  /** H15.2.3 no-progress correction telemetry（仅观测，不设 hard gate）。 */
+  repeatedNoProgressCorrectionCount?: number;
+  repeatedUnresolvedHypothesisCorrectionCount?: number;
+  repeatedTreatmentContextCorrectionCount?: number;
 }
 
 /** H14：每次治疗知识检索的观测快照（不含 hidden CoT）。 */
