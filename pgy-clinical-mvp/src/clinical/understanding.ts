@@ -132,6 +132,7 @@ export async function understand(
   return model.generateStructured({
     schema: clinicalUnderstandingSchema,
     prompt: UNDERSTAND_PROMPT + input,
+    operation: 'clinical_understanding',
   });
 }
 

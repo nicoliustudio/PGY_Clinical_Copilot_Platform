@@ -58,7 +58,7 @@ export async function planStrategy(
     `可用高层能力：\n${capabilities || '（无额外能力）'}`,
   ].join('\n\n');
 
-  return model.generateStructured({ schema: clinicalStrategySchema, prompt });
+  return model.generateStructured({ schema: clinicalStrategySchema, prompt, operation: 'clinical_planner' });
 }
 
 export class StructuredClinicalPlanner implements ClinicalPlannerPort {

@@ -16,7 +16,7 @@ import { RetrievalDisciplineTracker, isRetrievalTool } from './retrieval-discipl
 import { computeExecutionNecessity } from './execution-necessity.js';
 import { ProjectionCache } from './projection-cache.js';
 import { canonicalizeProposalSubmit } from './proposal-canonicalizer.js';
-import { buildProposalDraft, countProposalDraftFields } from '../../platform/workspace/proposal-draft.js';
+import { buildDeterministicClinicalSubmit, buildProposalDraft, countProposalDraftFields } from '../../platform/workspace/proposal-draft.js';
 import {
   buildMinimalFinalizationPrompt,
   buildRetryPrompt,
@@ -27,7 +27,8 @@ import { buildEvidenceProjection } from '../../platform/workspace/evidence-proje
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
-import { checkClinicalCompletion, computeClinicalClosure, computeRequiredArtifacts, checkCompletionAgainst } from '../../platform/workspace/clinical-workspace.js';
+import { computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
+import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
@@ -141,10 +142,57 @@ function activeToolIds(context: RuntimeContext, bindings: AiSdkToolBindings, mod
   return [...allowed].filter((id) => Boolean(bindings[id])).map((id) => toApiToolName(id));
 }
 
-function hasRequiredTreatmentSpecificEvidence(context: RuntimeContext): boolean {
-  const gaofangActive = context.workspace.activeCapabilities.includes('gaofang');
-  if (!gaofangActive) return true;
-  return context.workspace.evidenceState.evidenceItems.some((e) => e.sourceType === 'GAOFANG');
+function treatmentFormEvidenceToolIds(context: RuntimeContext): Set<string> {
+  const ids = new Set<string>();
+  for (const capability of context.capabilities) {
+    if (capability.requiresTreatmentFormDecision !== true) continue;
+    for (const id of capability.treatmentFormEvidenceToolIds ?? []) ids.add(id);
+  }
+  return ids;
+}
+
+function hasExpandedFormulaEvidence(context: RuntimeContext, candidateRef: string): boolean {
+  return context.workspace.evidenceState.evidenceItems.some((e) => e.relatedCandidates.includes(candidateRef));
+}
+
+/**
+ * Formula decision surface：由 durable state 决定可用动作，不使用“最多搜 N 次”之类阈值。
+ *
+ * - 没有候选：允许 search_candidates 一次去形成候选面；
+ * - 已有候选但尚未 focus：先收窄 frontier，不继续 broad formula retrieval；
+ * - 已 focus：只允许为 frontier 中尚无完整 formula evidence 的候选读取证据；
+ * - frontier 证据已齐：隐藏 retrieval，只保留 deliberation / selection / review / submit。
+ */
+function addFormulaDecisionTools(context: RuntimeContext, allowed: Set<string>): void {
+  const selected = context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
+  const candidates = context.workspace.candidates.filter((c) => c.kind === 'formula');
+  const frontier = context.workspace.deliberationState.frontier.filter((ref) => candidates.some((c) => c.id === ref));
+
+  [
+    'workspace.consider_hypotheses',
+    'workspace.focus_candidates',
+    'workspace.record_candidate_assessment',
+    'workspace.record_candidate_exclusion',
+    'workspace.record_deliberation',
+    'formula.validate',
+    'proposal.submit',
+  ].forEach((t) => allowed.add(t));
+
+  if (selected) {
+    if (!hasExpandedFormulaEvidence(context, selected)) allowed.add('formula.get_evidence');
+    allowed.add('formula.get_modification_evidence');
+    return;
+  }
+
+  if (candidates.length === 0) {
+    allowed.add('formula.search_candidates');
+    return;
+  }
+
+  if (frontier.length === 0) return;
+  if (frontier.some((ref) => !hasExpandedFormulaEvidence(context, ref))) {
+    allowed.add('formula.get_evidence');
+  }
 }
 
 /**
@@ -158,7 +206,7 @@ function closureAwareActiveToolIds(
 ): string[] {
   const all = activeToolIds(context, bindings, mode);
   const closure = computeClinicalClosure(context.workspace);
-  if (!closure.required || !hasRequiredTreatmentSpecificEvidence(context)) {
+  if (!closure.required) {
     // H15.5.3：closure 未正式触发（常因缺 treatmentPlan），但检索面已就绪、core 未写全时，
     // 限制 broad search，逼模型 commit 而不是无限检索。
     const contract = completionContractFor(context);
@@ -172,24 +220,22 @@ function closureAwareActiveToolIds(
     return all;
   }
 
-  const completion = checkClinicalCompletion(context.workspace);
-  if (completion.ok) {
+  const contract = completionContractFor(context);
+  if (contract.ok) {
     const submitOnly = new Set(['proposal.submit']);
     return all.filter((x) => submitOnly.has(fromApiToolName(x)));
   }
 
-  const selectionReady = Boolean(context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef);
-  const allowed = new Set([
-    'workspace.consider_hypotheses',
-    'workspace.focus_candidates',
-    'workspace.record_candidate_assessment',
-    'workspace.record_candidate_exclusion',
-    'workspace.record_deliberation',
-    'formula.get_evidence',
-    'formula.validate',
-    'proposal.submit',
-  ]);
-  if (selectionReady) allowed.add('formula.get_modification_evidence');
+  const allowed = new Set<string>();
+  if (contract.missingArtifacts.includes('formulaSelection') || contract.missingArtifacts.includes('formulaReview')) {
+    addFormulaDecisionTools(context, allowed);
+  } else {
+    ['workspace.consider_hypotheses', 'workspace.record_deliberation', 'proposal.submit'].forEach((t) => allowed.add(t));
+  }
+  if (contract.missingArtifacts.includes('treatmentFormDecision')) {
+    allowed.add('workspace.record_deliberation');
+    for (const id of treatmentFormEvidenceToolIds(context)) allowed.add(id);
+  }
   return all.filter((x) => allowed.has(fromApiToolName(x)));
 }
 
@@ -198,14 +244,15 @@ type RecoveryState = { kind: 'submit' } | { kind: 'completion'; missing: string[
 
 /** H15.5.3：Completion Contract —— planner 预判 + 能力输出义务 + Agent 显式义务的并集。 */
 export function completionContractFor(context: RuntimeContext): { requiredArtifacts: string[]; missingArtifacts: string[]; ok: boolean } {
-  const requiresFormDecision = context.capabilities.some((c) => c.requiresTreatmentFormDecision === true);
-  const required = computeRequiredArtifacts(
-    context.strategy.provisionalRequiredArtifacts,
-    requiresFormDecision,
-    context.workspace.clinicalDecisionSpine.completionObligation?.requiredArtifacts,
-  );
-  const completion = checkCompletionAgainst(context.workspace, required);
-  return { requiredArtifacts: required, missingArtifacts: completion.missingArtifacts, ok: completion.ok };
+  const readiness = evaluateProposalReadiness(context);
+  const missing = [...readiness.missingArtifacts];
+  // unresolved hypothesis 不是“缺少 formalHypotheses”，但 recovery 需要一个现有 artifact key
+  // 来选择 hypothesis-resolution 工具面；对外 readiness 仍保留独立 blocker 语义。
+  if (readiness.unresolvedHypotheses.length > 0 && !missing.includes('formalHypotheses')) missing.push('formalHypotheses');
+  for (const core of readiness.coreMissing) {
+    if (core !== 'clinicalQuestion' && !missing.includes(core)) missing.push(core);
+  }
+  return { requiredArtifacts: readiness.requiredArtifacts, missingArtifacts: missing, ok: readiness.ready };
 }
 
 /**
@@ -230,13 +277,14 @@ export function recoveryActiveToolIds(
     ['workspace.consider_hypotheses', 'workspace.record_deliberation', 'knowledge.get_source', 'knowledge.get_asset'].forEach((t) => allowed.add(t));
   }
   if (missing.includes('formulaSelection')) {
-    ['workspace.consider_hypotheses', 'workspace.focus_candidates', 'workspace.record_candidate_assessment', 'workspace.record_candidate_exclusion', 'workspace.record_deliberation', 'formula.search_candidates', 'formula.get_evidence', 'formula.validate', 'formula.get_modification_evidence'].forEach((t) => allowed.add(t));
+    addFormulaDecisionTools(context, allowed);
   }
   if (missing.includes('formulaReview')) {
-    ['workspace.record_deliberation', 'formula.validate', 'formula.get_evidence'].forEach((t) => allowed.add(t));
+    addFormulaDecisionTools(context, allowed);
   }
   if (missing.includes('treatmentFormDecision')) {
-    ['workspace.record_deliberation', 'knowledge.search_cards', 'knowledge.get_asset'].forEach((t) => allowed.add(t));
+    allowed.add('workspace.record_deliberation');
+    for (const id of treatmentFormEvidenceToolIds(context)) allowed.add(id);
   }
   allowed.add('proposal.submit');
   return all.filter((x) => allowed.has(fromApiToolName(x)));
@@ -301,7 +349,10 @@ const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence
 
 export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback, decisionState?: DecisionState): string {
   const skills = renderActiveSkills(context.skills);
-  const view = buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, decisionState);
+  const view = buildClinicalWorkingView(
+    context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, decisionState,
+    completionContractFor(context).requiredArtifacts,
+  );
   const workingView = renderClinicalWorkingView(view);
   const patternPrinciple = config.experiment.diagnosticPatternSet ? `\n\n${DIAGNOSTIC_PATTERN_PRINCIPLE}` : '';
   return `${base}\n\n${ACTION_PRINCIPLE}${patternPrinciple}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
@@ -309,7 +360,10 @@ export function dynamicInstructions(base: string, context: RuntimeContext, ledge
 
 /** 度量「目标驱动工作上下文」相对「全量投影」的收缩程度（估算）。 */
 function computeContextMetrics(context: RuntimeContext, ledger: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback): ContextMetrics {
-  const workingView = renderClinicalWorkingView(buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback));
+  const workingView = renderClinicalWorkingView(buildClinicalWorkingView(
+    context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, undefined,
+    completionContractFor(context).requiredArtifacts,
+  ));
   const raw = [
     JSON.stringify(buildHypothesisProjection(context.workspace), null, 2),
     JSON.stringify(buildEvidenceProjection(context.workspace), null, 2),
@@ -327,7 +381,10 @@ function computePromptComponents(context: RuntimeContext, ledger: ToolCallLedger
   const basePromptTokens = estimateTokens(`${context.input}\n${ACTION_PRINCIPLE}\nActive scopes: ${context.knowledgeScopes.join(', ')}`);
   const strategyTokens = estimateTokens(JSON.stringify(context.strategy));
   const decisionStateTokens = estimateTokens(JSON.stringify(buildDecisionState(context.workspace, context.strategy)));
-  const workingViewTokens = estimateTokens(renderClinicalWorkingView(buildClinicalWorkingView(context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback)));
+  const workingViewTokens = estimateTokens(renderClinicalWorkingView(buildClinicalWorkingView(
+    context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, undefined,
+    completionContractFor(context).requiredArtifacts,
+  )));
   const skillTokens = estimateTokens(renderActiveSkills(context.skills));
   const toolSchemaTokens = estimateTokens(context.tools.map((t) => `${t.id}:${t.description}`).join('\n'));
   const recentMessageTokens = estimateTokens(buildSearchHistory(ledger));
@@ -417,14 +474,17 @@ function emptyRoleCounts(): Record<ExecutionRole, number> {
 }
 
 function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'): string {
-  const skills = context.skills.map((skill) => `### Skill: ${skill.id}\n${skill.instruction}`).join('\n\n');
+  // Skill 正文已经通过 dynamicInstructions 进入 system instructions。
+  // 这里仅保留激活 id，避免同一 Skill 在 system + user prompt 中重复一整份，
+  // 降低 token 与“重复强调导致行为过拟合/漂移”的风险。
+  const skillIds = context.skills.map((skill) => skill.id).join(', ');
   return [
     `本次 Run 初始交互模式：${context.understanding.interaction.mode}`,
     '',
     `初始安全处置：${context.workspace.safetyDisposition}`,
     '临床总策划（ClinicalStrategy）与当前工作上下文见 system 指令中的 Clinical Working View。',
     '',
-    mode === 'harness' ? 'Harness active skills:' : 'Classic pre-routed skills:', skills || '（无）',
+    mode === 'harness' ? 'Harness active skill ids:' : 'Classic pre-routed skill ids:', skillIds || '（无）',
     '',
     mode === 'harness'
       ? '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
@@ -616,6 +676,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       agentProposalSubmitSuccessCount: 0,
       runtimeForcedFinalizationCount: 0,
       runtimeForcedFinalizationSuccessCount: 0,
+      runtimeReadyStateCommitCount: 0,
+      runtimeReadyStateCommitSuccessCount: 0,
       finalProposalCommittedCount: 0,
       proposalParseFailureCount: 0,
       proposalSchemaFailureCount: 0,
@@ -1045,23 +1107,30 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       forcedFinalization = false;
       terminationReason = 'agent_submitted';
     } else if (finalContract?.ok) {
-      // durable state 已完成但未 submit → 仅 deterministic serialization，不重新推理。
+      // durable state 已完整：临床判断已经结束。最后一步是 closed-world serialization，
+      // 不再让 LLM 重写 JSON / 重新“按 submit 按钮”，避免把机械动作变成随机源。
       emit('finalizing');
-      commitReliability.runtimeForcedFinalizationCount = 1;
-      const finalize = await this.minimalFinalization(context, commitReliability);
-      proposal = finalize.proposal;
-      if (finalize.usage) {
-        usage = {
-          inputTokens: (usage?.inputTokens ?? 0) + (finalize.usage.inputTokens ?? 0),
-          outputTokens: (usage?.outputTokens ?? 0) + (finalize.usage.outputTokens ?? 0),
+      commitReliability.runtimeReadyStateCommitCount = 1;
+      const deterministicSubmit = buildDeterministicClinicalSubmit(context.workspace, context.knowledgeScopes);
+      if (!deterministicSubmit) {
+        terminationReason = 'execution_incomplete';
+        forcedFinalization = false;
+        proposalSubmitted = false;
+        commitReliability.finalProposalCommittedCount = 1;
+        proposal = {
+          mode: 'conversation',
+          message: 'EXECUTION_INCOMPLETE: readiness=true but deterministic proposal projection is unavailable',
         };
+      } else {
+        proposal = await canonicalizeProposalSubmit(deterministicSubmit, context);
+        commitReliability.runtimeReadyStateCommitSuccessCount = 1;
+        commitReliability.finalProposalCommittedCount = 1;
+        commitReliability.timeFromFinalDecisionToCommitMs = Date.now() - finalDecisionAtMs;
+        commitReliability.proposalSerializationLatencyMs = Date.now() - finalDecisionAtMs;
+        forcedFinalization = false;
+        proposalSubmitted = false;
+        terminationReason = 'runtime_committed_ready_state';
       }
-      commitReliability.runtimeForcedFinalizationSuccessCount = 1;
-      commitReliability.finalProposalCommittedCount = 1;
-      commitReliability.timeFromFinalDecisionToCommitMs = Date.now() - finalDecisionAtMs;
-      forcedFinalization = true;
-      proposalSubmitted = false;
-      terminationReason = finalStepHadToolCalls ? 'resource_limit_fallback' : 'agent_stopped_without_submit';
     } else {
       // H15.5.3：budget 耗尽且 contract 不完整 → EXECUTION_INCOMPLETE，不伪装成 clarification。
       terminationReason = 'execution_incomplete';
@@ -1151,7 +1220,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     metrics.clinicalCompletionObligationCreated = obligation !== undefined;
     metrics.completionRequestedOutcome = obligation?.requestedOutcome;
     metrics.completionRequiredArtifacts = obligation?.requiredArtifacts ?? [];
-    metrics.completionMissingArtifactsAtEnd = checkClinicalCompletion(context.workspace).missingArtifacts;
+    metrics.completionMissingArtifactsAtEnd = completionContractFor(context).missingArtifacts;
     metrics.falseCompletionAttemptCount = falseCompletionAttemptCount;
     metrics.formulaCandidateRetrievalCount = formulaCandidateRetrievalCount;
     metrics.formulaEvidenceRetrievalCount = formulaEvidenceRetrievalCount;

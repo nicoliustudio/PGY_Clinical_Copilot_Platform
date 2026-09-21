@@ -21,5 +21,6 @@
   "skillIds": ["gaofang-reasoning"],
   "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"],
   "treatmentSpecific": true,
-  "requiresTreatmentFormDecision": true
+  "requiresTreatmentFormDecision": true,
+  "treatmentFormEvidenceToolIds": ["knowledge.search_cards", "knowledge.get_asset"]
 }

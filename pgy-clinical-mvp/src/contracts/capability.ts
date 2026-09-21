@@ -27,6 +27,11 @@ export interface CapabilityDescriptor {
   treatmentSpecific?: boolean;
   /** H15.5.3：该能力是否要求产出治疗形式决策（如膏方）。由 manifest 数据标注，Core 不识别业务词。 */
   requiresTreatmentFormDecision?: boolean;
+  /**
+   * 治疗形式决策尚未形成时，为该能力保留的「证据获取工具」。
+   * 这是 capability contract，不是 Core 对业务词/前缀的判断；未来新增治疗形式能力只改 manifest。
+   */
+  treatmentFormEvidenceToolIds?: string[];
 }
 
 export interface ResolvedCapability {
@@ -37,4 +42,6 @@ export interface ResolvedCapability {
   treatmentSpecific?: boolean;
   /** H15.5.3：从 CapabilityDescriptor 透传，供 completion contract 合并使用。 */
   requiresTreatmentFormDecision?: boolean;
+  /** 从 CapabilityDescriptor 透传，供 closure/recovery 的 generic action surface 使用。 */
+  treatmentFormEvidenceToolIds?: string[];
 }

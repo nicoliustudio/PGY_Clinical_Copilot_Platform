@@ -7,6 +7,7 @@ import { buildProposalDraft } from '../src/platform/workspace/proposal-draft.js'
 import { buildMinimalFinalizationPrompt } from '../src/adapters/ai-sdk/minimal-finalization.js';
 import { buildDecisionState } from '../src/platform/workspace/decision-state-projection.js';
 import { completionContractFor, recoveryActiveToolIds, recoveryRemainingSteps } from '../src/adapters/ai-sdk/agent-runtime.js';
+import { evaluateProposalReadiness } from '../src/platform/workspace/proposal-readiness.js';
 import { DEFAULT_AI_SDK_TOOL_BINDINGS } from '../src/adapters/ai-sdk/tool-bindings.js';
 import { emptyClinicalStrategy } from '../src/contracts/clinical-strategy.js';
 import type { RuntimeContext } from '../src/contracts/runtime.js';
@@ -58,7 +59,10 @@ test('T1 natural stop + contract incomplete → COMPLETION_RECOVERY（非 finali
   const ws = coreWorkspace();
   // 缺 treatmentPlan / formulaSelection / treatmentFormDecision。
   const ctx = recoveryContext(ws, {
-    capabilities: [{ id: 'gaofang', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true }],
+    capabilities: [{
+      id: 'gaofang', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true,
+      treatmentFormEvidenceToolIds: ['knowledge.search_cards', 'knowledge.get_asset'],
+    }],
     provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection'],
   });
   const contract = completionContractFor(ctx);
@@ -77,7 +81,10 @@ test('T2 complete state → SUBMIT_RECOVERY：activeTools=[proposal.submit]', ()
   ws.clinicalDecisionSpine.formulaSelection = { selectedCandidateRef: 'P1:a::F:b', version: 1 };
   ws.clinicalDecisionSpine.formulaReview = { assessment: '可', disposition: 'SUPPORTED' };
   const ctx = recoveryContext(ws, {
-    capabilities: [{ id: 'gaofang', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true }],
+    capabilities: [{
+      id: 'gaofang', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true,
+      treatmentFormEvidenceToolIds: ['knowledge.search_cards', 'knowledge.get_asset'],
+    }],
     provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection', 'formulaReview'],
   });
   const contract = completionContractFor(ctx);
@@ -127,7 +134,7 @@ test('T6 缺 treatmentFormDecision → capability evidence tools remain', () => 
   ws.clinicalDecisionSpine.treatmentPlan = { primaryPrinciple: '活血化瘀', treatmentTarget: '消癥', evidenceRefs: [], version: 1 };
   ws.clinicalDecisionSpine.formulaSelection = { selectedCandidateRef: 'P1:a::F:b', version: 1 };
   const ctx = recoveryContext(ws, {
-    capabilities: [{ id: 'gaofang', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true }],
+    capabilities: [{ id: 'gaofang', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true, treatmentFormEvidenceToolIds: ['knowledge.search_cards', 'knowledge.get_asset'] }],
     provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection'],
   });
   const contract = completionContractFor(ctx);
@@ -148,6 +155,56 @@ test('T7 test-modality（非 gaofang）声明 requiresTreatmentFormDecision → 
   const ctxTest = recoveryContext(createClinicalWorkspace(), { capabilities: [{ id: 'test-modality', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true }] });
   assert.equal(completionContractFor(ctxGaofang).requiredArtifacts.includes('treatmentFormDecision'), true);
   assert.equal(completionContractFor(ctxTest).requiredArtifacts.includes('treatmentFormDecision'), true);
+});
+
+test('T7b treatment form evidence tools 来自 capability contract，不依赖业务 id', () => {
+  const ws = coreWorkspace();
+  ws.clinicalDecisionSpine.treatmentPlan = { primaryPrinciple: 'x', treatmentTarget: 'y', evidenceRefs: [], version: 1 };
+  const ctx = recoveryContext(ws, {
+    capabilities: [{
+      id: 'test-modality', confidence: 1, reason: 'x', requiresTreatmentFormDecision: true,
+      treatmentFormEvidenceToolIds: ['knowledge.search_cards', 'knowledge.get_asset'],
+    }],
+    provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan'],
+  });
+  const contract = completionContractFor(ctx);
+  const tools = recoveryActiveToolIds(ctx, DEFAULT_AI_SDK_TOOL_BINDINGS, 'harness', contract.missingArtifacts);
+  assert.ok(tools.includes('knowledge-search_cards'));
+  assert.ok(tools.includes('knowledge-get_asset'));
+});
+
+test('T5b formula candidates 已存在 → recovery 不再重复 search_candidates', () => {
+  const ws = coreWorkspace();
+  const store = new ClinicalWorkspaceStore(ws, 'run_h15_5_3_t5b');
+  store.append('treatment.plan.recorded', { primaryPrinciple: '滋阴润燥', treatmentTarget: '肠燥便结' });
+  store.append('candidate.presented', { id: 'P2:E_1::formula', formulaId: 'P2_CASE_FORMULA::P2:C_1::E_1::1', sourceId: 'P2:E_1', name: '病例方' });
+  const ctx = recoveryContext(ws, { provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection'] });
+  const contract = completionContractFor(ctx);
+  const tools = recoveryActiveToolIds(ctx, DEFAULT_AI_SDK_TOOL_BINDINGS, 'harness', contract.missingArtifacts);
+  assert.ok(tools.includes('workspace-focus_candidates'));
+  assert.ok(!tools.includes('formula-search_candidates'), '已有候选面时不得继续重复候选检索');
+  assert.ok(!tools.includes('formula-get_evidence'), '尚未 focus 时先收窄 frontier，避免随机展开多个候选');
+});
+
+test('T5c frontier 已聚焦且未展开证据 → 只开放 focused evidence；展开后自动关闭 retrieval', () => {
+  const ws = coreWorkspace();
+  const store = new ClinicalWorkspaceStore(ws, 'run_h15_5_3_t5c');
+  store.append('treatment.plan.recorded', { primaryPrinciple: '滋阴润燥', treatmentTarget: '肠燥便结' });
+  store.append('candidate.presented', { id: 'P2:E_1::formula', formulaId: 'P2_CASE_FORMULA::P2:C_1::E_1::1', sourceId: 'P2:E_1', name: '病例方' });
+  store.append('candidate.focused', { id: 'P2:E_1::formula' });
+  const ctx = recoveryContext(ws, { provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection'] });
+  const contract = completionContractFor(ctx);
+  let tools = recoveryActiveToolIds(ctx, DEFAULT_AI_SDK_TOOL_BINDINGS, 'harness', contract.missingArtifacts);
+  assert.ok(tools.includes('formula-get_evidence'));
+  assert.ok(!tools.includes('formula-search_candidates'));
+
+  store.append('evidence.added', {
+    id: 'P2:E_1', sourceRef: 'P2:E_1', sourceType: 'P2', evidenceKind: 'treatment_knowledge',
+    relatedCandidates: ['P2:E_1::formula'], supportingSignals: [], contradictingSignals: [],
+  });
+  tools = recoveryActiveToolIds(ctx, DEFAULT_AI_SDK_TOOL_BINDINGS, 'harness', contract.missingArtifacts);
+  assert.ok(!tools.includes('formula-get_evidence'), 'frontier 证据已齐时 retrieval 必须收口到 deliberation/selection');
+  assert.ok(tools.includes('workspace-record_deliberation'));
 });
 
 // ---------- T8 Explicit Clarification Still Works ----------
@@ -185,4 +242,35 @@ test('T10 Apparent Chart Typo 只存在于 Skill（general principle），无 ty
   const wsPath = fileURLToPath(new URL('../src/platform/workspace/clinical-workspace.ts', import.meta.url));
   assert.ok(!readFileSync(runtimePath, 'utf8').includes('固冲摄住'), 'runtime 不得 hard-code 错字');
   assert.ok(!readFileSync(wsPath, 'utf8').includes('固冲摄住'), 'workspace 不得 hard-code 错字');
+});
+
+// ---------- D8 Readiness Parity ----------
+
+test('D8 readiness parity: ready=true 时 blockers 为空（submit 复用同一真源，不会被另一 gate 拒绝）', () => {
+  const ws = coreWorkspace();
+  const store = new ClinicalWorkspaceStore(ws, 'run_d8');
+  store.append('treatment.plan.recorded', { primaryPrinciple: '活血化瘀', treatmentTarget: '消癥', evidenceRefs: ['CF_001'] });
+  store.append('candidate.presented', { id: 'P1:a::F:b', formulaId: 'F:b', sourceId: 'P1:a', name: '方' });
+  store.append('formula.selection.recorded', { selectedCandidateRef: 'P1:a::F:b' });
+  store.append('formula.review.recorded', { assessment: '方证相合', disposition: 'SUPPORTED' });
+  const ctx = recoveryContext(ws, { provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan', 'formulaSelection', 'formulaReview'] });
+  const readiness = evaluateProposalReadiness(ctx);
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.blockers.length, 0);
+});
+
+// ---------- D12 Acupuncture No Formula Obligation ----------
+
+test('D12 针灸任务（无 treatment-form 需求）不获得 formula obligation', () => {
+  const ws = coreWorkspace();
+  const store = new ClinicalWorkspaceStore(ws, 'run_d12');
+  store.append('treatment.plan.recorded', { primaryPrinciple: '疏肝理气，调经止痛', treatmentTarget: '气滞痛经', evidenceRefs: ['CF_001'] });
+  const ctx = recoveryContext(ws, {
+    capabilities: [{ id: 'tcm.external-therapy', confidence: 1, reason: 'x' }],
+    provisional: ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan'],
+  });
+  const contract = completionContractFor(ctx);
+  assert.ok(!contract.requiredArtifacts.includes('formulaSelection'), '针灸任务不得获得 formulaSelection obligation');
+  assert.ok(!contract.requiredArtifacts.includes('formulaReview'), '针灸任务不得获得 formulaReview obligation');
+  assert.ok(!contract.requiredArtifacts.includes('treatmentFormDecision'), 'external-therapy 未声明 treatment-form 需求时不得强制');
 });

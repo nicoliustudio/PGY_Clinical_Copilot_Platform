@@ -124,3 +124,16 @@ test('Authority / Safety 行为在 Planner 注入后无变化', async () => {
   const { authority } = await runtime.run('demo input');
   assert.equal(authority.status, 'ALLOWED');
 });
+
+test('WorkingView 保留 case fact 的 current/history 与显性阴性语义', () => {
+  const workspace = createClinicalWorkspace();
+  workspace.caseFacts.push(
+    { id: 'CF_now', kind: 'symptom', value: '当前无明显腹痛', evidenceKind: 'patient', temporalRole: 'current', polarity: 'explicitly_absent' },
+    { id: 'CF_hist', kind: 'symptom', value: '既往经行腹痛剧烈伴血块', evidenceKind: 'patient', temporalRole: 'historical', polarity: 'present' },
+  );
+  const view = buildClinicalWorkingView(workspace, emptyClinicalStrategy());
+  assert.equal(view.caseFrame[0].temporalRole, 'current');
+  assert.equal(view.caseFrame[0].polarity, 'explicitly_absent');
+  assert.equal(view.caseFrame[1].temporalRole, 'historical');
+  assert.equal(view.caseFrame[1].polarity, 'present');
+});

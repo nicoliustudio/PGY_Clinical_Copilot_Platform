@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildProposalDraft, countProposalDraftFields } from '../src/platform/workspace/proposal-draft.js';
+import { buildDeterministicClinicalSubmit, buildProposalDraft, countProposalDraftFields } from '../src/platform/workspace/proposal-draft.js';
 import { canonicalizeProposalSubmit } from '../src/adapters/ai-sdk/proposal-canonicalizer.js';
 import {
   buildMinimalFinalizationPrompt,
@@ -81,6 +81,31 @@ test('ProposalDraft 不在多候选间自行选择（frontier>1 → selectedCand
 test('countProposalDraftFields 正确统计非空字段', () => {
   assert.equal(countProposalDraftFields({ syndrome: 'x', selectedCandidateRef: 'c', uncertainty: ['u'] }), 3);
   assert.equal(countProposalDraftFields({}), 0);
+});
+
+
+
+test('ready durable state 可确定性投影为 proposal.submit input，不需要 LLM finalizer', () => {
+  const ws = createClinicalWorkspace();
+  const store = new ClinicalWorkspaceStore(ws, 'run-ready-projection');
+  ws.caseFacts.push({ id: 'CF_1', kind: 'symptom', value: '腹痛', evidenceKind: 'patient', temporalRole: 'current', polarity: 'present' });
+  ws.clinicalDecisionSpine.clinicalQuestion = { statement: '辨证施治', version: 0 };
+  store.append('hypothesis.presented', { id: 'H_1', label: '气滞血瘀', origin: 'agent_reasoning', supportingEvidenceRefs: ['CF_1'] });
+  store.append('hypothesis.selected', { id: 'H_1' });
+  store.append('disease.assessment.recorded', { statement: '痛经', evidenceRefs: ['CF_1'] });
+  store.append('pattern.assessment.recorded', { primary: { hypothesisRef: 'H_1', statement: '气滞血瘀', supportingEvidenceRefs: ['CF_1'] } });
+  store.append('treatment.plan.recorded', { primaryPrinciple: '理气活血止痛', treatmentTarget: '冲任气血郁滞', evidenceRefs: ['CF_1'] });
+  store.append('candidate.presented', { id: 'P1:A::F:A', formulaId: 'F:A', sourceId: 'P1:A', name: '方A' });
+  store.append('formula.selection.recorded', { selectedCandidateRef: 'P1:A::F:A', rationale: '方证相合', supportingEvidenceRefs: ['CF_1'] });
+  store.append('formula.review.recorded', { assessment: '方证一致', disposition: 'SUPPORTED' });
+
+  const submit = buildDeterministicClinicalSubmit(ws);
+  assert.ok(submit && submit.mode === 'clinical');
+  if (!submit || submit.mode !== 'clinical') return;
+  assert.equal(submit.disease.name, '痛经');
+  assert.equal(submit.syndrome.name, '气滞血瘀');
+  assert.equal(submit.candidate_ref, 'P1:A::F:A');
+  assert.ok(submit.treatment.text.includes('理气活血止痛'));
 });
 
 // ---------- 3/4/5/6. canonicalizeProposalSubmit ----------

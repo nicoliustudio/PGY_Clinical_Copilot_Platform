@@ -261,7 +261,7 @@ test('T10 buildProposalDraft 从 GF 资产确定性补齐组成/制法/用法', 
   });
   const draft = buildProposalDraft(ws, ['gaofang']);
   assert.ok(draft.treatment, 'treatment 应非空');
-  assert.ok(draft.treatment.includes('膏方医案参考组成（CASE-DERIVED ADVISORY）'), '应渲染组成区块');
+  assert.ok(draft.treatment.includes('治疗形式参考组成（CASE-DERIVED ADVISORY）'), '应渲染组成区块');
   assert.ok(draft.treatment.includes('生晒参'), '应包含 GF-018 实际组成药味');
   assert.ok(draft.treatment.includes('凉水浸1宿'), '应包含 GF-018 实际制法');
 });

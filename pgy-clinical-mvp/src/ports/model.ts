@@ -8,6 +8,8 @@ export interface StructuredRequest<T> {
   schema: z.ZodType<T>;
   system?: string;
   prompt: string;
+  /** 仅用于错误定位/trace，不改变生成语义。 */
+  operation?: string;
 }
 
 export interface ModelPort {

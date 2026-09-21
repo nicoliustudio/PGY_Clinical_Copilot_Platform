@@ -1,8 +1,8 @@
 import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
-import type { ClinicalWorkspace, DecisionState, PatternAssessment } from '../../contracts/workspace.js';
+import type { ClinicalWorkspace, DecisionState, EvidencePolarity, PatternAssessment, TemporalRole } from '../../contracts/workspace.js';
 import type { FormulaRetrievalInfo, RecentRetrievalFeedback } from '../../contracts/execution.js';
 import { buildDecisionState } from '../workspace/decision-state-projection.js';
-import { checkClinicalCompletion, checkClinicalCoreCompletion, computeClinicalClosure, type ClinicalClosureState } from '../workspace/clinical-workspace.js';
+import { checkClinicalCompletion, checkClinicalCoreCompletion, checkCompletionAgainst, computeClinicalClosure, type ClinicalClosureState } from '../workspace/clinical-workspace.js';
 
 /**
  * ClinicalWorkingView —— Agent 每一步默认看到的「目标驱动工作上下文」。
@@ -37,6 +37,8 @@ export interface WorkingCaseFact {
   id: string;
   kind: string;
   value: string;
+  temporalRole?: TemporalRole;
+  polarity?: EvidencePolarity;
 }
 
 export interface RecentAction {
@@ -88,9 +90,11 @@ export interface FormulaDecisionState {
 }
 
 /** H15.2.8：Kernel 确定性推导完成状态，复用既有 completion 检查（不新增临床规则）。 */
-function buildClinicalCompletionState(workspace: ClinicalWorkspace): ClinicalCompletionState {
+function buildClinicalCompletionState(workspace: ClinicalWorkspace, requiredArtifacts?: string[]): ClinicalCompletionState {
   const core = checkClinicalCoreCompletion(workspace);
-  const obligation = checkClinicalCompletion(workspace);
+  const obligation = requiredArtifacts
+    ? checkCompletionAgainst(workspace, requiredArtifacts)
+    : checkClinicalCompletion(workspace);
   const selectedRef = workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
   return {
     coreComplete: core.ok,
@@ -120,6 +124,7 @@ export function buildClinicalWorkingView(
   recentActions: RecentAction[] = [],
   retrievalFeedback?: RecentRetrievalFeedback,
   precomputedDecisionState?: DecisionState,
+  completionRequiredArtifacts?: string[],
 ): ClinicalWorkingView {
   const decisionState = precomputedDecisionState ?? buildDecisionState(workspace, strategy);
 
@@ -127,6 +132,8 @@ export function buildClinicalWorkingView(
     id: f.id,
     kind: f.kind,
     value: f.value,
+    temporalRole: f.temporalRole,
+    polarity: f.polarity,
   }));
 
   const leadingHypotheses = (workspace.hypothesisState?.hypotheses ?? [])
@@ -171,7 +178,7 @@ export function buildClinicalWorkingView(
     activeCapabilities: workspace.activeCapabilities ?? [],
     recentUsefulActions: recentActions.map((a) => `${a.toolName}: ${a.summary}`),
     retrievalFeedback,
-    clinicalCompletionState: buildClinicalCompletionState(workspace),
+    clinicalCompletionState: buildClinicalCompletionState(workspace, completionRequiredArtifacts),
     formulaDecisionState: buildFormulaDecisionState(workspace, retrievalFeedback),
     clinicalClosureState: computeClinicalClosure(workspace),
   };
@@ -201,7 +208,10 @@ function renderRetrievedInterpretations(items: RetrievedInterpretation[]): strin
 
 function renderCaseFrame(facts: WorkingCaseFact[]): string {
   if (!facts.length) return '（无）';
-  return facts.map((f) => `- [${f.id}] ${f.kind}：${f.value}`).join('\n');
+  return facts.map((f) => {
+    const tags = [f.temporalRole, f.polarity].filter(Boolean).join('/');
+    return `- [${f.id}]${tags ? ` [${tags}]` : ''} ${f.kind}：${f.value}`;
+  }).join('\n');
 }
 
 function renderClaim(c: NonNullable<PatternAssessment['primary']>, prefix: string): string {
@@ -264,7 +274,7 @@ function renderClinicalCompletionState(s: ClinicalCompletionState): string {
   return [
     `clinical core: ${core}`,
     `formula: ${formula}`,
-    `declared obligation: ${obligation}`,
+    `completion contract: ${obligation}`,
   ].join('\n');
 }
 

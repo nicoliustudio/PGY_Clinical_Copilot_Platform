@@ -20,6 +20,7 @@ export interface ToolCallLedgerEntry {
  * - resource_limit_fallback：step 预算耗尽，进入 Forced Finalization
  * - timeout_fallback：总超时临界，进入 Forced Finalization
  * - agent_stopped_without_submit：自然 stop 但未调用 proposal.submit，进入 Forced Finalization
+ * - runtime_committed_ready_state：durable clinical state 已 ready，由 Runtime 确定性序列化并提交
  * - provider_error：结构化产出失败（schema 不匹配等）
  */
 export type TerminationReason =
@@ -28,6 +29,7 @@ export type TerminationReason =
   | 'timeout_fallback'
   | 'agent_stopped_without_submit'
   | 'execution_incomplete'
+  | 'runtime_committed_ready_state'
   | 'provider_error';
 
 export interface AgentLoopTrace {
@@ -54,6 +56,9 @@ export interface CommitReliabilityMetrics {
   agentProposalSubmitSuccessCount: number;
   runtimeForcedFinalizationCount: number;
   runtimeForcedFinalizationSuccessCount: number;
+  /** durable state ready 后的 deterministic commit；不是 forced finalization，也不调用 LLM。 */
+  runtimeReadyStateCommitCount: number;
+  runtimeReadyStateCommitSuccessCount: number;
   finalProposalCommittedCount: number;
   proposalParseFailureCount: number;
   proposalSchemaFailureCount: number;

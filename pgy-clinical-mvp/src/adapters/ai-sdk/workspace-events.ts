@@ -250,6 +250,8 @@ export function workspaceEventsForTool(
     const sourceId = readField(doc, 'sourceId');
     if (typeof sourceId !== 'string') return [];
     const formulaName = readField(doc, 'formulaName');
+    const requestedCandidateRef = readField(input, 'candidateRef');
+    const derivedCandidateRef = `${sourceId}::${readField(doc, 'formulaId')}`;
     return [{
       type: 'evidence.added',
       payload: {
@@ -262,7 +264,14 @@ export function workspaceEventsForTool(
         evidenceKind: 'treatment_knowledge',
         sourceDisease: readPath(doc, 'provenance', 'disease'),
         sourceSyndrome: readPath(doc, 'provenance', 'syndrome'),
-        relatedCandidates: [`${sourceId}::${readField(doc, 'formulaId')}`].filter((x): x is string => typeof x === 'string'),
+        // 优先保留调用时的 canonical candidateRef。P2 formula-level candidate 的
+        // candidateRef 与 formulaId 并非同一字符串，若只重建 `${sourceId}::${formulaId}`
+        // 会丢失 candidate ↔ expanded evidence 的 durable linkage，导致 recovery 无法判断
+        // “这个 frontier candidate 是否已经读过完整证据”。
+        relatedCandidates: [
+          typeof requestedCandidateRef === 'string' ? requestedCandidateRef : undefined,
+          derivedCandidateRef,
+        ].filter((x): x is string => typeof x === 'string' && x.length > 0),
         supportingSignals: [],
         contradictingSignals: [],
       },

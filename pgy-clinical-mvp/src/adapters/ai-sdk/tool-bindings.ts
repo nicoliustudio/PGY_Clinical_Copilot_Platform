@@ -12,7 +12,8 @@ import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contr
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkClinicalCompletion, checkClinicalCoreCompletion, computeClinicalClosure, computeRequiredArtifacts, checkCompletionAgainst } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
+import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
@@ -591,55 +592,16 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '当临床决策已充分时调用，提交最终 Proposal 并立即停止。只提交你的选择（mode + disease/syndrome/treatment + 可选 candidate_ref/uncertainty）；formula 的 sourceId/formulaId/composition 与 safety 由 Runtime 自动填充，不要重复生成。',
     inputSchema: jsonSchema<ProposalSubmitInput>(PROPOSAL_SUBMIT_JSON_SCHEMA, { validate: validateProposal }),
     execute: async (input) => {
-      // H15.5.1：确定性临床收敛边界 —— closure 时拒绝 clarification/conversation-only，强制进入 clinical 决策交付。
-      if (input.mode === 'clarification' || input.mode === 'conversation') {
-        const closure = computeClinicalClosure(context.workspace);
-        if (closure.required) {
-          return {
-            notReady: true,
-            code: 'CLINICAL_CLOSURE_REQUIRED',
-            message:
-              'clinical closure reached: core formed + non-urgent + candidate/evidence surface available. Do not clarify. Submit a clinical proposal, carrying remaining patient-specific unavailable investigations as missing_information + reviewRequired (not clarification-only).',
-          };
-        }
-      }
-      const unresolved = findUnresolvedFormalHypotheses(context.workspace);
-      if (unresolved.length > 0) {
+      // Proposal Readiness 是 Agent loop / recovery / submit 的唯一 deterministic blocker 真源。
+      const readiness = evaluateProposalReadiness(context, input.mode);
+      const blocker = readiness.blockers[0];
+      if (blocker) {
         return {
           notReady: true,
-          message: 'proposal not ready: unresolved decision-changing hypothesis exists. Resolve it as selected / rejected with basis / preserved as uncertainty.',
-          unresolvedHypotheses: unresolved.map((h) => ({ ref: h.id, label: h.label })),
-        };
-      }
-      // H15.2：Minimum Clinical Core —— 关闭 Empty-Spine Submit（clinical case 模式下提交至少需要最低 spine）。
-      if (context.understanding.interaction.mode === 'clinical') {
-        const core = checkClinicalCoreCompletion(context.workspace);
-        if (!core.ok) {
-          return {
-            notReady: true,
-            code: 'CLINICAL_CORE_INCOMPLETE',
-            message: 'clinical core incomplete: the minimum clinical spine has not been formed. Produce the missing core artifacts before submitting.',
-            missing: core.missing,
-          };
-        }
-      }
-      // H15.5.3：提交前结构校验 —— 用 Completion Contract（planner + capability + agent obligation 并集），不再只依赖 Agent 自觉声明。
-      const requiresFormDecision = (context.capabilities ?? []).some((c) => c.requiresTreatmentFormDecision === true);
-      const contractRequired = computeRequiredArtifacts(
-        context.strategy?.provisionalRequiredArtifacts,
-        requiresFormDecision,
-        context.workspace.clinicalDecisionSpine.completionObligation?.requiredArtifacts,
-      );
-      const completion = checkCompletionAgainst(context.workspace, contractRequired);
-      if (!completion.ok) {
-        const formulaSelectionIncomplete = completion.missingArtifacts.includes('formulaSelection');
-        return {
-          notReady: true,
-          code: formulaSelectionIncomplete ? 'FORMULA_SELECTION_INCOMPLETE' : 'CLINICAL_DECISION_INCOMPLETE',
-          message: formulaSelectionIncomplete
-            ? 'formula selection incomplete: a required formulaSelection must select a non-empty candidate ref.'
-            : 'clinical decision incomplete: the completion contract has missing durable artifacts. Produce them before submitting.',
-          missingArtifacts: completion.missingArtifacts,
+          code: blocker.code,
+          message: blocker.message,
+          ...(blocker.missing ? { missing: blocker.missing, missingArtifacts: blocker.missing } : {}),
+          ...(blocker.unresolvedHypotheses ? { unresolvedHypotheses: blocker.unresolvedHypotheses } : {}),
         };
       }
       return input;

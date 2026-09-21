@@ -1,15 +1,18 @@
+import type { ProposalSubmitInput } from '../../contracts/result.js';
 import type { ClinicalWorkspace, ProposalDraft, TreatmentFormDecision } from '../../contracts/workspace.js';
 import { getRuntimeAsset } from '../../knowledge/runtime-catalog.js';
 
 /**
- * 从已检索的 GF 资产确定性补齐膏方组成 / 制法 / 用法（CASE-DERIVED ADVISORY）。
- * 这三个字段承载的是 GF 医案的原始数据，不应依赖模型复述；Runtime 只做确定性回填。
+ * 从 treatment-form decision 已引用的 Runtime Catalog 资产，确定性补齐组成 / 制法 / 用法。
+ *
+ * Core 不识别 GF-/AC-/PREP- 等业务前缀，也不识别“膏方/针灸/制剂”等 form 字符串；
+ * 它只根据 sourceEvidenceRefs 尝试解析资产中已有的 presentation fields。
+ * 这保持了：医学判断由 Agent，已选证据的机械呈现由 Runtime。
  */
-function hydrateGaofangAdvisory(decision: TreatmentFormDecision, scopes: string[]): TreatmentFormDecision {
+function hydrateTreatmentFormAdvisory(decision: TreatmentFormDecision, scopes: string[]): TreatmentFormDecision {
   if (scopes.length === 0) return decision;
-  const gfRefs = decision.sourceEvidenceRefs.filter((r) => r.startsWith('GF-'));
-  if (gfRefs.length === 0) return decision;
-  for (const ref of gfRefs) {
+  if (decision.sourceEvidenceRefs.length === 0) return decision;
+  for (const ref of decision.sourceEvidenceRefs) {
     const asset = getRuntimeAsset(ref, scopes) as Record<string, unknown> | null;
     if (!asset) continue;
     const comp = asset.composition as { raw?: string } | undefined;
@@ -33,10 +36,10 @@ function renderTreatmentFormDecision(decision?: TreatmentFormDecision): string {
     `治疗形式（${decision.form}）: ${decision.disposition}`,
     decision.statement,
   ];
-  if (decision.advisoryComposition?.length) parts.push(`膏方医案参考组成（CASE-DERIVED ADVISORY）: ${decision.advisoryComposition.join('；')}`);
+  if (decision.advisoryComposition?.length) parts.push(`治疗形式参考组成（CASE-DERIVED ADVISORY）: ${decision.advisoryComposition.join('；')}`);
   if (decision.preparation) parts.push(`制法参考: ${decision.preparation}`);
   if (decision.usage) parts.push(`用法参考: ${decision.usage}`);
-  if (decision.sourceEvidenceRefs.length) parts.push(`膏方证据: ${decision.sourceEvidenceRefs.join(', ')}`);
+  if (decision.sourceEvidenceRefs.length) parts.push(`治疗形式证据: ${decision.sourceEvidenceRefs.join(', ')}`);
   return parts.join('\n');
 }
 
@@ -52,7 +55,7 @@ export function buildProposalDraft(workspace: ClinicalWorkspace, scopes: string[
 
   const plan = spine.treatmentPlan;
   const effectivePlan = plan?.treatmentFormDecision
-    ? { ...plan, treatmentFormDecision: hydrateGaofangAdvisory(plan.treatmentFormDecision, scopes) }
+    ? { ...plan, treatmentFormDecision: hydrateTreatmentFormAdvisory(plan.treatmentFormDecision, scopes) }
     : plan;
   const treatment = effectivePlan
     ? [
@@ -86,4 +89,57 @@ export function countProposalDraftFields(draft: ProposalDraft): number {
   if (draft.selectedCandidateRef !== undefined && draft.selectedCandidateRef !== '') n += 1;
   if (draft.uncertainty !== undefined && draft.uncertainty.length > 0) n += 1;
   return n;
+}
+
+
+function uniqRefs(refs: Array<string | undefined>): string[] {
+  return [...new Set(refs.filter((x): x is string => typeof x === 'string' && x.trim() !== ''))];
+}
+
+/**
+ * Durable state 已 ready 后的 deterministic submit projection。
+ *
+ * 这里不做任何临床推理：只把 Workspace 已存在的 disease / primary pattern /
+ * treatment / selected candidate / uncertainty 投影成 proposal.submit 的最小输入。
+ * 若 ready-state 与可序列化 state 不一致，返回 null，让 Runtime fail closed 暴露 invariant bug。
+ */
+export function buildDeterministicClinicalSubmit(
+  workspace: ClinicalWorkspace,
+  scopes: string[] = [],
+): ProposalSubmitInput | null {
+  const spine = workspace.clinicalDecisionSpine;
+  const disease = spine.diseaseAssessment;
+  const primary = workspace.patternAssessment?.primary;
+  const plan = spine.treatmentPlan;
+  if (!disease?.statement || !primary?.statement || !plan) return null;
+
+  const draft = buildProposalDraft(workspace, scopes);
+  if (!draft.treatment) return null;
+
+  const uncertainty = uniqRefs([
+    ...(workspace.uncertainties ?? []),
+    ...(disease.uncertainty ?? []),
+    ...(workspace.patternAssessment?.uncertainty ?? []),
+  ]);
+
+  return {
+    mode: 'clinical',
+    disease: {
+      name: disease.statement,
+      evidence_refs: uniqRefs([...(disease.diseaseRefs ?? []), ...disease.evidenceRefs]),
+    },
+    syndrome: {
+      name: primary.statement,
+      evidence_refs: uniqRefs([...(primary.supportingEvidenceRefs ?? [])]),
+    },
+    treatment: {
+      text: draft.treatment,
+      evidence_refs: uniqRefs([
+        ...plan.evidenceRefs,
+        ...(plan.treatmentFormDecision?.sourceEvidenceRefs ?? []),
+      ]),
+    },
+    ...(draft.selectedCandidateRef ? { candidate_ref: draft.selectedCandidateRef } : {}),
+    ...(uncertainty.length ? { uncertainty } : {}),
+  };
 }

@@ -93,3 +93,21 @@ test('formula candidate hydration 接入 proposal flow', async () => {
   assert.deepEqual(authority.proposal.formula.composition, ['demo-herb']);
   assert.equal(authority.proposal.formula.name, 'demo-formula');
 });
+
+test('P2 formula.get_evidence 保留实际 candidateRef 关联，供 recovery 判断 evidence 已展开', () => {
+  const candidateRef = 'P2:E_demo::formula';
+  const drafts = workspaceEventsForTool(
+    'formula.get_evidence',
+    { candidateRef },
+    {
+      sourceId: 'P2:E_demo',
+      formulaId: 'P2_CASE_FORMULA::P2:C_demo::E_demo::1',
+      formulaName: '病例方（原案无正式方名）',
+      sourceTier: 'P2',
+      indicationText: '年高津亏便秘',
+    },
+  );
+  assert.equal(drafts.length, 1);
+  const related = drafts[0].payload.relatedCandidates as string[];
+  assert.ok(related.includes(candidateRef), '必须保留调用时真实 candidateRef，而不是只按 formulaId 重建');
+});
