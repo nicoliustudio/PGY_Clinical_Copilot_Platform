@@ -12,7 +12,7 @@ import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contr
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkClinicalCompletion, checkClinicalCoreCompletion, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkClinicalCompletion, checkClinicalCoreCompletion, computeClinicalClosure, computeRequiredArtifacts, checkCompletionAgainst } from '../../platform/workspace/clinical-workspace.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
@@ -149,8 +149,8 @@ const treatmentPlanSchema = z.object({
   rationale: z.string().optional(),
   evidenceRefs: z.array(z.string()).optional(),
   treatmentFormDecision: z.object({
-    kind: z.literal('gaofang'),
-    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_GAOFANG', 'CURRENTLY_NOT_SUITABLE']),
+    form: z.string(),
+    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
     statement: z.string(),
     sourceEvidenceRefs: z.array(z.string()),
     advisoryComposition: z.array(z.string()).optional(),
@@ -623,8 +623,14 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           };
         }
       }
-      // H15.1：提交前结构校验 —— 仅验证 Agent 声明的 requiredArtifacts 是否已形成，不判断医学内容。
-      const completion = checkClinicalCompletion(context.workspace);
+      // H15.5.3：提交前结构校验 —— 用 Completion Contract（planner + capability + agent obligation 并集），不再只依赖 Agent 自觉声明。
+      const requiresFormDecision = (context.capabilities ?? []).some((c) => c.requiresTreatmentFormDecision === true);
+      const contractRequired = computeRequiredArtifacts(
+        context.strategy?.provisionalRequiredArtifacts,
+        requiresFormDecision,
+        context.workspace.clinicalDecisionSpine.completionObligation?.requiredArtifacts,
+      );
+      const completion = checkCompletionAgainst(context.workspace, contractRequired);
       if (!completion.ok) {
         const formulaSelectionIncomplete = completion.missingArtifacts.includes('formulaSelection');
         return {
@@ -632,7 +638,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           code: formulaSelectionIncomplete ? 'FORMULA_SELECTION_INCOMPLETE' : 'CLINICAL_DECISION_INCOMPLETE',
           message: formulaSelectionIncomplete
             ? 'formula selection incomplete: a required formulaSelection must select a non-empty candidate ref.'
-            : 'clinical decision incomplete: the completion obligation you declared has not been satisfied. Produce the missing artifacts before submitting.',
+            : 'clinical decision incomplete: the completion contract has missing durable artifacts. Produce them before submitting.',
           missingArtifacts: completion.missingArtifacts,
         };
       }

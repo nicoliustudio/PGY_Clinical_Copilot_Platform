@@ -1,8 +1,9 @@
-# 环境与密钥（绝不提交）
+# 环境与密钥（绝不提交；仓库为公开仓库）
 .env
 .env.*
 !.env.example
 _private/
+.deploy/
 
 # 知识资产（书籍版权原文 + 评测 gold + 真实病例，私有管理，不公开）
 assets/
@@ -22,6 +23,9 @@ dist/
 .kb-cache/
 reports/
 *.log
+
+# 账号存储（运行时生成，含密码摘要，绝不入库）
+data/
 
 # Python
 __pycache__/

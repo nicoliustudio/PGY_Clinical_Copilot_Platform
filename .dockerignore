@@ -1,0 +1,24 @@
+# 构建上下文排除：密钥、知识资产、依赖、账号数据都不进镜像
+.git
+.gitattributes
+.trae
+.env
+.env.*
+!.env.example
+
+# 知识资产（185MB）与预构建索引（220MB）一律走宿主挂载，不进镜像
+assets/
+**/.kb-cache/
+
+# 账号/会话存储（运行时生成，含密码摘要）
+**/data/
+
+# 依赖与产物
+**/node_modules/
+**/dist/
+**/reports/
+**/*.log
+*.zip
+
+# 迁移参考用的旧 UI 壳
+ui-shell-2026-09-16/

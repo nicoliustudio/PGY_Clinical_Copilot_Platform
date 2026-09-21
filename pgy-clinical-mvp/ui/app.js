@@ -23,6 +23,10 @@ function toast(msg) {
 
 async function api(path, opt = {}) {
   const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opt });
+  if (res.status === 401) {
+    window.location.replace('/login');
+    throw new Error('会话已过期，请重新登录');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
   return data;
@@ -728,6 +732,7 @@ async function send() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ input: text }),
     });
+    if (res.status === 401) { window.location.replace('/login'); return; }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
     const reader = res.body.getReader();
@@ -914,8 +919,29 @@ async function runEval() {
   }
 }
 
+/* ---------- 会话：账号与角色 ---------- */
+function applySession(user) {
+  const roleLabel = user.role === 'admin' ? '管理员' : '医生';
+  $('#userChip').innerHTML = `<b>${esc(user.displayName || user.loginName)}</b><span class="role-tag">${roleLabel}</span>`;
+  // 调试 / 评测视图属于管理面，医生端不暴露
+  const isAdmin = user.role === 'admin';
+  $('#viewToggle').classList.toggle('hidden', !isAdmin);
+  if (!isAdmin && state.view === 'admin') switchView('user');
+}
+
+$('#logoutBtn').addEventListener('click', async () => {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* 会话已失效也照样跳转 */ }
+  window.location.replace('/login');
+});
+
 /* ---------- 启动 ---------- */
 (async function boot() {
+  try {
+    const me = await api('/api/auth/me');
+    applySession(me.user);
+  } catch {
+    return; // 未登录：api() 已跳转登录页
+  }
   try {
     const h = await api('/api/health');
     $('#modelState').textContent = h.llm?.deep || '';

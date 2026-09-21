@@ -20,5 +20,6 @@
   "knowledgeScopes": ["gaofang"],
   "skillIds": ["gaofang-reasoning"],
   "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"],
-  "treatmentSpecific": true
+  "treatmentSpecific": true,
+  "requiresTreatmentFormDecision": true
 }

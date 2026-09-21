@@ -125,15 +125,15 @@ test('T4 ProposalDraft 将 treatmentFormDecision 序列化为 treatment 文本',
     primaryPrinciple: '益气健脾，补肾暖宫',
     treatmentTarget: '暖宫助孕',
     treatmentFormDecision: {
-      kind: 'gaofang',
-      disposition: 'TREAT_FIRST_THEN_GAOFANG',
+      form: '膏方',
+      disposition: 'TREAT_FIRST_THEN_FORM',
       statement: '先治当前，标实缓解后再行膏方调补',
       sourceEvidenceRefs: ['GF-017'],
     },
   });
   const draft = buildProposalDraft(ws);
   assert.ok(draft.treatment?.includes('治疗形式（膏方）'));
-  assert.ok(draft.treatment?.includes('TREAT_FIRST_THEN_GAOFANG'));
+  assert.ok(draft.treatment?.includes('TREAT_FIRST_THEN_FORM'));
   assert.ok(draft.treatment?.includes('GF-017'));
 });
 
@@ -217,7 +217,7 @@ test('T9 TreatmentPlan 持久化 treatmentFormDecision（真实 GF evidence refs
     primaryPrinciple: '补中益气',
     treatmentTarget: '升提固涩',
     treatmentFormDecision: {
-      kind: 'gaofang',
+      form: '膏方',
       disposition: 'CURRENTLY_SUITABLE',
       statement: '适合以膏方调补',
       sourceEvidenceRefs: ['GF-002'],
@@ -228,7 +228,7 @@ test('T9 TreatmentPlan 持久化 treatmentFormDecision（真实 GF evidence refs
   });
   const d = ws.clinicalDecisionSpine.treatmentPlan?.treatmentFormDecision;
   assert.ok(d, 'treatmentFormDecision 应被持久化');
-  assert.equal(d?.kind, 'gaofang');
+  assert.equal(d?.form, '膏方');
   assert.equal(d?.disposition, 'CURRENTLY_SUITABLE');
   assert.deepEqual(d?.sourceEvidenceRefs, ['GF-002']);
   assert.deepEqual(d?.advisoryComposition, ['党参15克', '黄芪20克']);
@@ -239,7 +239,45 @@ test('T9 TreatmentPlan 拒绝非法 disposition（fail-closed 不持久化）', 
   store.append('treatment.plan.recorded', {
     primaryPrinciple: '补中益气',
     treatmentTarget: '升提固涩',
-    treatmentFormDecision: { kind: 'gaofang', disposition: 'INVALID', statement: 'x', sourceEvidenceRefs: [] },
+    treatmentFormDecision: { form: '膏方', disposition: 'INVALID', statement: 'x', sourceEvidenceRefs: [] },
   });
   assert.equal(ws.clinicalDecisionSpine.treatmentPlan?.treatmentFormDecision, undefined);
+});
+
+// ---------- T10 Gaofang Composition 确定性回填 ----------
+
+test('T10 buildProposalDraft 从 GF 资产确定性补齐组成/制法/用法', () => {
+  resetRuntimeCatalogCache();
+  const { ws, store } = coreCompleteWorkspace();
+  store.append('treatment.plan.recorded', {
+    primaryPrinciple: '活血化瘀，消痰散结',
+    treatmentTarget: '消癥散结',
+    treatmentFormDecision: {
+      form: '膏方',
+      disposition: 'TREAT_FIRST_THEN_FORM',
+      statement: '先汤剂后膏方',
+      sourceEvidenceRefs: ['GF-018'],
+    },
+  });
+  const draft = buildProposalDraft(ws, ['gaofang']);
+  assert.ok(draft.treatment, 'treatment 应非空');
+  assert.ok(draft.treatment.includes('膏方医案参考组成（CASE-DERIVED ADVISORY）'), '应渲染组成区块');
+  assert.ok(draft.treatment.includes('生晒参'), '应包含 GF-018 实际组成药味');
+  assert.ok(draft.treatment.includes('凉水浸1宿'), '应包含 GF-018 实际制法');
+});
+
+test('T10 无 GF scope 时不回填（纯投影，不臆造）', () => {
+  const { ws, store } = coreCompleteWorkspace();
+  store.append('treatment.plan.recorded', {
+    primaryPrinciple: '活血化瘀',
+    treatmentTarget: '消癥',
+    treatmentFormDecision: {
+      form: '膏方',
+      disposition: 'TREAT_FIRST_THEN_FORM',
+      statement: '先汤剂后膏方',
+      sourceEvidenceRefs: ['GF-018'],
+    },
+  });
+  const draft = buildProposalDraft(ws, []); // 无 scope → 不回填
+  assert.ok(!draft.treatment?.includes('生晒参'), '无 scope 时不应回填组成');
 });

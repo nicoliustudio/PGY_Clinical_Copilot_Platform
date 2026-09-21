@@ -27,7 +27,7 @@ import { buildEvidenceProjection } from '../../platform/workspace/evidence-proje
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
-import { checkClinicalCompletion, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
+import { checkClinicalCompletion, computeClinicalClosure, computeRequiredArtifacts, checkCompletionAgainst } from '../../platform/workspace/clinical-workspace.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
@@ -158,7 +158,19 @@ function closureAwareActiveToolIds(
 ): string[] {
   const all = activeToolIds(context, bindings, mode);
   const closure = computeClinicalClosure(context.workspace);
-  if (!closure.required || !hasRequiredTreatmentSpecificEvidence(context)) return all;
+  if (!closure.required || !hasRequiredTreatmentSpecificEvidence(context)) {
+    // H15.5.3：closure 未正式触发（常因缺 treatmentPlan），但检索面已就绪、core 未写全时，
+    // 限制 broad search，逼模型 commit 而不是无限检索。
+    const contract = completionContractFor(context);
+    const hasRetrievalSurface = context.workspace.candidates.length > 0 && context.workspace.evidenceState.evidenceItems.length > 0;
+    const coreIncomplete = contract.missingArtifacts.some((m) => ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan'].includes(m));
+    if (hasRetrievalSurface && coreIncomplete) {
+      // 检索面已就绪、core 未写全：只留「认领假设 + 持久化判断 + 聚焦/评估候选 + 提交」，不放任何检索/证据工具。
+      const commitOnly = new Set(['workspace.consider_hypotheses', 'workspace.record_deliberation', 'workspace.focus_candidates', 'workspace.record_candidate_assessment', 'workspace.record_candidate_exclusion', 'proposal.submit']);
+      return all.filter((x) => commitOnly.has(fromApiToolName(x)));
+    }
+    return all;
+  }
 
   const completion = checkClinicalCompletion(context.workspace);
   if (completion.ok) {
@@ -180,6 +192,63 @@ function closureAwareActiveToolIds(
   if (selectionReady) allowed.add('formula.get_modification_evidence');
   return all.filter((x) => allowed.has(fromApiToolName(x)));
 }
+
+/** H15.5.3：Natural stop 后的恢复阶段。submit = 仅提交；completion = 补齐缺失产物。 */
+type RecoveryState = { kind: 'submit' } | { kind: 'completion'; missing: string[] };
+
+/** H15.5.3：Completion Contract —— planner 预判 + 能力输出义务 + Agent 显式义务的并集。 */
+export function completionContractFor(context: RuntimeContext): { requiredArtifacts: string[]; missingArtifacts: string[]; ok: boolean } {
+  const requiresFormDecision = context.capabilities.some((c) => c.requiresTreatmentFormDecision === true);
+  const required = computeRequiredArtifacts(
+    context.strategy.provisionalRequiredArtifacts,
+    requiresFormDecision,
+    context.workspace.clinicalDecisionSpine.completionObligation?.requiredArtifacts,
+  );
+  const completion = checkCompletionAgainst(context.workspace, required);
+  return { requiredArtifacts: required, missingArtifacts: completion.missingArtifacts, ok: completion.ok };
+}
+
+/**
+ * H15.5.3：Recovery active tools 由 missing artifacts 决定，不恢复所有工具。
+ * 不硬编码业务能力词；treatmentFormDecision 只开放激活能力已声明的 evidence tools（search_cards / get_asset）。
+ */
+export function recoveryActiveToolIds(
+  context: RuntimeContext,
+  bindings: AiSdkToolBindings,
+  mode: 'harness' | 'classic',
+  missing: string[],
+): string[] {
+  const all = activeToolIds(context, bindings, mode);
+  if (missing.length === 0) {
+    const submitOnly = new Set(['proposal.submit']);
+    return all.filter((x) => submitOnly.has(fromApiToolName(x)));
+  }
+  const allowed = new Set<string>();
+  const coreMissing = missing.some((m) => ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan'].includes(m));
+  if (coreMissing) {
+    // 缺 core 时只留「认领假设 + 持久化判断 + 精确查看已有证据」，不放 broad search（避免继续检索而不 commit）。
+    ['workspace.consider_hypotheses', 'workspace.record_deliberation', 'knowledge.get_source', 'knowledge.get_asset'].forEach((t) => allowed.add(t));
+  }
+  if (missing.includes('formulaSelection')) {
+    ['workspace.consider_hypotheses', 'workspace.focus_candidates', 'workspace.record_candidate_assessment', 'workspace.record_candidate_exclusion', 'workspace.record_deliberation', 'formula.search_candidates', 'formula.get_evidence', 'formula.validate', 'formula.get_modification_evidence'].forEach((t) => allowed.add(t));
+  }
+  if (missing.includes('formulaReview')) {
+    ['workspace.record_deliberation', 'formula.validate', 'formula.get_evidence'].forEach((t) => allowed.add(t));
+  }
+  if (missing.includes('treatmentFormDecision')) {
+    ['workspace.record_deliberation', 'knowledge.search_cards', 'knowledge.get_asset'].forEach((t) => allowed.add(t));
+  }
+  allowed.add('proposal.submit');
+  return all.filter((x) => allowed.has(fromApiToolName(x)));
+}
+
+/** H15.5.3：Recovery 复用原始剩余预算（不重新给一套 maxSteps）。 */
+export function recoveryRemainingSteps(resourceSteps: number, usedSteps: number): number {
+  return Math.max(1, resourceSteps - usedSteps);
+}
+
+/** H15.5.3：Recovery 通用执行指令（不写病例特定医疗内容）。 */
+const RECOVERY_INSTRUCTION = 'Your previous response did not complete the structured clinical task. Do not end in free text. Complete the missing durable clinical decisions using the available tools, then call proposal.submit.';
 
 function buildSearchHistory(ledger: ToolCallLedger): string {
   const rows = ledger.entries()
@@ -562,26 +631,41 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
 
     const projectionCache = new ProjectionCache();
     let cachedDecisionState: DecisionState | undefined;
+    let stepOffset = 0;
+    let recovery: RecoveryState | null = null;
 
-    const agent = new ToolLoopAgent({
+    const buildLoopAgent = (maxSteps: number, rec: RecoveryState | null) => new ToolLoopAgent({
       model: llmModel,
       tools: buildTools(context, bindings, ledger),
       instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
+      toolChoice: rec ? 'required' : undefined,
       prepareStep: async ({ initialMessages, steps }) => {
-        currentStep = steps.length + 1;
+        currentStep = stepOffset + steps.length + 1;
         metrics.workspaceProjectionCount += 1;
         metrics.decisionStateProjectionCount += 1;
         const version = context.workspaceStore.version;
         cachedDecisionState = projectionCache.getDecisionState(version, context.workspace, context.strategy).decisionState;
+        const activeTools = rec
+          ? recoveryActiveToolIds(context, bindings, mode, rec.kind === 'completion' ? rec.missing : [])
+          : closureAwareActiveToolIds(context, bindings, mode);
+        const baseInstructions = dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback(), cachedDecisionState);
+        let instructions = baseInstructions;
+        if (rec) {
+          const recoverHeader = rec.kind === 'submit'
+            ? 'Your structured clinical task now has all required durable artifacts. Call proposal.submit immediately to submit the final proposal. Do not end in free text.'
+            : `${RECOVERY_INSTRUCTION}\n\nMissing durable artifacts: ${rec.missing.join(', ')}.\nUse workspace.record_deliberation to write the missing clinical decisions (its diseaseAssessment / patternAssessment / treatmentPlan / formulaSelection / formulaReview / treatmentFormDecision fields as applicable), then call proposal.submit.`;
+          instructions = `${recoverHeader}\n\n${baseInstructions}`;
+        }
         return {
-          activeTools: closureAwareActiveToolIds(context, bindings, mode),
-          instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback(), cachedDecisionState),
+          activeTools,
+          toolChoice: rec ? 'required' : undefined,
+          instructions,
           messages: compactAgentMessages(initialMessages, steps),
         };
       },
       stopWhen: mode === 'harness'
-        ? [proposalSubmitReadyStep(), isStepCount(resourceSteps)]
-        : [isStepCount(resourceSteps)],
+        ? [proposalSubmitReadyStep(), isStepCount(maxSteps)]
+        : [isStepCount(maxSteps)],
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const internalName = fromApiToolName(toolCall.toolName);
         const stateKey = internalName === 'capability.discover' ? capabilityStateKey(context) : undefined;
@@ -914,7 +998,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     emit('exploring');
 
     if (mode === 'classic') {
-      const response = await agent.generate({
+      const response = await buildLoopAgent(resourceSteps, null).generate({
         prompt: buildContextPrompt(context, mode),
         timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
       });
@@ -925,15 +1009,29 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     }
 
     // Harness production path：不依赖 response.text 提取 JSON。
-    const response = await agent.generate({
-      prompt: buildContextPrompt(context, mode),
-      timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
-    });
+    // H15.5.3：natural stop ≠ completion。recovery 循环驱动，直到 submit 或预算耗尽。
+    let finalContract: ReturnType<typeof completionContractFor> | null = null;
 
-    stepCount = response.steps.length;
-    finishReason = response.finishReason;
-    finalStepHadToolCalls = response.finalStep.toolCalls.length > 0;
-    usage = response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens } : usage;
+    while (true) {
+      const maxSteps = Math.max(1, resourceSteps - stepCount);
+      const agent = buildLoopAgent(maxSteps, recovery);
+      const response = await agent.generate({
+        prompt: buildContextPrompt(context, mode),
+        timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
+      });
+      stepCount += response.steps.length;
+      stepOffset = stepCount;
+      finishReason = response.finishReason;
+      finalStepHadToolCalls = response.finalStep.toolCalls.length > 0;
+      usage = response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens } : usage;
+
+      if (submittedProposal !== undefined) break;
+
+      finalContract = completionContractFor(context);
+      if (resourceSteps - stepCount <= 0) break;
+      recovery = finalContract.ok ? { kind: 'submit' } : { kind: 'completion', missing: finalContract.missingArtifacts };
+    }
+
     const finalDecisionAtMs = Date.now();
 
     if (submittedProposal !== undefined) {
@@ -946,8 +1044,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       proposalSubmitted = true;
       forcedFinalization = false;
       terminationReason = 'agent_submitted';
-    } else {
-      // Minimal Finalization：只 serialize 已形成的判断，不重新解决病例、不重新检索。
+    } else if (finalContract?.ok) {
+      // durable state 已完成但未 submit → 仅 deterministic serialization，不重新推理。
       emit('finalizing');
       commitReliability.runtimeForcedFinalizationCount = 1;
       const finalize = await this.minimalFinalization(context, commitReliability);
@@ -964,6 +1062,17 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       forcedFinalization = true;
       proposalSubmitted = false;
       terminationReason = finalStepHadToolCalls ? 'resource_limit_fallback' : 'agent_stopped_without_submit';
+    } else {
+      // H15.5.3：budget 耗尽且 contract 不完整 → EXECUTION_INCOMPLETE，不伪装成 clarification。
+      terminationReason = 'execution_incomplete';
+      forcedFinalization = true;
+      proposalSubmitted = false;
+      commitReliability.finalProposalCommittedCount = 1;
+      const missing = finalContract?.missingArtifacts ?? [];
+      proposal = {
+        mode: 'conversation',
+        message: `EXECUTION_INCOMPLETE: missing artifacts [${missing.join(', ')}]`,
+      };
     }
 
     emit('completed');
@@ -1070,7 +1179,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     context: RuntimeContext,
     commitReliability: CommitReliabilityMetrics,
   ): Promise<{ proposal: AgentResult; usage?: { inputTokens?: number; outputTokens?: number } }> {
-    const draft = buildProposalDraft(context.workspace);
+    const draft = buildProposalDraft(context.workspace, context.knowledgeScopes);
     commitReliability.proposalDraftFieldCount = countProposalDraftFields(draft);
     const decisionState = buildDecisionState(context.workspace, context.strategy);
     commitReliability.finalizationContextItemCount = countFinalizationContextItems(draft, decisionState);

@@ -343,3 +343,25 @@ td .input-preview { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
   .admin-grid-2 { grid-template-columns: 1fr; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ---------- 登录页 ---------- */
+.login-body { display: grid; place-items: center; padding: 24px; background: linear-gradient(160deg, #f7f9f7 0%, #eef4f0 100%); }
+.login-card { width: min(400px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px 26px 22px; box-shadow: var(--shadow); }
+.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+.login-brand .brand-mark { width: 44px; height: 44px; border-radius: 13px; }
+.login-brand .brand-copy { display: flex; flex-direction: column; line-height: 1.35; }
+.login-brand .brand-copy strong { font-size: 16px; }
+.login-brand .brand-copy span { font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+.login-form { display: flex; flex-direction: column; gap: 14px; }
+.login-field { display: flex; flex-direction: column; gap: 6px; }
+.login-field span { font-size: 12px; color: var(--muted-2); }
+.login-submit { margin-top: 4px; padding: 12px; font-size: 14px; }
+.login-submit:disabled { opacity: .6; cursor: default; }
+.login-error { margin: 0; font-size: 12px; color: var(--danger); background: #fdf3f3; border: 1px solid #f2dcdc; border-radius: 10px; padding: 9px 11px; }
+.login-foot { margin: 18px 0 0; font-size: 11px; line-height: 1.65; color: var(--muted); }
+
+/* ---------- 顶栏账号 ---------- */
+.user-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted-2); background: var(--soft); border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px; }
+.user-chip b { font-weight: 600; color: var(--text); }
+.user-chip .role-tag { font-size: 10px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 1px 5px; }
+

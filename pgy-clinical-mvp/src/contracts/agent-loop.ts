@@ -27,6 +27,7 @@ export type TerminationReason =
   | 'resource_limit_fallback'
   | 'timeout_fallback'
   | 'agent_stopped_without_submit'
+  | 'execution_incomplete'
   | 'provider_error';
 
 export interface AgentLoopTrace {

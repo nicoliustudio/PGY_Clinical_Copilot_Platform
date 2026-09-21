@@ -16,6 +16,8 @@ export const clinicalStrategySchema = z.object({
   /** 什么条件下已有信息足以形成可辩护结论 / 应当停止检索。 */
   stopWhen: z.array(z.string()),
   uncertainty: z.array(uncertaintySchema),
+  /** H15.5.3：Planner 根据 requested outcome 预判必须产出的临床产物类型（系统已存在的 artifact 类型，非业务词）。 */
+  provisionalRequiredArtifacts: z.array(z.string()).optional(),
 });
 
 export type ClinicalStrategy = z.infer<typeof clinicalStrategySchema>;
@@ -28,6 +30,7 @@ export function emptyClinicalStrategy(): ClinicalStrategy {
     criticalEvidenceNeeds: [],
     stopWhen: [],
     uncertainty: [],
+    provisionalRequiredArtifacts: [],
   };
 }
 

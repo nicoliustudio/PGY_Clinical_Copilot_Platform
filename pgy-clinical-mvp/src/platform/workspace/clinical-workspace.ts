@@ -10,6 +10,7 @@ import type {
   PromotionCoverage,
   PromotionWorkItem,
   RootBranchAssessment,
+  TreatmentFormDisposition,
   TreatmentRetrievalContext,
   WorkspaceBatchResult,
   WorkspaceControlPort,
@@ -534,12 +535,13 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         const raw = payload.treatmentFormDecision;
         if (!raw || typeof raw !== 'object') return undefined;
         const x = raw as Record<string, unknown>;
+        const form = asString(x.form);
         const disposition = asString(x.disposition);
         const statement = asString(x.statement);
-        if (!statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_GAOFANG', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
+        if (!form || !statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
         return {
-          kind: 'gaofang' as const,
-          disposition: disposition as 'CURRENTLY_SUITABLE' | 'TREAT_FIRST_THEN_GAOFANG' | 'CURRENTLY_NOT_SUITABLE',
+          form,
+          disposition: disposition as TreatmentFormDisposition,
           statement,
           sourceEvidenceRefs: asStringArray(x.sourceEvidenceRefs),
           advisoryComposition: asStringArray(x.advisoryComposition),
@@ -884,6 +886,7 @@ function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: string): bo
     }
     case 'formulaReview': return spine.formulaReview !== undefined;
     case 'formalHypotheses': return spine.patternHypothesisRefs.length > 0;
+    case 'treatmentFormDecision': return spine.treatmentPlan?.treatmentFormDecision !== undefined;
     default: return false;
   }
 }
@@ -892,6 +895,29 @@ export function checkClinicalCompletion(workspace: ClinicalWorkspace): ClinicalC
   const obligation = workspace.clinicalDecisionSpine.completionObligation;
   if (!obligation || obligation.requiredArtifacts.length === 0) return { ok: true, missingArtifacts: [] };
   const missing = obligation.requiredArtifacts.filter((a) => !isArtifactSatisfied(workspace, a));
+  return { ok: missing.length === 0, missingArtifacts: missing };
+}
+
+/**
+ * H15.5.3：Completion Contract 合并 —— planner 预判 + 激活能力输出义务 + Agent 显式义务。
+ * 取并集（最小一致）：三者都满足才算 complete。Agent 不得通过「完全不声明」逃避。
+ * treatmentFormDecision 是平台级产物（能力 opt-in），不识别具体业务词。
+ */
+export function computeRequiredArtifacts(
+  provisional: string[] | undefined,
+  requiresTreatmentFormDecision: boolean,
+  obligationRequired: string[] | undefined,
+): string[] {
+  const required = new Set<string>(provisional ?? []);
+  if (requiresTreatmentFormDecision) required.add('treatmentFormDecision');
+  if (obligationRequired) for (const a of obligationRequired) required.add(a);
+  return [...required];
+}
+
+/** H15.5.3：针对显式 requiredArtifacts 列表的结构完成检查（与 Agent 自觉声明的 obligation 解耦）。 */
+export function checkCompletionAgainst(workspace: ClinicalWorkspace, requiredArtifacts: string[]): ClinicalCompletionResult {
+  if (requiredArtifacts.length === 0) return { ok: true, missingArtifacts: [] };
+  const missing = requiredArtifacts.filter((a) => !isArtifactSatisfied(workspace, a));
   return { ok: missing.length === 0, missingArtifacts: missing };
 }
 

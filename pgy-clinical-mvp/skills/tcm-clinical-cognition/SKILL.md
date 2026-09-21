@@ -150,6 +150,12 @@ When `disease` / `primary pattern` / `treatment principle` / `formula candidate`
 
 A non-blocking uncertainty must not swallow an already-formed clinical advisory. Safety (urgent → block normative commit) is unchanged; this only concerns uncertainty that does not block.
 
+## Apparent Chart Typo
+
+When physician-authored text contains an apparent clerical, transcription, or homophonic error and the surrounding clinical context supports one clear interpretation, preserve the original wording, note the likely normalization, and continue reasoning.
+
+Ask for clarification only when competing interpretations would materially change diagnosis, treatment, or safety.
+
 ## Gaofang (膏方) Execution Handoff
 
 Activating the gaofang capability or retrieving a gaofang card is not completion. The run must close with an explicit treatment-form decision:

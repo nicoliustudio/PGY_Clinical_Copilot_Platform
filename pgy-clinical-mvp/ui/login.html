@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f7f9f7" />
+  <title>登录 · 蒲公英中医 Clinical Copilot</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="login-brand">
+      <img class="brand-mark" src="/logo.png" alt="蒲公英中医" />
+      <div class="brand-copy"><strong>蒲公英中医</strong><span>Clinical Copilot</span></div>
+    </div>
+
+    <form id="loginForm" class="login-form" autocomplete="on">
+      <label class="login-field">
+        <span>账号</span>
+        <input id="loginName" name="loginName" autocomplete="username" required autofocus />
+      </label>
+      <label class="login-field">
+        <span>密码</span>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="loginError" class="login-error hidden"></p>
+      <button class="primary login-submit" id="loginSubmit" type="submit">登录</button>
+    </form>
+
+    <p class="login-foot">账号由平台管理员分配。临床推理过程全程留痕，请使用本人账号登录。</p>
+  </main>
+  <script src="/login.js"></script>
+</body>
+</html>

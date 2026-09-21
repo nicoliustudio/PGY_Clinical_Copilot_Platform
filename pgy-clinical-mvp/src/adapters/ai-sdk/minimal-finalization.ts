@@ -73,7 +73,7 @@ export function buildMinimalFinalizationPrompt(
   const closure = computeClinicalClosure(context.workspace);
   const closureInstruction = closure.required
     ? 'Clinical closure is active. For a non-urgent case with a formed clinical core, do NOT output clarification/conversation merely because patient-specific tests or history are unavailable. Serialize the formed clinical advisory as mode=clinical and preserve unavailable items in uncertainty. Do not invent a candidate_ref if none was selected.'
-    : 'If the minimum clinical core truly cannot be formed from the available patient information, clarification is allowed.';
+    : 'Serialize the already-formed durable clinical state faithfully. Do not invent clarification questions — clarification is only valid when explicitly submitted via proposal.submit(mode=clarification). If the durable state is insufficient for mode=clinical, report the execution incompleteness instead of fabricating missing patient information.';
 
   return [
     '你的临床探索已结束（或达到资源上限）。现在只做一件事：把下面已经形成的判断序列化为一个合法的 proposal 结构。',

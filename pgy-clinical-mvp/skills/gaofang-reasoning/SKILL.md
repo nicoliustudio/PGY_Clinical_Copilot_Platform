@@ -11,9 +11,11 @@ This skill is loaded only when the gaofang capability is active. It guides treat
 
 When gaofang is active and a relevant GF asset has been retrieved, do not keep searching merely for more examples. Record one explicit treatment-form decision inside `treatmentPlan.treatmentFormDecision`:
 
-- `CURRENTLY_SUITABLE`
-- `TREAT_FIRST_THEN_GAOFANG`
-- `CURRENTLY_NOT_SUITABLE`
+- `form`: open-text treatment form (e.g. "膏方" / "以膏代煎").
+- `disposition`:
+  - `CURRENTLY_SUITABLE`
+  - `TREAT_FIRST_THEN_FORM`
+  - `CURRENTLY_NOT_SUITABLE`
 
 The decision must include a concise clinical statement and real `sourceEvidenceRefs` to retrieved GF assets. If the asset contains a clinically relevant composition/preparation/usage, it may be carried as **CASE-DERIVED ADVISORY** only.
 

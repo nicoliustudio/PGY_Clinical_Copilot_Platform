@@ -28,7 +28,7 @@ export class HarnessSession implements HarnessControlPort {
     let resolved = this.context.capabilities.find((c) => c.id === id);
     const reused = resolved !== undefined;
     if (!resolved) {
-      resolved = { id, confidence: 1, reason, treatmentSpecific: descriptor.treatmentSpecific };
+      resolved = { id, confidence: 1, reason, treatmentSpecific: descriptor.treatmentSpecific, requiresTreatmentFormDecision: descriptor.requiresTreatmentFormDecision };
       this.context.capabilities.push(resolved);
     }
 

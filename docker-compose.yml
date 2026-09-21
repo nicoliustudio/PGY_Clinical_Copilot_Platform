@@ -1,0 +1,28 @@
+# 蒲公英中医 Clinical Copilot v1（X1）—— 单容器无状态应用（无数据库）
+# 与 v2.8/v2.9 的隔离：独立目录 /opt/pgy-x1、独立项目名 pgy-x1、独立宿主端口 8002、独立命名卷。
+#
+# 运行时配置只认一个文件：pgy-clinical-mvp/.env（即应用自身 dotenv 读取的路径）。
+# 本地 `npm run serve` 与容器 `docker compose up` 因此使用完全相同的配置，不会漂移。
+# 不可再生数据只有「账号与会话」（命名卷 data）；知识库为宿主只读挂载，向量索引可重建。
+services:
+  app:
+    build:
+      context: .
+    image: pgy-x1-app:local
+    restart: unless-stopped
+    env_file: pgy-clinical-mvp/.env
+    ports:
+      # 只绑回环：外网一律经 Nginx 进入，TLS/限流集中在 Nginx 一层
+      # 宿主 8002（v2.8=8000、v2.9=8001 已占用）；容器内 8787 ＝ .env 的 APP_PORT
+      - "127.0.0.1:8002:8787"
+    volumes:
+      # 知识资产（185MB，含版权原文，不入 git 也不入镜像）→ 容器内 /app/assets
+      # 容器工作目录是 /app/pgy-clinical-mvp，故 .env 的 KB_RELEASE_DIR=../assets/... 正好解析到这里
+      - ./assets:/app/assets:ro
+      # 账号与会话（唯一不可再生数据）→ 命名卷：不会被 git clean / 误删宿主目录带走，须定时备份
+      - data:/app/pgy-clinical-mvp/data
+      # 向量索引缓存（可由知识库重建）→ 宿主目录：便于预传索引、随时替换，丢了只是首次启动变慢
+      - ./pgy-clinical-mvp/.kb-cache:/app/pgy-clinical-mvp/.kb-cache
+
+volumes:
+  data:

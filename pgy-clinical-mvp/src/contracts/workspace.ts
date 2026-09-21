@@ -187,9 +187,12 @@ export interface DiseaseAssessment {
   version: number;
 }
 
+export type TreatmentFormDisposition = 'CURRENTLY_SUITABLE' | 'TREAT_FIRST_THEN_FORM' | 'CURRENTLY_NOT_SUITABLE';
+
 export interface TreatmentFormDecision {
-  kind: 'gaofang';
-  disposition: 'CURRENTLY_SUITABLE' | 'TREAT_FIRST_THEN_GAOFANG' | 'CURRENTLY_NOT_SUITABLE';
+  /** 治疗形式（开放文本，如「膏方」），由语义理解产出，不枚举业务词。 */
+  form: string;
+  disposition: TreatmentFormDisposition;
   statement: string;
   sourceEvidenceRefs: string[];
   /** Case-derived advisory only; never changes BaseFormula authority. */

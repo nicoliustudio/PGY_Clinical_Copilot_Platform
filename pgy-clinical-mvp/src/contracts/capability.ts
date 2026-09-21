@@ -25,6 +25,8 @@ export interface CapabilityDescriptor {
   toolIds: string[];
   /** H14：该能力是否为治疗形式能力（由 manifest 数据标注）。Core 不做业务判断。 */
   treatmentSpecific?: boolean;
+  /** H15.5.3：该能力是否要求产出治疗形式决策（如膏方）。由 manifest 数据标注，Core 不识别业务词。 */
+  requiresTreatmentFormDecision?: boolean;
 }
 
 export interface ResolvedCapability {
@@ -33,4 +35,6 @@ export interface ResolvedCapability {
   reason: string;
   /** H14：从 CapabilityDescriptor 透传，供治疗检索观测使用。 */
   treatmentSpecific?: boolean;
+  /** H15.5.3：从 CapabilityDescriptor 透传，供 completion contract 合并使用。 */
+  requiresTreatmentFormDecision?: boolean;
 }

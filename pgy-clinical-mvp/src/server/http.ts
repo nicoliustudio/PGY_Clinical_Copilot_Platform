@@ -13,8 +13,26 @@ import { classifyAudit, type ClinicalAudit } from '../ui/audit.js';
 import { getGold } from '../eval/metrics.js';
 import { isAsrEnabled, relayAsr } from './asr.js';
 import { getTrace } from '../trace.js';
+import { json, readBody } from './http-utils.js';
+import {
+  clearedCookieValue,
+  ensureBootstrapUsers,
+  revokeSession,
+  sessionCookieValue,
+  sessionFromRequest,
+  sessionTokenFromRequest,
+  toSessionUser,
+  verifyCredentials,
+  type SessionUser,
+} from './auth.js';
 
 const UI_ROOT = fileURLToPath(new URL('../../ui/', import.meta.url));
+
+/** 无需登录即可访问：健康探针、登录页及其静态资源、登录接口本身。 */
+const PUBLIC_PATHS = new Set(['/login', '/login.js', '/styles.css', '/logo.png', '/favicon.ico', '/api/health', '/api/auth/login']);
+
+/** 仅管理员可用：开发者/评测面（医生端视图不暴露）。 */
+const ADMIN_ONLY_PREFIXES = ['/api/eval/'];
 
 interface RunRecord {
   runId: string;
@@ -42,30 +60,64 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
-function json(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(body));
-}
-
-function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let raw = '';
-    req.on('data', (chunk) => (raw += chunk));
-    req.on('end', () => {
-      if (!raw) return resolve({});
-      try {
-        resolve(JSON.parse(raw) as Record<string, unknown>);
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
 function sse(res: ServerResponse, event: string, data: unknown): void {
   if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/* ---------- 认证：登录 / 登出 / 当前会话 ---------- */
+
+/** 已登录用户专用响应头，避免中间层缓存到他人会话。 */
+function noStore(res: ServerResponse): void {
+  res.setHeader('Cache-Control', 'no-store');
+}
+
+async function handleAuthLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(req);
+  } catch {
+    return json(res, 400, { detail: '请求体不是合法 JSON' });
+  }
+  const loginName = typeof body.loginName === 'string' ? body.loginName.trim() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!loginName || !password) return json(res, 400, { detail: '请输入账号与密码' });
+
+  const user = verifyCredentials(loginName, password);
+  if (!user) return json(res, 401, { detail: '账号或密码不正确' });
+
+  noStore(res);
+  res.setHeader('Set-Cookie', sessionCookieValue(user));
+  json(res, 200, { user: toSessionUser(user) });
+  console.log(`[pgy] 登录成功：${user.loginName}（${user.role}）`);
+}
+
+function handleAuthLogout(req: IncomingMessage, res: ServerResponse): void {
+  revokeSession(sessionTokenFromRequest(req));
+  noStore(res);
+  res.setHeader('Set-Cookie', clearedCookieValue());
+  json(res, 200, { ok: true });
+}
+
+function handleAuthMe(res: ServerResponse, session: SessionUser | null): void {
+  noStore(res);
+  if (!session) return json(res, 401, { detail: '未登录' });
+  json(res, 200, { user: session });
+}
+
+/** 未登录时：页面跳登录页，接口返回 401（前端据此跳转）。 */
+function rejectUnauthenticated(req: IncomingMessage, res: ServerResponse, pathname: string): void {
+  if (pathname.startsWith('/api/') || pathname.startsWith('/ws/')) {
+    return json(res, 401, { detail: '未登录' });
+  }
+  res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' });
+  res.end();
+}
+
+async function serveLoginPage(res: ServerResponse): Promise<void> {
+  const content = await readFile(path.join(UI_ROOT, 'login.html'));
+  res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-store' });
+  res.end(content);
 }
 
 async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
@@ -262,12 +314,32 @@ async function handleKnowledgeSource(req: IncomingMessage, res: ServerResponse, 
 }
 
 export async function startServer(port = Number(process.env.APP_PORT ?? 8787)): Promise<ReturnType<typeof createServer>> {
+  const bootstrapped = ensureBootstrapUsers();
+  if (bootstrapped.created.length) {
+    console.log(`[pgy] 已建立账号：${bootstrapped.created.join('、')}`);
+  }
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const pathname = url.pathname;
 
     try {
+      // 1) 无需登录的入口
       if (pathname === '/api/health' && req.method === 'GET') return await handleHealth(res);
+      if (pathname === '/api/auth/login' && req.method === 'POST') return await handleAuthLogin(req, res);
+      if (pathname === '/login' && req.method === 'GET') return await serveLoginPage(res);
+
+      // 2) 会话判定：除白名单外一律要求登录
+      const session = sessionFromRequest(req);
+      if (pathname === '/api/auth/me' && req.method === 'GET') return handleAuthMe(res, session);
+      if (pathname === '/api/auth/logout' && req.method === 'POST') return handleAuthLogout(req, res);
+      if (!session && !PUBLIC_PATHS.has(pathname)) return rejectUnauthenticated(req, res, pathname);
+
+      // 3) 角色判定：评测/开发者面仅管理员可用
+      if (session && ADMIN_ONLY_PREFIXES.some((p) => pathname.startsWith(p)) && session.role !== 'admin') {
+        return json(res, 403, { detail: '仅管理员可访问该功能' });
+      }
+
       if (pathname === '/api/run/stream' && req.method === 'POST') return await handleRunStream(req, res);
       if (pathname === '/api/traces' || pathname.startsWith('/api/traces/')) return await handleTraces(req, res, pathname);
       if (pathname === '/api/eval/cases' && req.method === 'GET') return await handleEvalCases(res);
@@ -283,7 +355,12 @@ export async function startServer(port = Number(process.env.APP_PORT ?? 8787)): 
     }
   });
 
-  const wss = new WebSocketServer({ server, path: '/ws/asr' });
+  // 语音 WebSocket 与 HTTP 共用同一会话：升级握手时校验签名 Cookie。
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws/asr',
+    verifyClient: (info: { req: IncomingMessage }) => sessionFromRequest(info.req) !== null,
+  });
   wss.on('connection', (ws) => relayAsr(ws));
 
   await new Promise<void>((resolve) => server.listen(port, resolve));
