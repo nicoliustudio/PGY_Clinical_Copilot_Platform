@@ -17,7 +17,7 @@ $root   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $key    = Join-Path $root '.deploy\pgy_deploy'
 $remote = 'root@101.132.42.13'
 $dir    = '/opt/pgy-x1'
-$url    = 'https://www.pgytcm.com/'
+$deployKey = '/root/.ssh/deploy_x1'
 $sshOpt = @('-i', $key, '-o', 'StrictHostKeyChecking=accept-new')
 
 if (-not (Test-Path $key)) { throw "缺少 SSH 密钥: $key" }
@@ -59,7 +59,7 @@ if ($SyncAssets) {
 }
 
 Write-Host '[deploy] [3/5] 服务器 git pull（增量传输，仅差异文件）...'
-Invoke-Remote "cd $dir && git pull --ff-only origin main"
+Invoke-Remote "cd $dir && GIT_SSH_COMMAND='ssh -i $deployKey -o StrictHostKeyChecking=accept-new' git pull --ff-only origin main"
 
 Write-Host '[deploy] [4/5] 服务器 docker 重建并启动（首次约 3-6 分钟，缓存命中约 30 秒）...'
 Invoke-Remote "cd $dir && docker compose up -d --build"
@@ -70,5 +70,6 @@ Invoke-Remote "cd $dir && docker compose ps"
 Invoke-Remote "curl -fsS http://127.0.0.1:8002/api/health"
 
 Write-Host ''
-Write-Host "[deploy] 完成。请确认：$url（登录页 /login ／ 需账号密码）"
+Write-Host "[deploy] 完成。X1 入口：https://www.pgytcm.com:8443/（登录页 /login，需账号密码）"
+Write-Host '[deploy]   ※ 443 因阿里云安全组未放行 + 域名未备案暂不可用，详见 DEPLOYMENT.md §8.5'
 Write-Host '[deploy] 旧平台入口：https://101.132.42.13:8443'
