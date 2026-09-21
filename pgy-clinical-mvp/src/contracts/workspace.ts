@@ -187,6 +187,17 @@ export interface DiseaseAssessment {
   version: number;
 }
 
+export interface TreatmentFormDecision {
+  kind: 'gaofang';
+  disposition: 'CURRENTLY_SUITABLE' | 'TREAT_FIRST_THEN_GAOFANG' | 'CURRENTLY_NOT_SUITABLE';
+  statement: string;
+  sourceEvidenceRefs: string[];
+  /** Case-derived advisory only; never changes BaseFormula authority. */
+  advisoryComposition?: string[];
+  preparation?: string;
+  usage?: string;
+}
+
 export interface TreatmentPlan {
   primaryPrinciple: string;
   adjunctPrinciples?: string[];
@@ -194,6 +205,8 @@ export interface TreatmentPlan {
   priority?: string;
   rationale?: string;
   evidenceRefs: string[];
+  /** H15.5.2: treatment-form advisory, kept separate from canonical BaseFormula. */
+  treatmentFormDecision?: TreatmentFormDecision;
   version: number;
 }
 

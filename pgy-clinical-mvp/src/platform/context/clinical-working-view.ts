@@ -2,7 +2,7 @@ import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
 import type { ClinicalWorkspace, DecisionState, PatternAssessment } from '../../contracts/workspace.js';
 import type { FormulaRetrievalInfo, RecentRetrievalFeedback } from '../../contracts/execution.js';
 import { buildDecisionState } from '../workspace/decision-state-projection.js';
-import { checkClinicalCompletion, checkClinicalCoreCompletion } from '../workspace/clinical-workspace.js';
+import { checkClinicalCompletion, checkClinicalCoreCompletion, computeClinicalClosure, type ClinicalClosureState } from '../workspace/clinical-workspace.js';
 
 /**
  * ClinicalWorkingView —— Agent 每一步默认看到的「目标驱动工作上下文」。
@@ -66,6 +66,8 @@ export interface ClinicalWorkingView {
   clinicalCompletionState: ClinicalCompletionState;
   /** H15.2.9：formula 决策的紧凑事实状态（非医学指令）。 */
   formulaDecisionState: FormulaDecisionState;
+  /** H15.5.1：确定性临床收敛边界（非医学指令，非 Agent 决定）。 */
+  clinicalClosureState: ClinicalClosureState;
 }
 
 export interface ClinicalCompletionState {
@@ -171,6 +173,7 @@ export function buildClinicalWorkingView(
     retrievalFeedback,
     clinicalCompletionState: buildClinicalCompletionState(workspace),
     formulaDecisionState: buildFormulaDecisionState(workspace, retrievalFeedback),
+    clinicalClosureState: computeClinicalClosure(workspace),
   };
 }
 
@@ -279,6 +282,16 @@ function renderFormulaDecisionState(s: FormulaDecisionState): string {
   ].join('\n');
 }
 
+function renderClinicalClosureState(s: ClinicalClosureState): string {
+  if (!s.required) return 'not required';
+  return [
+    'REQUIRED — clinical core formed + non-urgent + candidate/evidence surface available.',
+    'Stop broad knowledge.search / background retrieval.',
+    'Proceed to a clinical decision: focused candidate assessment / selection / review / modification, then proposal.submit.',
+    'Patient-specific unavailable investigations (CT / CRP / 影像 / 活动度 / 出血量等) are NOT tool-resolvable → carry as missing_information + reviewRequired, NOT clarification-only.',
+  ].join('\n');
+}
+
 /** 将 WorkingView 渲染为 Agent 上下文片段。 */
 export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
   const block = (title: string, body: string) => `## ${title}\n${body}`;
@@ -302,6 +315,7 @@ export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
     block('Retrieval Feedback', renderRetrievalFeedback(view.retrievalFeedback)),
     block('Clinical Completion State', renderClinicalCompletionState(view.clinicalCompletionState)),
     block('Formula Decision State', renderFormulaDecisionState(view.formulaDecisionState)),
+    block('Clinical Closure', renderClinicalClosureState(view.clinicalClosureState)),
     block('Case Frame', renderCaseFrame(view.caseFrame)),
     block('Active Patient Hypotheses', renderHypotheses(view.leadingHypotheses)),
     block('Pattern Structure', renderPatternStructure(view.patternStructure)),

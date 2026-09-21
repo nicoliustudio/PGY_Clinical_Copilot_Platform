@@ -530,6 +530,23 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       priority: asString(payload.priority),
       rationale: asString(payload.rationale),
       evidenceRefs: asStringArray(payload.evidenceRefs),
+      treatmentFormDecision: (() => {
+        const raw = payload.treatmentFormDecision;
+        if (!raw || typeof raw !== 'object') return undefined;
+        const x = raw as Record<string, unknown>;
+        const disposition = asString(x.disposition);
+        const statement = asString(x.statement);
+        if (!statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_GAOFANG', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
+        return {
+          kind: 'gaofang' as const,
+          disposition: disposition as 'CURRENTLY_SUITABLE' | 'TREAT_FIRST_THEN_GAOFANG' | 'CURRENTLY_NOT_SUITABLE',
+          statement,
+          sourceEvidenceRefs: asStringArray(x.sourceEvidenceRefs),
+          advisoryComposition: asStringArray(x.advisoryComposition),
+          preparation: asString(x.preparation),
+          usage: asString(x.usage),
+        };
+      })(),
       version: this.events.length + 1,
     };
     return true;
@@ -897,6 +914,35 @@ export function checkClinicalCoreCompletion(workspace: ClinicalWorkspace): Clini
   if (spine.patternHypothesisRefs.length === 0) missing.push('formalHypotheses');
   if (!spine.patternAssessmentRef) missing.push('patternAssessment');
   return { ok: missing.length === 0, missing };
+}
+
+/**
+ * H15.5.1 Deterministic Clinical Closure —— 最小收敛边界（非 Agent 决定、非医学判断）。
+ * 只确定：当前是否还有「合法的信息获取动作」，还是必须进入临床决策与提交。
+ * 触发条件（全部满足）：
+ *   - non-urgent（safetyDisposition != 'urgent'，不降低 H15.4 Safety）
+ *   - clinical core 已形成（disease/pattern/treatment 最低 spine）
+ *   - 已有 formula candidate + evidence surface 支撑下一步临床决策
+ * 语义：closure 只压缩「broad knowledge.search / 泛检索」，不阻止 focused 决策动作。
+ */
+export interface ClinicalClosureState {
+  required: boolean;
+  reason?: string;
+}
+
+export function computeClinicalClosure(workspace: ClinicalWorkspace): ClinicalClosureState {
+  if (workspace.safetyDisposition === 'urgent') return { required: false };
+  const core = checkClinicalCoreCompletion(workspace);
+  if (!core.ok || !workspace.clinicalDecisionSpine.treatmentPlan) return { required: false };
+  const hasFormulaCandidate = workspace.candidates.some((c) => c.kind === 'formula');
+  const hasEvidence = workspace.evidenceState.evidenceItems.length > 0;
+  if (hasFormulaCandidate && hasEvidence) {
+    return {
+      required: true,
+      reason: 'clinical core formed + non-urgent + candidate/evidence surface available',
+    };
+  }
+  return { required: false };
 }
 
 /** H15.2：某 evidence ref 是否为 patient-derived。 */

@@ -27,7 +27,7 @@ import { buildEvidenceProjection } from '../../platform/workspace/evidence-proje
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
-import { checkClinicalCompletion } from '../../platform/workspace/clinical-workspace.js';
+import { checkClinicalCompletion, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
@@ -75,10 +75,37 @@ function capabilityStateKey(context: RuntimeContext): string {
   return `caps:${[...context.capabilities.map((c) => c.id)].sort().join(',')}`;
 }
 
+/** Tools whose result/validity depends on mutable Runtime/Workspace state. */
+function isStatefulLedgerTool(id: string): boolean {
+  return id === 'capability.activate'
+    || id === 'knowledge.search'
+    || id === 'knowledge.search_cards'
+    || id === 'formula.search_normative'
+    || id === 'formula.search_candidates'
+    || id === 'formula.get_modification_evidence'
+    || id === 'proposal.submit'
+    || id.startsWith('workspace.');
+}
+
+function scopeStateKey(context: RuntimeContext): string {
+  return `scopes:${[...context.knowledgeScopes].sort().join(',')}`;
+}
+
+function runtimeStateKey(context: RuntimeContext): string {
+  return `workspace:${context.workspaceStore.version}|${scopeStateKey(context)}`;
+}
+
+function ledgerStateKeyFor(id: string, context: RuntimeContext): string | undefined {
+  if (id === 'capability.discover') return capabilityStateKey(context);
+  if (id === 'knowledge.get_source' || id === 'knowledge.get_asset') return scopeStateKey(context);
+  if (isStatefulLedgerTool(id)) return runtimeStateKey(context);
+  return undefined;
+}
+
 function buildTools(context: RuntimeContext, bindings: AiSdkToolBindings, ledger: ToolCallLedger): ToolSet {
   const tools: ToolSet = {};
   for (const [id, factory] of Object.entries(bindings)) {
-    const stateKey = id === 'capability.discover' ? () => capabilityStateKey(context) : undefined;
+    const stateKey = () => ledgerStateKeyFor(id, context) ?? '';
     tools[toApiToolName(id)] = wrapToolWithLedger(id, factory(context), ledger, stateKey);
   }
   return tools;
@@ -112,6 +139,46 @@ function activeToolIds(context: RuntimeContext, bindings: AiSdkToolBindings, mod
     allowed.add('proposal.submit');
   }
   return [...allowed].filter((id) => Boolean(bindings[id])).map((id) => toApiToolName(id));
+}
+
+function hasRequiredTreatmentSpecificEvidence(context: RuntimeContext): boolean {
+  const gaofangActive = context.workspace.activeCapabilities.includes('gaofang');
+  if (!gaofangActive) return true;
+  return context.workspace.evidenceState.evidenceItems.some((e) => e.sourceType === 'GAOFANG');
+}
+
+/**
+ * Decision closure is not an EarlyStop engine. It only removes further exploration once
+ * the clinical core, candidate surface, and treatment-specific evidence are already present.
+ */
+function closureAwareActiveToolIds(
+  context: RuntimeContext,
+  bindings: AiSdkToolBindings,
+  mode: 'harness' | 'classic',
+): string[] {
+  const all = activeToolIds(context, bindings, mode);
+  const closure = computeClinicalClosure(context.workspace);
+  if (!closure.required || !hasRequiredTreatmentSpecificEvidence(context)) return all;
+
+  const completion = checkClinicalCompletion(context.workspace);
+  if (completion.ok) {
+    const submitOnly = new Set(['proposal.submit']);
+    return all.filter((x) => submitOnly.has(fromApiToolName(x)));
+  }
+
+  const selectionReady = Boolean(context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef);
+  const allowed = new Set([
+    'workspace.consider_hypotheses',
+    'workspace.focus_candidates',
+    'workspace.record_candidate_assessment',
+    'workspace.record_candidate_exclusion',
+    'workspace.record_deliberation',
+    'formula.get_evidence',
+    'formula.validate',
+    'proposal.submit',
+  ]);
+  if (selectionReady) allowed.add('formula.get_modification_evidence');
+  return all.filter((x) => allowed.has(fromApiToolName(x)));
 }
 
 function buildSearchHistory(ledger: ToolCallLedger): string {
@@ -507,7 +574,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         const version = context.workspaceStore.version;
         cachedDecisionState = projectionCache.getDecisionState(version, context.workspace, context.strategy).decisionState;
         return {
-          activeTools: activeToolIds(context, bindings, mode),
+          activeTools: closureAwareActiveToolIds(context, bindings, mode),
           instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback(), cachedDecisionState),
           messages: compactAgentMessages(initialMessages, steps),
         };

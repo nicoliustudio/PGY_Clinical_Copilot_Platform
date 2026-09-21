@@ -12,7 +12,7 @@ import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contr
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkClinicalCompletion, checkClinicalCoreCompletion } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, findUnresolvedFormalHypotheses, validatePatternAssessmentRefs, checkClinicalCompletion, checkClinicalCoreCompletion, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
@@ -148,6 +148,15 @@ const treatmentPlanSchema = z.object({
   priority: z.string().optional(),
   rationale: z.string().optional(),
   evidenceRefs: z.array(z.string()).optional(),
+  treatmentFormDecision: z.object({
+    kind: z.literal('gaofang'),
+    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_GAOFANG', 'CURRENTLY_NOT_SUITABLE']),
+    statement: z.string(),
+    sourceEvidenceRefs: z.array(z.string()),
+    advisoryComposition: z.array(z.string()).optional(),
+    preparation: z.string().optional(),
+    usage: z.string().optional(),
+  }).optional(),
 });
 
 const formulaSelectionSchema = z.object({
@@ -211,6 +220,16 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       fallbackReason: z.string().optional(),
     }),
     execute: async ({ query, topK, role, fallbackReason }) => {
+      // H15.5.1：确定性临床收敛边界 —— closure 时压缩 broad knowledge.search，不再泛检索。
+      const closure = computeClinicalClosure(context.workspace);
+      if (closure.required) {
+        return {
+          closureRequired: true,
+          message:
+            'Clinical closure reached: core formed + non-urgent + candidate/evidence surface available. Broad knowledge.search is curtailed. Proceed to a clinical decision via formula.get_evidence / workspace.record_deliberation / proposal.submit; patient-specific unavailable investigations go to missing_information + reviewRequired (not clarification-only).',
+          skippedQuery: query,
+        };
+      }
       const { hits, diagnostics } = await searchWithDiagnostics(query, topK ?? 10, context.knowledgeScopes, 'knowledge.search', { role, fallbackReason });
       addRetrievalDiagnostics(context.runId, { ...diagnostics, retrievalContext: buildRetrievalContext(context) });
       return hits;
@@ -225,9 +244,15 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '在当前已激活的 Runtime Catalog scope 中做 focused 检索：结合病例疾病上下文与现有 indexes 收敛候选后返回少量相关卡片。只返回卡片级摘要 + asset_id + 知识相关性排序；选定需要佐证的具体证据后，再用 knowledge.get_asset 按 asset_id 精确获取完整资产。仅在相应业务能力已激活、且该证据能减少当前 open question 或支撑当前 treatment target 时才检索。',
     inputSchema: z.object({ query: z.string(), topK: z.number().optional() }),
     execute: async ({ query, topK }) => {
-      const caseDiseaseContext = context.understanding.facts
-        .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
-        .map((f) => f.value);
+      const currentDisease = context.workspace.clinicalDecisionSpine.diseaseAssessment;
+      const caseDiseaseContext = currentDisease
+        ? [
+            ...(currentDisease.diseaseRefs ?? []),
+            currentDisease.statement,
+          ].filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+        : context.understanding.facts
+            .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
+            .map((f) => f.value);
       const { cards, telemetry } = searchRuntimeCards(query, context.knowledgeScopes, {
         diseaseContext: caseDiseaseContext,
         topK,
@@ -295,9 +320,15 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '读取《中医病证诊断疗效标准（2024版）》及已启用的诊断知识 release 中某规范病名的诊断标准：病名定义、诊断依据、鉴别诊断、证候分类（每证含 criteria）、来源。按 source 分组返回，不 merge source text；不包含方剂、不比较患者、不给出最佳证型。',
     inputSchema: z.object({ disease: z.string() }),
     execute: async ({ disease }) => {
-      const caseDiseaseContext = context.understanding.facts
-        .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
-        .map((f) => f.value);
+      const currentDisease = context.workspace.clinicalDecisionSpine.diseaseAssessment;
+      const caseDiseaseContext = currentDisease
+        ? [
+            ...(currentDisease.diseaseRefs ?? []),
+            currentDisease.statement,
+          ].filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+        : context.understanding.facts
+            .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
+            .map((f) => f.value);
       return getDiseaseStandards(disease, { caseDiseaseContext });
     },
   }),
@@ -398,7 +429,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
   'formula.get_modification_evidence': (context) => tool({
     description: '基础方已选后，检索已有加减知识（medication_rules，仅 action=ADD）中与当前患者现症/病名/证型确定性匹配的加味证据。返回少量候选（含来源与患者证据 ref）。检索到不等于采用；是否写入 ModificationPlan 由你决定。所有命中均为 ADVISORY + 需显式患者证据，不自动加味。',
     inputSchema: z.object({ topK: z.number().optional() }),
-    execute: async ({ topK }) => searchModificationEvidence(context.workspace, topK ?? 3),
+    execute: async ({ topK }) => {
+      const selected = context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
+      if (!selected) {
+        return { notReady: true, code: 'BASE_FORMULA_REQUIRED', message: 'Select a base formula before retrieving modification evidence.' };
+      }
+      return searchModificationEvidence(context.workspace, topK ?? 3);
+    },
   }),
   'formula.validate': (context) => tool({
     description: '校验 source_id + formula_id + composition 是否绑定于同一条 P1 规范记录。也可只传 candidateId，Harness 内部 canonical hydrate 后校验。',
@@ -554,6 +591,18 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '当临床决策已充分时调用，提交最终 Proposal 并立即停止。只提交你的选择（mode + disease/syndrome/treatment + 可选 candidate_ref/uncertainty）；formula 的 sourceId/formulaId/composition 与 safety 由 Runtime 自动填充，不要重复生成。',
     inputSchema: jsonSchema<ProposalSubmitInput>(PROPOSAL_SUBMIT_JSON_SCHEMA, { validate: validateProposal }),
     execute: async (input) => {
+      // H15.5.1：确定性临床收敛边界 —— closure 时拒绝 clarification/conversation-only，强制进入 clinical 决策交付。
+      if (input.mode === 'clarification' || input.mode === 'conversation') {
+        const closure = computeClinicalClosure(context.workspace);
+        if (closure.required) {
+          return {
+            notReady: true,
+            code: 'CLINICAL_CLOSURE_REQUIRED',
+            message:
+              'clinical closure reached: core formed + non-urgent + candidate/evidence surface available. Do not clarify. Submit a clinical proposal, carrying remaining patient-specific unavailable investigations as missing_information + reviewRequired (not clarification-only).',
+          };
+        }
+      }
       const unresolved = findUnresolvedFormalHypotheses(context.workspace);
       if (unresolved.length > 0) {
         return {

@@ -2,6 +2,7 @@ import type { ProposalSubmitInput } from '../../contracts/result.js';
 import { proposalSubmitInputSchema } from '../../contracts/result.js';
 import type { DecisionState, ProposalDraft } from '../../contracts/workspace.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
+import { computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
 
 /**
  * H11 Minimal Finalization —— 把「已经形成的判断」序列化为最小 proposal 结构。
@@ -69,6 +70,10 @@ export function buildMinimalFinalizationPrompt(
   const focusedCandidateRefs = decisionState.currentFrontier;
   const criticalEvidenceRefs = decisionState.currentEvidenceRefs;
   const preservedUncertainty = decisionState.decisionChangingUnknowns;
+  const closure = computeClinicalClosure(context.workspace);
+  const closureInstruction = closure.required
+    ? 'Clinical closure is active. For a non-urgent case with a formed clinical core, do NOT output clarification/conversation merely because patient-specific tests or history are unavailable. Serialize the formed clinical advisory as mode=clinical and preserve unavailable items in uncertainty. Do not invent a candidate_ref if none was selected.'
+    : 'If the minimum clinical core truly cannot be formed from the available patient information, clarification is allowed.';
 
   return [
     '你的临床探索已结束（或达到资源上限）。现在只做一件事：把下面已经形成的判断序列化为一个合法的 proposal 结构。',
@@ -95,7 +100,7 @@ export function buildMinimalFinalizationPrompt(
     '## 输出要求',
     '只输出一个 JSON 对象。mode ∈ {conversation, clarification, urgent, clinical}。',
     'clinical 模式需要 disease.name / syndrome.name / treatment.text，可选 candidate_ref（优先用上述 selectedCandidateRef）/ uncertainty。',
-    '若信息不足以形成方药 proposal，选择 clarification（questions）。',
+    closureInstruction,
     '不要 markdown 代码块、不要解释文字。',
   ].join('\n');
 }

@@ -1,23 +1,47 @@
-import type { ClinicalWorkspace, ProposalDraft } from '../../contracts/workspace.js';
+import type { ClinicalWorkspace, ProposalDraft, TreatmentFormDecision } from '../../contracts/workspace.js';
+
+function renderTreatmentFormDecision(decision?: TreatmentFormDecision): string {
+  if (!decision) return '';
+  const parts = [
+    `治疗形式（膏方）: ${decision.disposition}`,
+    decision.statement,
+  ];
+  if (decision.advisoryComposition?.length) parts.push(`膏方医案参考组成（CASE-DERIVED ADVISORY）: ${decision.advisoryComposition.join('；')}`);
+  if (decision.preparation) parts.push(`制法参考: ${decision.preparation}`);
+  if (decision.usage) parts.push(`用法参考: ${decision.usage}`);
+  if (decision.sourceEvidenceRefs.length) parts.push(`膏方证据: ${decision.sourceEvidenceRefs.join(', ')}`);
+  return parts.join('\n');
+}
 
 /**
- * H11 ProposalDraft —— 从 Workspace 只读投影「已经明确形成的最终判断」。
- *
- * 严格 serialization，不创造临床判断：
- * - syndrome 来自 leading hypothesis（active > first），不推断新证型。
- * - selectedCandidateRef 仅在 frontier 恰好一个 candidate 时给出，不在多候选间自行选择。
- * - uncertainty 直接复用 workspace.uncertainties。
- * - disease / treatment 当前 Workspace 未持久化，故保持 undefined（不编造）。
+ * ProposalDraft —— 只读投影 Workspace 中已经形成的临床判断。
+ * Runtime 只序列化，不在候选之间自行选择。
  */
 export function buildProposalDraft(workspace: ClinicalWorkspace): ProposalDraft {
+  const spine = workspace.clinicalDecisionSpine;
   const hypotheses = workspace.hypothesisState?.hypotheses ?? [];
   const leading = hypotheses.find((h) => h.status === 'active') ?? hypotheses[0];
+  const syndrome = workspace.patternAssessment?.primary?.statement ?? leading?.label;
+
+  const plan = spine.treatmentPlan;
+  const treatment = plan
+    ? [
+        plan.primaryPrinciple,
+        plan.treatmentTarget ? `治疗目标: ${plan.treatmentTarget}` : '',
+        plan.priority ? `主次: ${plan.priority}` : '',
+        plan.rationale ? `依据: ${plan.rationale}` : '',
+        renderTreatmentFormDecision(plan.treatmentFormDecision),
+      ].filter(Boolean).join('\n')
+    : undefined;
 
   const frontier = workspace.deliberationState?.frontier ?? [];
-  const selectedCandidateRef = frontier.length === 1 ? frontier[0] : undefined;
+  const selectedCandidateRef = spine.formulaSelection?.selectedCandidateRef
+    ?? (frontier.length === 1 ? frontier[0] : undefined);
 
   return {
-    syndrome: leading?.label,
+    disease: spine.diseaseAssessment?.statement,
+    syndrome,
+    treatment,
     selectedCandidateRef,
     uncertainty: (workspace.uncertainties ?? []).slice(),
   };

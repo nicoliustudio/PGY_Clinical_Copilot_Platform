@@ -330,9 +330,13 @@ export function searchRuntimeCards(
   const candidate = collectCandidateIds(query, options.diseaseContext ?? []);
   let pool = all;
   if (candidate.ids) {
-    pool = [...candidate.ids]
+    const scoped = [...candidate.ids]
       .map((id) => byId.get(id))
       .filter((c): c is RuntimeCard => c !== undefined);
+    // H15.5.2: a global index hit must not collapse an active-scope search to an empty pool.
+    // If the narrowed ids have no intersection with the currently active scopes, fall back to
+    // relevance scoring across the active-scope catalog instead of returning zero cards.
+    if (scoped.length > 0) pool = scoped;
   }
 
   const scored = pool.map((card) => toHit(card, query)).sort((a, b) => b.relevance - a.relevance);
