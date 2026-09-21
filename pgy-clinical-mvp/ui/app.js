@@ -36,6 +36,7 @@ const state = {
   streaming: false,
   liveEvents: [],
   lifecycle: null,        // 收敛生命周期阶段
+  openGroups: new Set(),  // 展开中的推理过程节点（跨重渲染保持）
 };
 
 /* ---------- 视图切换 ---------- */
@@ -49,8 +50,32 @@ function switchView(view) {
 $('#viewToggle').addEventListener('click', () => switchView('admin'));
 $('#viewToggleBack').addEventListener('click', () => switchView('user'));
 
+/* ---------- 左栏 / 右栏 收起 ---------- */
+const PANEL_KEYS = { side: 'pgy.panel.side', ws: 'pgy.panel.workspace' };
+
+function setSideCollapsed(collapsed) {
+  $('#userView').classList.toggle('side-collapsed', collapsed);
+  $('#sideExpand').classList.toggle('hidden', !collapsed);
+  try { localStorage.setItem(PANEL_KEYS.side, collapsed ? '1' : '0'); } catch { /* 隐私模式忽略 */ }
+}
+function setWorkspaceCollapsed(collapsed) {
+  $('#userView').classList.toggle('ws-collapsed', collapsed);
+  $('#wpExpand').classList.toggle('hidden', !collapsed);
+  try { localStorage.setItem(PANEL_KEYS.ws, collapsed ? '1' : '0'); } catch { /* 隐私模式忽略 */ }
+}
+$('#sideCollapse').addEventListener('click', () => setSideCollapsed(true));
+$('#sideExpand').addEventListener('click', () => setSideCollapsed(false));
+$('#wpCollapse').addEventListener('click', () => setWorkspaceCollapsed(true));
+$('#wpExpand').addEventListener('click', () => setWorkspaceCollapsed(false));
+(function restorePanels() {
+  try {
+    setSideCollapsed(localStorage.getItem(PANEL_KEYS.side) === '1');
+    setWorkspaceCollapsed(localStorage.getItem(PANEL_KEYS.ws) === '1');
+  } catch { /* 忽略 */ }
+})();
+
 const EMPTY_STATE_HTML = `<div class="empty-state" id="emptyState">
-  <div class="empty-logo">蒲</div>
+  <img class="empty-logo" src="/logo.png" alt="蒲公英中医" />
   <h2>中医临床 Copilot</h2>
   <p>粘贴病例，Agent 自主辨证、检索证据、比较候选方，再由 Authority Kernel 校验。右侧可展开完整推理过程，不隐藏、不黑箱。</p>
 </div>`;
@@ -106,9 +131,12 @@ function showThinking() {
   const div = document.createElement('div');
   div.className = 'msg assistant thinking-msg';
   div.innerHTML = `
-    <div class="bot-avatar">蒲</div>
+    <img class="bot-avatar" src="/logo.png" alt="蒲公英中医" />
     <div class="assistant-content">
-      <div class="thinking"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="thinking-text">正在理解病例…</span></div>
+      <div class="thinking-card">
+        <div class="thinking"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="thinking-text">正在理解病例…</span></div>
+        <div class="thinking-bar"><i></i></div>
+      </div>
       <div class="live-activity"></div>
     </div>`;
   $('#chat').appendChild(div);
@@ -126,37 +154,104 @@ function toolCategory(name) {
   return name;
 }
 
-/**
- * 默认折叠：相同类别连续工具调用合并为一行摘要，点击展开才显示真实 tool name / query / result / ms。
- * 开发者 Trace 始终保留完整原始调用。
- */
-function renderLiveActivity() {
-  const box = document.querySelector('.thinking-msg:last-child .live-activity');
-  if (!box) return;
-  const tools = state.liveEvents.filter((x) => x.type === 'tool').map((x) => x.data);
+/** 阶段配色：仅用于推理过程节点的时间线标记。 */
+const CATEGORY_TONE = {
+  '发现能力': 'a', '检索临床证据': 'b', '核对来源': 'b', '检索候选方': 'c',
+  '校验方剂出处': 'c', '比较候选': 'd', '生成临床建议': 'e',
+};
+
+/** 连续同类工具调用合并为一组，作为推理过程的一个节点。 */
+function groupTools(tools) {
   const groups = [];
   for (const t of tools) {
     const cat = toolCategory(t.toolName);
     const last = groups[groups.length - 1];
-    if (last && last.cat === cat) { last.count += 1; last.items.push(t); }
-    else groups.push({ cat, count: 1, items: [t] });
+    if (last && last.cat === cat) last.items.push(t);
+    else groups.push({ cat, items: [t] });
   }
-  box.innerHTML = groups.map((g, i) => {
-    const label = g.count > 1 ? `${esc(g.cat)} × ${g.count}` : esc(g.cat);
-    const raw = g.items.map((t) => `
-      <div class="trace-tool">
-        <div class="tool-name">${esc(t.toolName)}${t.reused ? ' <span class="muted">(reused)</span>' : ''}</div>
-        <div class="tool-meta">${t.ms}ms${t.error ? ' · ' + esc(t.error) : ''}</div>
-        <pre>${esc(JSON.stringify(t.input, null, 2))}</pre>
-        ${t.output !== undefined ? `<pre>${esc(JSON.stringify(t.output, null, 2))}</pre>` : ''}
-      </div>`).join('');
-    return `<div class="live-group"><div class="live-group-head" data-live-group="${i}">${label}</div><div class="live-group-body hidden">${raw}</div></div>`;
-  }).join('');
-  box.scrollTop = box.scrollHeight;
+  return groups.map((g) => ({
+    ...g,
+    tone: CATEGORY_TONE[g.cat] || 'n',
+    totalMs: g.items.reduce((n, t) => n + (typeof t.ms === 'number' ? t.ms : 0), 0),
+  }));
 }
 
-function updateLiveActivity() {
-  renderLiveActivity();
+const VALUE_LIMIT = 160;
+/** 把工具入参 / 结果渲染为可读结构，避免整屏裸 JSON；完整原文仍在 Trace 中保留。 */
+function renderValue(v, depth = 0) {
+  if (v === null || v === undefined) return '<span class="j-null">—</span>';
+  if (typeof v === 'boolean') return `<span class="j-bool">${v}</span>`;
+  if (typeof v === 'number') return `<span class="j-num">${v}</span>`;
+  if (typeof v === 'string') {
+    return `<span class="j-str">${esc(v.length > VALUE_LIMIT ? v.slice(0, VALUE_LIMIT) + '…' : v)}</span>`;
+  }
+  if (depth >= 3) return `<span class="j-null">${esc(JSON.stringify(v).slice(0, VALUE_LIMIT))}…</span>`;
+  if (Array.isArray(v)) {
+    if (!v.length) return '<span class="j-null">[ ]</span>';
+    const head = v.slice(0, 6).map((x) => `<li>${renderValue(x, depth + 1)}</li>`).join('');
+    const rest = v.length > 6 ? `<li class="j-more">… 其余 ${v.length - 6} 项见 Trace</li>` : '';
+    return `<ul class="j-arr">${head}${rest}</ul>`;
+  }
+  const entries = Object.entries(v);
+  if (!entries.length) return '<span class="j-null">{ }</span>';
+  const rows = entries.slice(0, 12).map(([k, val]) =>
+    `<div class="j-row"><span class="j-key">${esc(k)}</span><span class="j-val">${renderValue(val, depth + 1)}</span></div>`
+  ).join('');
+  const rest = entries.length > 12 ? `<div class="j-more">… 其余 ${entries.length - 12} 个字段见 Trace</div>` : '';
+  return `<div class="j-obj">${rows}${rest}</div>`;
+}
+
+function toolCardHtml(t) {
+  const hasErr = t.error !== undefined && t.error !== null && t.error !== '';
+  const errText = typeof t.error === 'string' ? t.error : JSON.stringify(t.error ?? '');
+  return `
+    <div class="tool-card${hasErr ? ' err' : ''}">
+      <div class="tool-card-head">
+        <code class="tool-name">${esc(t.toolName)}</code>
+        <span class="tool-chip">${typeof t.ms === 'number' ? t.ms + 'ms' : '—'}</span>
+        ${t.reused ? '<span class="tool-chip reused">复用缓存</span>' : ''}
+        ${hasErr ? `<span class="tool-chip err">${esc(errText.slice(0, 120))}</span>` : ''}
+      </div>
+      ${t.input !== undefined ? `<div class="tool-io"><span class="io-key">参数</span><div class="io-val">${renderValue(t.input)}</div></div>` : ''}
+      ${t.output !== undefined ? `<div class="tool-io"><span class="io-key">结果</span><div class="io-val">${renderValue(t.output)}</div></div>` : ''}
+    </div>`;
+}
+
+/** 推理过程节点列表（默认折叠，仅保留阶段摘要）。 */
+function groupsHtml(tools, streaming = false) {
+  const groups = groupTools(tools);
+  return groups.map((g, i) => {
+    const occurrence = groups.slice(0, i).filter((x) => x.cat === g.cat).length;
+    const key = `${g.cat}#${occurrence}`;
+    const open = state.openGroups.has(key);
+    const isLast = i === groups.length - 1;
+    const body = g.items.map(toolCardHtml).join('');
+    return `
+      <div class="live-group" data-tone="${g.tone}"${streaming && isLast ? ' data-live="1"' : ''}>
+        <span class="lg-marker"><i class="lg-node"></i></span>
+        <div class="lg-main">
+          <button class="live-group-head${open ? ' open' : ''}" type="button" data-group-key="${esc(key)}" aria-expanded="${open}">
+            <span class="lg-label">${esc(g.cat)}</span>
+            ${g.items.length > 1 ? `<span class="lg-count">×${g.items.length}</span>` : ''}
+            <span class="lg-dur">${g.totalMs}ms</span>
+            <svg class="lg-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+          <div class="live-group-body${open ? '' : ' hidden'}">${body}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function liveTools() {
+  return state.liveEvents.filter((x) => x.type === 'tool').map((x) => x.data);
+}
+
+function renderLiveActivity() {
+  const box = document.querySelector('.thinking-msg:last-child .live-activity');
+  if (!box) return;
+  const tools = liveTools();
+  box.innerHTML = tools.length ? groupsHtml(tools, true) : '';
+  scrollChat();
 }
 
 const LIFECYCLE_LABELS = {
@@ -174,19 +269,75 @@ function renderLifecycle() {
   if (title) title.innerHTML = `<strong>临床推理中…</strong><span>${esc(label)}</span>`;
   const live = $('#liveStatus');
   if (live) live.textContent = label;
+  const thinkingText = document.querySelector('.thinking-msg:last-child .thinking-text');
+  if (thinkingText) thinkingText.textContent = label;
 }
 
-// 折叠组点击展开/收起（委托）
+// 推理过程节点 / 折叠组点击展开收起（委托）
 document.addEventListener('click', (e) => {
+  const proc = e.target.closest('[data-proc-toggle]');
+  if (proc) {
+    const node = proc.closest('.process-node');
+    const body = node?.querySelector('.process-body');
+    if (!body) return;
+    const hidden = body.classList.toggle('hidden');
+    node.classList.toggle('open', !hidden);
+    proc.setAttribute('aria-expanded', String(!hidden));
+    return;
+  }
   const head = e.target.closest('.live-group-head');
   if (!head) return;
   const body = head.parentElement.querySelector('.live-group-body');
-  if (body) body.classList.toggle('hidden');
+  if (!body) return;
+  const hidden = body.classList.toggle('hidden');
+  head.classList.toggle('open', !hidden);
+  head.setAttribute('aria-expanded', String(!hidden));
+  const key = head.dataset.groupKey;
+  if (key) { if (hidden) state.openGroups.delete(key); else state.openGroups.add(key); }
 });
+
+/** 用 trace 已记录的完整调用链还原折叠的推理过程节点（供历史会话回看）。 */
+function appendProcessNode(tools, totalMs) {
+  if (!tools?.length) return;
+  const div = document.createElement('div');
+  div.className = 'msg assistant process-node';
+  div.innerHTML = `
+    <img class="bot-avatar" src="/logo.png" alt="蒲公英中医" />
+    <div class="assistant-content">
+      <button class="process-head" type="button" data-proc-toggle aria-expanded="false">
+        <span class="proc-dot"></span><strong>推理过程</strong>
+        <span class="proc-meta">${tools.length} 次工具调用${totalMs ? ' · ' + totalMs + 'ms' : ''}</span>
+        <svg class="proc-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <div class="process-body hidden">${groupsHtml(tools)}</div>
+    </div>`;
+  $('#chat').appendChild(div);
+}
 
 function finishThinking(session) {
   const node = document.querySelector('.thinking-msg:last-child');
-  if (node) node.remove();
+  if (node) {
+    node.classList.remove('thinking-msg');
+    node.classList.add('process-node');
+    const content = node.querySelector('.assistant-content');
+    const activity = content.querySelector('.live-activity');
+    content.querySelector('.thinking-card')?.remove();
+    const tools = liveTools();
+    if (activity && tools.length) {
+      const head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'process-head';
+      head.setAttribute('data-proc-toggle', '');
+      head.setAttribute('aria-expanded', 'false');
+      head.innerHTML = `<span class="proc-dot"></span><strong>推理过程</strong>
+        <span class="proc-meta">${tools.length} 次工具调用${session.trace?.totalMs ? ' · ' + session.trace.totalMs + 'ms' : ''}</span>
+        <svg class="proc-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>`;
+      activity.classList.add('process-body', 'hidden');
+      content.insertBefore(head, activity);
+    } else {
+      node.remove();
+    }
+  }
   renderConclusion(session);
   renderWorkspace(session.workspace);
   renderTrace(session);
@@ -204,7 +355,7 @@ function failThinking(message) {
   }
   node.classList.remove('thinking-msg');
   const content = node.querySelector('.assistant-content');
-  content.querySelector('.thinking')?.remove();
+  content.querySelector('.thinking-card')?.remove();
 
   const block = document.createElement('div');
   block.className = 'assistant-block error-block';
@@ -217,6 +368,7 @@ function failThinking(message) {
 function renderChatFromSession(session) {
   $('#chat').innerHTML = '';
   appendUserMessage(session.trace.input);
+  appendProcessNode(session.trace.toolCalls, session.trace.totalMs);
   renderConclusion(session);
   $('#caseTitle').innerHTML = `<strong>问诊</strong><span>${esc(session.runId)} · ${esc(session.model)}</span>`;
 }
@@ -225,7 +377,7 @@ function renderConclusion(session) {
   const r = session.result;
   const div = document.createElement('div');
   div.className = 'msg assistant';
-  div.innerHTML = `<div class="bot-avatar">蒲</div><div class="assistant-content">${renderResult(r, session.authority)}</div>`;
+  div.innerHTML = `<img class="bot-avatar" src="/logo.png" alt="蒲公英中医" /><div class="assistant-content">${renderResult(r, session.authority)}</div>`;
   $('#chat').appendChild(div);
   scrollChat();
   updateSafety(r);
@@ -590,7 +742,7 @@ async function send() {
         if (data.asrEnabled === false) $('#mic').classList.add('hidden');
       } else if (event === 'tool') {
         state.liveEvents.push({ type: 'tool', data });
-        updateLiveActivity();
+        renderLiveActivity();
       } else if (event === 'workspace') {
         (data.events || []).forEach((e) => state.liveEvents.push({ type: 'workspace', data: e }));
       } else if (event === 'lifecycle') {

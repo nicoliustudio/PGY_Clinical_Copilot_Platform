@@ -13,23 +13,37 @@
   <!-- ============ 用户端 ============ -->
   <section id="userView" class="user-shell">
     <aside class="patient-panel">
-      <div class="pp-head">
-        <div class="brand">
-          <span class="brand-mark">蒲</span>
-          <div class="brand-copy"><strong>蒲公英中医</strong><span>Clinical Copilot</span></div>
+      <div class="pp-inner">
+        <div class="pp-head">
+          <div class="brand">
+            <img class="brand-mark" src="/logo.png" alt="蒲公英中医" />
+            <div class="brand-copy"><strong>蒲公英中医</strong><span>Clinical Copilot</span></div>
+          </div>
+          <div class="pp-head-actions">
+            <button class="icon-btn" id="newCase" title="新建病例" aria-label="新建病例">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+            <button class="icon-btn" id="sideCollapse" title="收起侧栏" aria-label="收起侧栏">
+              <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+            </button>
+          </div>
         </div>
-        <button class="icon-btn" id="newCase" title="新建病例">＋</button>
-      </div>
-      <div class="side-label">病例 / 会话</div>
-      <div class="session-list" id="sessionList"></div>
-      <div class="pp-foot">
-        <button class="text-btn" id="viewToggle">前往管理员端 →</button>
+        <div class="side-label">病例 / 会话</div>
+        <div class="session-list" id="sessionList"></div>
+        <div class="pp-foot">
+          <button class="text-btn" id="viewToggle">前往管理员端 →</button>
+        </div>
       </div>
     </aside>
 
     <div class="user-main">
       <header class="topbar">
-        <div class="case-title" id="caseTitle"><strong>新问诊</strong><span>输入病例开始临床推理</span></div>
+        <div class="topbar-left">
+          <button class="ghost-icon hidden" id="sideExpand" title="展开病例栏" aria-label="展开病例栏">
+            <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+          <div class="case-title" id="caseTitle"><strong>新问诊</strong><span>输入病例开始临床推理</span></div>
+        </div>
         <div class="topbar-right">
           <span class="model-chip" id="modelState">模型加载中…</span>
           <span class="safety-chip" id="safetyState"></span>
@@ -40,43 +54,56 @@
       <div class="content">
         <main class="chat" id="chat">
           <div class="empty-state" id="emptyState">
-            <div class="empty-logo">蒲</div>
+            <img class="empty-logo" src="/logo.png" alt="蒲公英中医" />
             <h2>中医临床 Copilot</h2>
             <p>粘贴病例，Agent 自主辨证、检索证据、比较候选方，再由 Authority Kernel 校验。右侧可展开完整推理过程，不隐藏、不黑箱。</p>
           </div>
         </main>
 
         <aside class="workspace-panel" id="workspacePanel">
-          <div class="wp-head">
-            <span>临床工作台</span>
-            <span class="wp-run-state" id="wpRunState">idle</span>
-          </div>
-          <nav class="wp-tabs" id="wpTabs">
-            <button data-tab="overview" class="active">概览</button>
-            <button data-tab="evidence">证据</button>
-            <button data-tab="hypotheses">证候</button>
-            <button data-tab="candidates">候选方</button>
-            <button data-tab="deliberation">权衡</button>
-          </nav>
-          <div class="wp-body" id="wpBody">
-            <div class="wp-empty">发送病例后，这里展示 Agent 的可观测推理状态。</div>
+          <div class="wp-inner">
+            <div class="wp-head">
+              <span>临床工作台</span>
+              <div class="wp-head-right">
+                <span class="wp-run-state" id="wpRunState">idle</span>
+                <button class="icon-btn sm" id="wpCollapse" title="收起工作台" aria-label="收起工作台">
+                  <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+                </button>
+              </div>
+            </div>
+            <nav class="wp-tabs" id="wpTabs">
+              <button data-tab="overview" class="active">概览</button>
+              <button data-tab="evidence">证据</button>
+              <button data-tab="hypotheses">证候</button>
+              <button data-tab="candidates">候选方</button>
+              <button data-tab="deliberation">权衡</button>
+            </nav>
+            <div class="wp-body" id="wpBody">
+              <div class="wp-empty">发送病例后，这里展示 Agent 的可观测推理状态。</div>
+            </div>
           </div>
         </aside>
+        <button class="ws-rail hidden" id="wpExpand" title="展开临床工作台" aria-label="展开临床工作台">
+          <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+          <span>临床工作台</span>
+        </button>
       </div>
 
       <div class="composer-wrap">
         <div class="live-status sr-only" id="liveStatus" aria-live="polite"></div>
-        <div class="composer">
-          <textarea id="input" rows="1" placeholder="粘贴病例，例如：患者月经过多半年…"></textarea>
-          <button class="round-btn mic" id="mic" title="语音输入">
-            <svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v4"/></svg>
-          </button>
-          <button class="round-btn send" id="send" title="发送">
-            <svg class="send-icon" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-            <span class="stop-square hidden"></span>
-          </button>
+        <div class="composer-col">
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="粘贴病例，例如：患者月经过多半年…"></textarea>
+            <button class="round-btn mic" id="mic" title="语音输入">
+              <svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v4"/></svg>
+            </button>
+            <button class="round-btn send" id="send" title="发送">
+              <svg class="send-icon" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+              <span class="stop-square hidden"></span>
+            </button>
+          </div>
+          <div class="composer-tip">Enter 发送 · Shift+Enter 换行 · 语音实时转写</div>
         </div>
-        <div class="composer-tip">Enter 发送 · Shift+Enter 换行 · 语音实时转写</div>
       </div>
     </div>
   </section>
