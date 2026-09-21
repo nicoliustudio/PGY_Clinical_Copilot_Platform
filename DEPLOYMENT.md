@@ -1,505 +1,391 @@
-# 生产部署实战手册（Docker + 远程 ECS + Nginx 反代 + 数据持久化）
+# 蒲公英中医 Clinical Copilot v1（X1）生产部署手册
 
-> 本文档由 **蒲公英中医 ClinicalCopilot v2.9** 的真实上线经验沉淀而成，所有命令、端口、卷名、配置项均在线上服务器验证过（阿里云 ECS `101.132.42.13`）。
-> 目标是**可复用到其他项目**：把"变量"替换掉，流程与坑位清单可直接照搬。
+> 本文档记录 **X1（本仓库）** 在阿里云 ECS `101.132.42.13` 上的真实上线过程，命令与配置均在线上验证过。
+> 与旧平台 v2.8 / v2.9 的经验一脉相承，但本项目是 **Node 单容器、无数据库** 形态，故拓扑与运维方式与之不同。
 
 ---
 
 ## 0. 一句话架构
 
 ```
-浏览器 ──HTTPS──> Nginx（宿主 443 / 8443，真实证书）
-                     │  proxy_pass http://127.0.0.1:8001
-                     ▼
-              Docker 网络 pgy_internal
-                ├─ app 容器（uvicorn :8000，仅绑定宿主 127.0.0.1:8001）
-                └─ db  容器（postgres:17-alpine :5432，不绑定宿主端口）
-                     └─ 命名卷 pgy-v29_pgy_pgdata → 唯一真实数据源
+浏览器 ──HTTPS:443 / 备用 8443──> 宿主 Nginx（真实证书 www.pgytcm.com）
+                                    │  proxy_pass http://127.0.0.1:8002
+                                    ▼
+                          Docker 容器 pgy-x1-app-1（Node 22 + tsx，:8787）
+                                    ├─ 只读挂载 /opt/pgy-x1/assets        → /app/assets        （知识库，185MB，不入 git）
+                                    ├─ 命名卷   pgy-x1_data               → /app/pgy-clinical-mvp/data      （账号+会话，唯一不可再生）
+                                    └─ 宿主目录 ./pgy-clinical-mvp/.kb-cache → /app/pgy-clinical-mvp/.kb-cache（向量索引，可重建）
 ```
 
-关键设计（三条铁律，直接决定安全性与可运维性）：
+三条铁律（与旧平台一致）：
 
-1. **数据库不暴露公网**：`db` 服务不写 `ports`，只在容器网络内可达。
-2. **应用只绑回环**：`127.0.0.1:${APP_PORT}:8000`，外网只能经 Nginx 进入，TLS/限流/审计集中在 Nginx 一层。
-3. **所有状态落到命名卷**：容器可随时销毁重建，数据不丢。
+1. **应用只绑回环**：`127.0.0.1:8002`，外网一律经 Nginx，TLS/限流集中在 Nginx 一层。
+2. **唯一不可再生数据进命名卷**：账号与会话（`pgy-x1_data`），不会被 `git clean` 或误删宿主目录带走。
+3. **密钥只在服务器 `.env`**：不进 git、不进镜像、不进日志。
 
 ---
 
-## 1. 部署架构分层的职责
+## 1. 与旧平台的隔离（四维全隔离）
 
-| 层 | 组件 | 职责 | 变更频率 |
+| 维度 | v2.8（已停） | v2.9（旧平台） | **X1（本项目）** |
 |---|---|---|---|
-| 代码/镜像 | `Dockerfile` + `docker compose build` | 可复现的运行环境 | 每次发版 |
-| 进程编排 | `docker-compose.yml` | 服务拓扑、健康依赖、卷与端口 | 低 |
-| 配置 | 服务器 `/opt/<项目>/.env` | 密钥、域名、开关（**不进 git**） | 视需要 |
-| 数据 | Docker 命名卷 | 数据库 / 缓存 / 研究数据 | 只增量 |
-| 入口 | 宿主 Nginx | TLS、反代、SSE/WS 透传 | 低 |
-| 发布 | `deploy-*.ps1` | 拉代码 → 重建 → 健康检查 | 每次发版 |
+| 部署目录 | `/opt/pgy-v28` | `/opt/pgy-v29` | **`/opt/pgy-x1`** |
+| Compose 项目名 | `pgy-v28` | `pgy-v29` | **`pgy-x1`** |
+| 容器名 | `pgy-v28-app-1` | `pgy-v29-app-1` / `pgy-v29-db-1` | **`pgy-x1-app-1`** |
+| 命名卷 | `pgy-v28_*` | `pgy-v29_*` | **`pgy-x1_data`** |
+| 宿主端口 | 8000 | 8001 | **8002** |
+| 域名入口 | — | `101.132.42.13:8443`（仅 IP） | **`www.pgytcm.com`（443 / 8443）** |
+
+> Compose 项目名 = 部署目录 basename。改名即换一套容器与卷，务必留有原目录再改名。
+
+**两平台共存状态**：v2.9 完全未动（仍监听 `127.0.0.1:8001`），X1 独立监听 `127.0.0.1:8002`，互不影响。
 
 ---
 
 ## 2. Dockerfile 设计要点
 
-参考 [Dockerfile](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/Dockerfile)，值得复制的做法：
+参考 [Dockerfile](file:///d:/self/pgyx1.0/PGYxv1.0/Dockerfile)：
 
-```dockerfile
-FROM python:3.13-slim
+| 做法 | 原因 |
+|---|---|
+| 基础镜像 `node:22-slim` | 与 `package.json` 的 `engines: node>=22` 对齐 |
+| **依赖层单独 COPY + `npm ci`** | 改业务代码不触发重装依赖 |
+| `npm ci --include=dev` | 运行时用 `tsx` 编译 TS，`tsx` 属 devDependencies；`NODE_ENV=production` 会默认跳过 dev 依赖 |
+| 非 root 用户 `pgy` | 容器内不以 root 跑业务 |
+| `HEALTHCHECK` → `/api/health` | 免登录探针，且校验 `knowledge.ok`；探针脚本见 [healthcheck.mjs](file:///d:/self/pgyx1.0/PGYxv1.0/deploy/healthcheck.mjs) |
+| `COPY deploy` | entrypoint / 健康检查脚本单独一层，改脚本不必重装依赖 |
+| `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com` | 国内构建提速 |
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/   # 国内构建提速，必须写死
-
-WORKDIR /app
-
-# 1) 非 root 运行：先建用户，最后再 USER 切换
-RUN groupadd --system pgy && useradd --system --gid pgy --home-dir /app pgy
-
-# 2) 依赖单独一层：requirements 不变则复用缓存，避免每次改代码都重装依赖
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-COPY . /app
-RUN mkdir -p /app/vector-cache && chmod +x /app/deploy/entrypoint.sh && chown -R pgy:pgy /app
-
-USER pgy
-EXPOSE 8000
-
-# 3) 容器自带健康检查，compose / 外部探针直接读状态
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=3).read()" || exit 1
-
-ENTRYPOINT ["/app/deploy/entrypoint.sh"]
-```
-
-配套 [.dockerignore](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/.dockerignore)：**必须排除 `.env`**，否则密钥会被烤进镜像层：
-
-```
-.git
-.env
-.env.*
-!.env.example
-**/__pycache__
-**/*.pyc
-*.zip
-```
+[.dockerignore](file:///d:/self/pgyx1.0/PGYxv1.0/.dockerignore) 必须排除：`.env`（密钥）、`assets/`（185MB 知识资产）、`.kb-cache/`（220MB 索引）、`data/`（账号）。二者合计 400MB，进镜像会拖慢每一次构建。
 
 ---
 
-## 3. 启动编排：entrypoint 决定"能不能起得来"
+## 3. entrypoint 启动序
 
-[entrypoint.sh](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/entrypoint.sh) 定义了标准四步启动序，强烈建议所有"Web + 数据库 + 外部依赖"的项目照抄这个骨架：
+参考 [entrypoint.sh](file:///d:/self/pgyx1.0/PGYxv1.0/deploy/entrypoint.sh)：
 
 ```
-① 等待数据库就绪（最多 60 次 × 1s，失败即 exit，不静默启动）
+① 校验 KB_RELEASE_DIR 存在（bind mount 配错/漏传 assets 是最常见事故，此处直接失败并给指引）
         ↓
-② alembic upgrade head（迁移在入口执行，不在 build 时执行）
+② 检测预构建索引是否存在（有则复用；无则提示首次检索将在线重建并消耗 embedding 额度，不阻断）
         ↓
-③ 检查/构建持久化向量索引（失败只 warn，保留降级路径，不阻断启动）
-        ↓
-④ exec uvicorn（exec 让 PID 1 变成应用，能正确接收 SIGTERM 优雅退出）
+③ exec node --import tsx src/server/index.ts（exec 让应用成为 PID 1，docker stop 才能优雅退出）
 ```
 
-要点解释：
+密钥缺失**不在这里校验**：`src/config.ts` 与 `src/server/auth.ts` 各自抛出明确错误（`缺少环境变量 X` / `缺少 APP_SECRET`），启动即失败，无需重复。
 
-- **① 用 Python 直连探活**，比 `wait-for-it.sh` 之类的外部脚本更少一个依赖：
-
-```sh
-python - <<'PY'
-import os,time
-from sqlalchemy import create_engine,text
-url=os.environ['DATABASE_URL']
-last=None
-for i in range(60):
-    try:
-        eng=create_engine(url,pool_pre_ping=True)
-        with eng.connect() as c: c.execute(text('SELECT 1'))
-        print('database ready'); break
-    except Exception as e:
-        last=e; print(f'waiting for database ({i+1}/60): {e}'); time.sleep(1)
-else:
-    raise SystemExit(f'database unavailable: {last}')
-PY
-```
-
-- **② 迁移放入口**：镜像自包含、可回滚；绝不在 build 阶段跑迁移（构建可能并行、可能无库可连）。
-- **③ 非核心能力要允许降级**：向量索引构建失败只打 warning，确定性检索兜底继续服务——**"能降级"比"全都能跑"更重要**。
-- **④ `exec` 不能省**：否则 PID 1 是 shell，`docker stop` 会退化成 10 秒后 SIGKILL，事务可能被打断。
-- **⑤ 加 `--proxy-headers --forwarded-allow-ips='*'`**：应用在 Nginx 后面才能拿到真实客户端 IP 与协议。
+`exec` 不能省：否则 PID 1 是 shell，`docker stop` 会退化成 10 秒后 SIGKILL。
 
 ---
 
-## 4. docker-compose.yml 设计要点
+## 4. docker-compose 要点
 
-参考 [docker-compose.yml](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/docker-compose.yml)：
-
-```yaml
-services:
-  db:
-    image: postgres:17-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: pgy
-      POSTGRES_USER: pgy
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}   # 变量缺失直接拒绝启动
-    volumes:
-      - pgy_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pgy -d pgy"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    networks: [pgy_internal]
-    # 注意：没有 ports —— 数据库不暴露宿主端口
-
-  app:
-    build: .
-    restart: unless-stopped
-    env_file: .env                                     # 配置外置，不进镜像
-    environment:
-      DATABASE_URL: postgresql+psycopg://pgy:${POSTGRES_PASSWORD}@db:5432/pgy   # 容器内用服务名 db，不是 localhost
-    depends_on:
-      db:
-        condition: service_healthy                     # 等健康检查通过，而非仅"启动"
-    ports:
-      - "127.0.0.1:${APP_PORT:-8000}:8000"             # 只绑回环
-    volumes:
-      - pgy_vector_cache:/app/vector-cache             # 持久化可重建缓存
-      - pgy_beta_data:/app/data/beta
-    networks: [pgy_internal]
-
-volumes: { pgy_pgdata: , pgy_vector_cache: , pgy_beta_data: }
-networks: { pgy_internal: }
-```
-
-必须守住的 6 条：
+参考 [docker-compose.yml](file:///d:/self/pgyx1.0/PGYxv1.0/docker-compose.yml)：
 
 | # | 规则 | 原因 |
 |---|---|---|
-| 1 | `db` 不写 `ports` | 数据库永不暴露公网 |
-| 2 | `app` 端口绑 `127.0.0.1` | 外网只能走 Nginx |
-| 3 | `${VAR:?err}` 强校验 | 密码/端口漏配时"启动失败"优于"带默认值跑起来" |
-| 4 | `depends_on: service_healthy` | 避免 app 先起、DB 未就绪导致入口脚本重试 |
-| 5 | 容器内连库用服务名 `db` | 写成 `localhost` 会在容器里连自己 |
-| 6 | **目录名即 Compose 项目名** | 卷名前缀 = 项目名；改目录名 = 换了一套空卷（见 §6） |
+| 1 | `ports: "127.0.0.1:8002:8787"` | 只绑回环；8000/8001 已被旧版占用 |
+| 2 | `env_file: pgy-clinical-mvp/.env` | **与应用 dotenv 读的是同一个文件**：`npm run serve` 与容器行为一致，不会出现两套配置漂移 |
+| 3 | 无 `db` 服务 | 本项目无数据库（会话与账号落文件） |
+| 4 | `./assets:/app/assets:ro` | 知识资产只读；容器工作目录是 `/app/pgy-clinical-mvp`，故 `.env` 里 `KB_RELEASE_DIR=../assets/...` 正好解析到它 |
+| 5 | `data:/app/pgy-clinical-mvp/data` | 不可再生数据 → 命名卷 |
+| 6 | `./pgy-clinical-mvp/.kb-cache:...` | 可重建数据 → 宿主目录，便于预传索引、随时替换 |
 
----
+**数据分级**（照抄旧平台结论，落到本项目）：
 
-## 5. 数据持久化：哪些数据必须活下来
-
-线上实际卷（`docker volume ls` 实测）：
-
-```
-pgy-v29_pgy_pgdata          # PostgreSQL 数据目录 —— 唯一不可再生数据
-pgy-v29_pgy_vector_cache    # 向量索引缓存 —— 可从知识库重建
-pgy-v29_pgy_beta_data       # 研究/盲测导出数据 —— 不入 git，需自行备份
-```
-
-分类原则：
-
-| 类型 | 例子 | 丢了会怎样 | 策略 |
+| 类型 | 本项目对应物 | 丢了会怎样 | 策略 |
 |---|---|---|---|
-| **不可再生** | 数据库（病例、医生账号、审计日志） | 灾难 | 定时 `pg_dump` + 异地保存 |
-| **可重建** | 向量索引缓存 | 首次启动变慢 | 挂卷复用即可，不必备份 |
-| **研究/一次性产物** | 盲测导出、去标识化数据 | 需重新跑 | 单独卷，按需导出 |
+| 不可再生 | 账号与会话（`pgy-x1_data`） | 需重新建档 | 每日 `pg_dump` 等价物：卷打包备份 |
+| 可重建 | 向量索引（`.kb-cache`） | 首次启动变慢 + 一次 embedding 开销 | 宿主目录按需替换，无需备份 |
+| 无需入库 | 知识资产（`assets/`） | 检索不可用 | 只读挂载，独立同步 |
 
-### 5.1 备份（推荐做法，本项目尚未自动化）
+---
 
-当前服务器 `crontab -l` 为空，**没有定时备份**——这是现存最大风险点。建议如下（宿主 crontab，每日 03:00）：
+## 5. 数据与备份
+
+### 5.1 现状（已自动化，补上了旧平台缺失的一环）
 
 ```bash
-# /etc/cron.daily/pgy-v29-backup
-#!/bin/sh
-set -eu
-STAMP=$(date +%F)
-mkdir -p /root/backups
-docker exec pgy-v29-db-1 pg_dump -U pgy -d pgy | gzip > /root/backups/pgy-v29-$STAMP.sql.gz
-find /root/backups -name 'pgy-v29-*.sql.gz' -mtime +14 -delete   # 本机保留 14 天
+# 每日 03:00 由 /etc/cron.d/pgy-x1-backup 触发
+cat /etc/cron.d/pgy-x1-backup
+# 0 3 * * * root /opt/pgy-x1/deploy/backup-x1.sh >/dev/null 2>&1
+
+sh /opt/pgy-x1/deploy/backup-x1.sh        # 手动试跑
+ls -lh /root/backups/                      # pgy-x1-data-YYYY-MM-DD.tgz（本机保留 14 天）
 ```
 
-再配一条**异地**同步（对象存储 `ossutil`/`rclone` 或另一台机器 `rsync`），遵循 3-2-1 原则：3 份副本、2 种介质、1 份离线。
+备份脚本 [backup-x1.sh](file:///d:/self/pgyx1.0/PGYxv1.0/deploy/backup-x1.sh) 只读挂载数据卷后用 `tar` 打包，产物内含 `users.json` 与 `sessions.json`。
 
-### 5.2 恢复演练（务必真的演练一次）
+**尚未做**：异地副本（3-2-1 原则）。建议加 `ossutil`/`rclone` 把 `/root/backups` 同步到对象存储。
+
+### 5.2 恢复演练（务必真跑一次）
 
 ```bash
-# 1) 停应用，保留 DB（避免写入半途污染）
-cd /opt/pgy-v29 && docker compose stop app
-# 2) 灌入备份
-gunzip -c /root/backups/pgy-v29-2026-09-20.sql.gz | docker exec -i pgy-v29-db-1 psql -U pgy -d pgy
-# 3) 起应用并验证
+ssh -i .deploy/pgy_deploy root@101.132.42.13
+cd /opt/pgy-x1 && docker compose stop app
+docker run --rm -v pgy-x1_data:/data -v /root/backups:/backup node:22-slim \
+  sh -c 'rm -rf /data/* && tar xzf /backup/pgy-x1-data-YYYY-MM-DD.tgz -C /data'
 docker compose start app
-curl -fsS http://127.0.0.1:8001/api/health/ready
+curl -fsS http://127.0.0.1:8002/api/health
 ```
 
-### 5.3 卷相关红线
+### 5.3 红线
 
-- **禁止** `docker compose down -v`：`-v` 会删除命名卷 = 删库。
-- **禁止**在 `docker-compose.yml` 里改卷名（如 `pgy_pgdata` → `pgy_pgdata_v2`）：compose 会创建一个空卷，表现为"数据全没了"。
-- 备份文件内含患者数据，**不得**上传到公开位置或提交到 git。
-- 定期清理构建缓存（线上实测 Build Cache 已 29GB）：`docker builder prune -f`、`docker image prune -f`。
+- **禁止** `docker compose down -v`：`-v` 会删掉命名卷 = 删掉全部账号。
+- **禁止**改 `docker-compose.yml` 里的卷名（`data` → `data_v2`）：Compose 会新建空卷，表现为"账号全没了"。
+- 备份产物含账号摘要与登录态，**不得**上传公开位置或提交 git。
+- `pgy-clinical-mvp/.kb-cache/` 是宿主目录，`git clean -xdf` 会删它（可重建，但下次检索会重新构建）。
 
 ---
 
-## 6. 多版本并行隔离（踩过坑才总结出来）
+## 6. 首次部署（本次实际执行的 6 步）
 
-线上同时存在 v2.8 与 v2.9 两套服务，做法是**四维全隔离**：
+### Step 1 · 服务器 SSH 部署密钥（只读）
 
-| 维度 | v2.8 | v2.9 |
+```bash
+# 服务器上生成（本次已生成 /root/.ssh/deploy_x1）
+ssh-keygen -t ed25519 -N '' -C 'pgy-x1 deploy key' -f /root/.ssh/deploy_x1
+cat /root/.ssh/deploy_x1.pub
+```
+
+公钥登记到仓库 `Settings → Deploy keys`（本次通过 GitHub API 添加，id 163923433，`read_only: true`），之后：
+
+```bash
+GIT_SSH_COMMAND='ssh -i /root/.ssh/deploy_x1 -o StrictHostKeyChecking=accept-new' \
+  git clone git@github.com:nicoliustudio/PGY_Clinical_Copilot_Platform.git /opt/pgy-x1
+```
+
+> 注意：本仓库为**公开仓库**，clone 本身不需要凭据，但服务器访问 GitHub 的 HTTPS(443) 不稳定（实测超时），SSH(22) 正常 —— 因此统一走 SSH。
+
+### Step 2 · 知识资产上服务器（git 里没有）
+
+`assets/` 被 `.gitignore` 排除（版权原文 + 评测 gold + 真实病例），必须单独同步。运行时只读两处：`releases/<tag>` 与 `runtime-catalog`（`sources/`、`derived/`、`extensions/` 运行时不读）：
+
+```powershell
+tar -czf assets.tgz -C <repo> assets/knowledge/releases assets/knowledge/runtime-catalog
+scp -i .deploy\pgy_deploy assets.tgz root@101.132.42.13:/tmp/
+ssh ... "tar -xzf /tmp/assets.tgz -C /opt/pgy-x1"      # → /opt/pgy-x1/assets（实测 124MB）
+```
+
+### Step 3 · 预构建向量索引（省一次 embedding 开销）
+
+```powershell
+tar -czf kbcache.tgz -C <repo>\pgy-clinical-mvp .kb-cache\index.<releaseTag>.json
+scp ... → 解包到 /opt/pgy-x1/pgy-clinical-mvp/.kb-cache/
+```
+
+索引文件名必须与 `KB_RELEASE_DIR` 的 basename 一致（`index.2026.09.18-agent-ready-r1.json`），entrypoint 按此规则探测。启动日志出现 `复用预构建知识索引` 即成功。
+
+### Step 4 · 服务器 `.env`
+
+**位置：`/opt/pgy-x1/pgy-clinical-mvp/.env`（权限 600）**，是运行时唯一权威配置。以 `.env.example` 为模板，关键差异：
+
+```
+COOKIE_SECURE=true                                   # 经 HTTPS 对外，必须
+APP_SECRET=<openssl rand -hex 32>                    # 会话签名密钥，泄露=会话可伪造
+BOOTSTRAP_ADMIN_PASSWORD / BOOTSTRAP_DOCTOR_PASSWORD # 首次启动建档用
+KB_RELEASE_DIR=../assets/knowledge/releases/<tag>    # 相对容器工作目录，勿改绝对路径
+APP_PORT=8787                                        # 须与 compose 端口映射容器侧一致
+```
+
+### Step 5 · 构建启动
+
+```bash
+ssh ... "cd /opt/pgy-x1 && docker compose up -d --build"
+ssh ... "cd /opt/pgy-x1 && docker compose ps"     # 期望 Up (healthy)
+```
+
+### Step 6 · Nginx
+
+```bash
+scp deploy/nginx-pgy-x1.conf          root@<SERVER>:/etc/nginx/conf.d/pgy-x1.conf
+scp deploy/nginx-pgy-v29-ip-only.conf root@<SERVER>:/etc/nginx/conf.d/pgy-v29.conf   # 旧平台退到仅 IP
+ssh ... "nginx -t && systemctl reload nginx"
+```
+
+旧配置已备份为 `/root/pgy-v29.conf.bak.<时间戳>`。
+
+---
+
+## 7. 日常热更新
+
+[deploy-x1.ps1](file:///d:/self/pgyx1.0/PGYxv1.0/deploy-x1.ps1)：
+
+```
+[1/5] 本地 git fetch origin main，比对 localHead 与 originHead（防"以为上线了其实没 push"）
+[2/5] 可选 -SyncAssets：重新上传知识资产（日常发版跳过）
+[3/5] 服务器 git pull --ff-only origin main         ← 增量传输，仅差异文件
+[4/5] 服务器 docker compose up -d --build           ← 层缓存命中时很快
+[5/5] docker compose ps + /api/health
+```
+
+用法：`.\deploy-x1.ps1`（只发代码）／`.\deploy-x1.ps1 -SyncAssets`（连知识资产一起）。
+
+**为什么用 `git pull` 而不是 `scp` 上传代码**（沿用旧平台结论）：增量传输；服务器代码 = 一个 commit hash，可审计、可精确回滚；部署前能发现"本地改了忘 push"。
+
+**本项目的额外注意**：GitHub HTTPS(443) 在本机与服务器都验证过不稳定，**本地已把 `origin` 切到 SSH**（`git@github.com:nicoliustudio/...`）；服务器 pull 依赖 `/root/.ssh/deploy_x1`。若 pull 失败先看是不是网络而非权限。
+
+---
+
+## 8. Nginx
+
+### 8.1 端口分工（线上实测）
+
+| 入口 | 归属 | 说明 |
 |---|---|---|
-| 部署目录 | `/opt/pgy-v28` | `/opt/pgy-v29` |
-| Compose 项目名 | `pgy-v28` | `pgy-v29` |
-| 数据卷前缀 | `pgy-v28_*` | `pgy-v29_*` |
-| 宿主端口 | `8000` | `8001` |
+| 443 | **X1** | `www.pgytcm.com` / `pgytcm.com` → 127.0.0.1:8002 |
+| 8443 | X1（域名） / v2.9（IP） | 同一端口按 `server_name` 分流：域名给 X1，`101.132.42.13` 给旧平台 |
+| 80 | X1 | 域名 301 跳 HTTPS |
+| 8002 | X1 容器 | **仅宿主 127.0.0.1 可见** |
+| 8001 | v2.9 容器 | 旧平台，仅宿主可见 |
+| 8787 | X1 容器内 Node | 不出容器 |
 
-结论：**不要试图在同一套 compose 里"改造"上线新版本**。新目录 + 新项目名 + 新端口，新版本可独立启动、验证、回滚；确认无误后再 `docker compose down` 停掉旧版（保留其数据卷作为冷备份）。
+### 8.2 三个必踩的坑（旧平台踩过，本项目同样适用）
 
-> 注意：Compose 项目名默认取**部署目录的 basename**。`/opt/pgy-v29` → 项目 `pgy-v29` → 容器名 `pgy-v29-app-1` / `pgy-v29-db-1`，卷名 `pgy-v29_pgy_pgdata`。改名即换库，务必先在原目录 `down` 再改名，或将旧卷显式声明为 `external`。
+1. `proxy_buffering on`（默认）会让 SSE 变成"攒完一次性吐出" → 前端进度条卡死。必须 `proxy_buffering off` + `proxy_cache off`。
+2. WebSocket 少写 `Upgrade` / `Connection "upgrade"` 任一 → 握手 400。本项目语音 ASR 走 `/ws/asr`。
+3. `proxy_read_timeout` 用默认 60s → 长推理被 504。本项目设 `600s`。
 
----
-
-## 7. 私有仓库 + 远程服务器发布链路
-
-### 7.1 首次部署（服务器初始化）
-
-**Step 1 · 上传 GitHub Deploy Key（只读权限）**
-
-```
-scp -i .deploy\pgy_deploy .deploy\deploy_v29 root@<SERVER>:/root/.ssh/deploy_v29
-ssh -i .deploy\pgy_deploy root@<SERVER> "chmod 600 /root/.ssh/deploy_v29"
-```
-
-本地只保留公钥（`.deploy\deploy_v29.pub`）作登记；私钥仅在服务器上，仓库里登记为只读 deploy key。
-
-**Step 2 · 克隆私有仓库到隔离目录**
-
-```
-ssh -i .deploy\pgy_deploy root@<SERVER> \
-  "GIT_SSH_COMMAND='ssh -i /root/.ssh/deploy_v29 -o StrictHostKeyChecking=accept-new' \
-   git clone git@github.com:<ORG>/<REPO>.git /opt/pgy-v29"
-```
-
-**Step 3 · 落地服务器 `.env`（不进 git）**
-
-以仓库 `.env.example` 为模板，服务器上按需覆盖差异键（本项目线上实际值）：
-
-```
-APP_ENV=production
-AUTO_CREATE_SCHEMA=false                    # 生产强制走 Alembic
-COOKIE_SECURE=true
-ALLOWED_HOSTS=localhost,127.0.0.1,<SERVER_IP>,www.example.com,example.com
-BOOTSTRAP_ADMIN_LOGIN=admin
-WEB_CONCURRENCY=2
-APP_PORT=8001                               # 与旧版本错开
-KNOWLEDGE_RELEASE=<当前知识版本>
-DATABASE_URL=postgresql+psycopg://pgy:***@db:5432/pgy    # 容器内地址，勿改 localhost
-```
-
-**Step 4 · Nginx 反代落盘 + reload**
-
-```
-scp -i .deploy\pgy_deploy deploy/nginx-*.conf root@<SERVER>:/etc/nginx/conf.d/pgy-v29.conf
-ssh -i .deploy\pgy_deploy root@<SERVER> "nginx -t && systemctl reload nginx"
-```
-
-**Step 5 · 构建启动**
-
-```
-ssh -i .deploy\pgy_deploy root@<SERVER> "cd /opt/pgy-v29 && docker compose up -d --build"
-```
-
-### 7.2 日常热更新（一键脚本）
-
-[deploy-v29.ps1](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy-v29.ps1) 的四段式流程，是整套经验里**最值得复用**的部分：
-
-```
-[1/4] 本地 git fetch origin main，比对 localHead 与 originHead
-      ├─ 不一致 → 警告并交互确认（防止"以为上线了其实没 push"）
-      └─ 工作区脏 → 警告（服务器只会部署 origin/main 已提交版本）
-[2/4] 服务器 git pull --ff-only origin main   ← 增量传输，仅差异文件
-[3/4] 服务器 docker compose up -d --build     ← 层缓存命中时约 30 秒
-[4/4] 健康检查：docker compose ps + /api/health/ready + /api/health
-```
-
-**为什么用 `git pull` 而不是 `scp`/`rsync` 上传代码：**
-
-- 增量传输，大仓库不必全量重传；
-- 服务器上的代码版本 = 一个 commit hash，**可审计、可精确回滚**（`git checkout <commit> && docker compose up -d --build`）；
-- 部署前能比对本地与远端是否一致，避免"本地改了忘 push"的经典事故；
-- `--ff-only` 保证只做快进合并，不会在服务器上产生 merge commit。
-
-**为什么脚本必须是"长命令"：** 远程 `docker build` 首构 2–5 分钟，缓存命中约 30 秒。执行时务必异步启动 + 轮询输出，不要同步等待。
-
----
-
-## 8. Nginx 反代：HTTP、SSE、WebSocket 一个都不能少
-
-参考 [nginx-pgytcm-https.conf](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/nginx-pgytcm-https.conf)（仓库模板）与 [nginx.conf.example](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/nginx.conf.example)。
-
-### 8.1 端口策略（线上实测）
-
-| 端口 | 归属 | 说明 |
-|---|---|---|
-| 443 | Nginx | 标准 HTTPS，域名访问（需安全组放行） |
-| 8443 | Nginx | 备用 HTTPS，含 IP 直连访问，安全组已放行 |
-| 8001 | app 容器 | **仅宿主 127.0.0.1 可见** |
-| 8000 | 容器内 uvicorn | 不出容器 |
-| 5432 | db 容器 | **仅容器网络内**，宿主不可见 |
-
-### 8.2 关键 location 配置
+### 8.3 登录接口限流
 
 ```nginx
-server {
-    listen 443 ssl;
-    server_name www.example.com example.com;
-
-    ssl_certificate     /etc/nginx/ssl/example.com.pem;
-    ssl_certificate_key /etc/nginx/ssl/example.com.key;
-
-    client_max_body_size 32m;          # 按业务放大（音频/文档上传）
-
-    location / {
-        proxy_pass http://127.0.0.1:8001;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        proxy_buffering off;           # ★ 关键：不缓冲，SSE 才能实时推送
-        proxy_cache off;               # ★ 关键：不缓存流式响应
-        proxy_read_timeout 600s;       # ★ 关键：长任务（LLM 推理）别被 Nginx 掐断
-    }
-
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade    $http_upgrade;      # ★ WebSocket 升级
-        proxy_set_header Connection "upgrade";          # ★ 二者缺一不可
-        proxy_set_header Host       $host;
-        proxy_read_timeout 600s;
-    }
-}
+limit_req_zone $binary_remote_addr zone=pgy_x1_login:10m rate=5r/m;   # 定义在 conf.d 里即处于 http 上下文
+location = /api/auth/login { limit_req zone=pgy_x1_login burst=10 nodelay; ... }
 ```
 
-**三个最容易踩的 Nginx 坑：**
+公网域名 + 账号密码，必须挡住暴力破解。限流放在 Nginx 而不是应用代码里。
 
-1. `proxy_buffering on`（默认值）会让 SSE 变成"攒完一次性吐"——前端进度条卡死不动。
-2. 忘写 `Upgrade`/`Connection` 两个 header，WebSocket 握手 400。
-3. `proxy_read_timeout` 用默认 60s，长推理请求被 504。
+### 8.4 8443 上的 `server_name` 不能重复
 
-### 8.3 与应用侧配置对齐（必须成对出现）
+两个 conf 若在**同一端口**声明同一 `server_name`，Nginx 只警告 `conflicting server name ... ignored` 并静默丢弃后者——这类"看不出错"的配置最容易埋雷。故：8443 的 IP 只给 v2.9，域名只给 X1。
 
-| Nginx 侧 | 应用侧 | 不对齐的后果 |
-|---|---|---|
-| `Host` 透传 | `ALLOWED_HOSTS` 含该域名 | 域名访问报 `Invalid host header` |
-| `X-Forwarded-Proto $scheme` | uvicorn `--proxy-headers --forwarded-allow-ips='*'` | Cookie `Secure`、重定向协议判断错误 |
-| `client_max_body_size` | 应用侧上传上限 | 大于 Nginx 限制时 413 |
+### 8.5 443 / 80 对外的现实约束（本次上线实测，重要）
 
-### 8.4 HTTPS / 证书 / 80 跳转
-
-- 80 端口只做 ACME 校验 + 301 跳 HTTPS（[nginx-pgytcm-http.conf](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/nginx-pgytcm-http.conf)）。
-- 证书文件放宿主 `/etc/nginx/ssl/`，**私钥绝不出服务器**，仓库 `.gitignore` 已排除 `*.key` / `*.pem`。
-- 若不想自己管证书，可选 Caddy 自动 HTTPS：[docker-compose.https.yml](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/docker-compose.https.yml) + [Caddyfile](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/Caddyfile)，注意 SSE 需 `flush_interval -1`。
-
----
-
-## 9. 配置管理：`.env` 的权威在哪
-
-| 事实 | 说明 |
+| 现象 | 原因 |
 |---|---|
-| `.env` 被 `.gitignore` / `.dockerignore` 双重排除 | 改本地 `.env` **不会**自动上线 |
-| **服务器 `/opt/<项目>/.env` 才是运行时权威** | 改完需 `docker compose up -d --force-recreate app` 才生效 |
-| 容器内连库地址是 `db:5432` | 服务器上写 `localhost` 会连到容器自身 |
-| 部分配置存 DB 优先 | 例如大模型配置：只改 `.env` 里 API Key 不够，还需同步 `llm_configs` 表 |
-| 生产硬校验 | `APP_SECRET` ≥32 位随机、`AUTO_CREATE_SCHEMA=false`、管理员密码非默认值，否则启动即抛错 |
+| `http://www.pgytcm.com/` 返回 `403 Forbidden` + `Server: Beaver` + 标题 `Non-compliance ICP Filing` | **阿里云对未备案域名的 80 端口内容拦截**（不是 Nginx 返回的） |
+| `https://www.pgytcm.com/`（443）连接超时 | 443 未在**阿里云安全组**放行（宿主 `ufw` 已放行，问题在上游） |
+| `https://www.pgytcm.com:8443/` 正常 | 非 80/443 端口不受备案拦截，这也是旧平台一直用 8443 的原因 |
 
-生成 `.env` 的一次性脚本可参考 [create_env.py](file:///d:/self/PGYV2.9/ClinicalCopilot_v2.9/deploy/create_env.py)（自动生成随机 `APP_SECRET`、校验 DB 密码不含 URL 保留字符、写入后 `chmod 600`）。
+**结论与待办**：要让 `https://www.pgytcm.com`（默认端口）可用，需在阿里云控制台 (1) 安全组放行 443，(2) 完成 `pgytcm.com` 的 ICP 备案。在此之前，域名请用 **`https://www.pgytcm.com:8443`** 访问。
+
+> 排查提示：若本机配了系统代理（如 `127.0.0.1:7890`），`curl`/`Invoke-WebRequest` 访问该 ECS 的 TLS 端口会立刻失败（几十毫秒 reset），且报错与"服务器不通"极像。判断方法：`curl --noproxy '*'`，或看 `HKCU:\...\Internet Settings` 的 `ProxyServer`。服务端自测（容器内 / 宿主 `127.0.0.1`）不受影响。
 
 ---
 
-## 10. 运维手册（抄这一节就够了）
+## 9. 认证与账号
+
+| 项 | 实现 |
+|---|---|
+| 账号存储 | `data/users.json`（随命名卷持久化，权限 600），**只存 scrypt 摘要** |
+| 会话 | HttpOnly + SameSite=Lax Cookie（`pgy_session`），HMAC-SHA256 签名，默认 12h |
+| 会话撤销 | `data/sessions.json` 登记表：**登出/失效立即生效**，不是"等到过期" |
+| 角色 | `admin`（管理 + 调试/评测面）、`doctor`（临床，无评测面） |
+| 守卫位置 | `src/server/http.ts`（HTTP 层）+ `src/server/auth.ts`（凭据与会话）；未登录页面 302 至 `/login`、接口 401；`/api/eval/*` 仅 admin；`/ws/asr` 握手校验会话 |
+| 账号来源 | 启动时按 `BOOTSTRAP_ADMIN_*` / `BOOTSTRAP_DOCTOR_*` 幂等建档，**已存在的账号不会被覆盖** |
+
+**重设密码（当前唯一方式）**：改 `.env` 里的 `BOOTSTRAP_*_PASSWORD` → 停容器 → 删除数据卷里的 `users.json` → 启动，账号按新密码重建（旧会话因用户 id 变化自动失效）。
 
 ```bash
-# 容器状态（期望 app 为 Up (healthy)）
-ssh -i .deploy/pgy_deploy root@<SERVER> "cd /opt/pgy-v29 && docker compose ps"
-
-# 应用日志
-ssh -i .deploy/pgy_deploy root@<SERVER> "cd /opt/pgy-v29 && docker compose logs --tail=100 app"
-
-# 健康检查（三档：存活 / 概要 / 就绪）
-curl -fsS http://127.0.0.1:8001/api/health/live
-curl -fsS http://127.0.0.1:8001/api/health
-curl -fsS http://127.0.0.1:8001/api/health/ready
-
-# 改 .env 后重建单容器
-ssh -i .deploy/pgy_deploy root@<SERVER> "cd /opt/pgy-v29 && docker compose up -d --force-recreate app"
-
-# 回滚
-ssh -i .deploy/pgy_deploy root@<SERVER> "cd /opt/pgy-v29 && git log --oneline -5"
-ssh -i .deploy/pgy_deploy root@<SERVER> "cd /opt/pgy-v29 && git checkout <COMMIT> && docker compose up -d --build"
-
-# 磁盘与缓存巡检
-ssh -i .deploy/pgy_deploy root@<SERVER> "df -h / && docker system df"
+cd /opt/pgy-x1 && docker compose stop app
+docker run --rm -v pgy-x1_data:/data node:22-slim rm -f /data/users.json
+docker compose start app && docker compose logs --tail=5 app   # 应出现「已建立账号：admin、doctor」
 ```
 
-账号体系：首次启动仅 `bootstrap()` 建平台管理员（`BOOTSTRAP_ADMIN_*`）；医生账号需管理员登录后在「管理 → 用户」先建诊所、再建 `DOCTOR` 角色账号。
+> 待办：用户管理页 / 自助改密（当前没有界面，只能走上面的重建流程）。
 
 ---
 
-## 11. 坑位清单（Checklist，逐条对照）
+## 10. 运维手册
+
+```bash
+# 容器状态（期望 Up (healthy)）
+ssh -i .deploy/pgy_deploy root@101.132.42.13 "cd /opt/pgy-x1 && docker compose ps"
+
+# 应用日志
+ssh ... "cd /opt/pgy-x1 && docker compose logs --tail=100 app"
+
+# 健康检查（免登录）
+curl -fsS http://127.0.0.1:8002/api/health          # 含 knowledge / capabilities / skills / asr
+
+# 改 .env 后重建单容器
+ssh ... "cd /opt/pgy-x1 && docker compose up -d --force-recreate app"
+
+# 回滚
+ssh ... "cd /opt/pgy-x1 && git log --oneline -5"
+ssh ... "cd /opt/pgy-x1 && git checkout <COMMIT> && docker compose up -d --build"
+
+# 巡检
+ssh ... "df -h / && docker system df && du -sh /opt/pgy-x1/assets /root/backups"
+```
+
+切换知识版本：改 `.env` 的 `KB_RELEASE_DIR` → 确保宿主 `assets/knowledge/releases/<新tag>` 已存在 → `docker compose up -d --force-recreate app`（新 tag 无预构建索引时，首次检索会在线重建）。
+
+---
+
+## 11. 坑位清单
 
 **构建 / 镜像**
 
-- [ ] `.dockerignore` 必须排除 `.env`、`.git`、`__pycache__`、`*.zip`。
-- [ ] `requirements.txt` 单独一层 COPY，改业务代码不触发重装依赖。
-- [ ] pip 源按服务器所在地写死（国内用清华源；实测阿里云 ECS 上阿里云源不可用，清华源可用）。
-- [ ] 容器以非 root 用户运行。
-- [ ] 镜像内 `HEALTHCHECK` 指向一个**真实存在**的就绪端点。
+- [ ] `.dockerignore` 必须排除 `.env`、`assets/`、`.kb-cache/`、`data/`（合计约 400MB）。
+- [ ] `npm ci --include=dev`：运行时用 `tsx`，漏了 `--include=dev` 会得到"启动即找不到 tsx"。
+- [ ] 容器以非 root 运行。
+- [ ] `HEALTHCHECK` 指向真实存在的端点是 `/api/health`（不是旧平台的 `/api/health/ready`）。
 
-**编排 / 数据**
+**运行 / 数据**
 
-- [ ] `db` 无 `ports`；`app` 只绑 `127.0.0.1`。
-- [ ] 关键变量用 `${VAR:?error}` 强制校验。
-- [ ] 所有状态落命名卷；**永不**使用 `down -v`。
-- [ ] 定时 `pg_dump` + 异地备份，并**演练过一次恢复**。
-- [ ] 定期 `docker builder prune`（构建缓存会无声涨到几十 GB）。
+- [ ] 只看 `127.0.0.1:8002`，绝不暴露公网端口。
+- [ ] 不可再生数据（`pgy-x1_data`）有每日备份，且**演练过一次恢复**。
+- [ ] **永不** `down -v`；**永不**改卷名。
+- [ ] `.kb-cache` 是宿主目录，`git clean -xdf` 会删（可重建）。
 
 **发布链路**
 
-- [ ] 服务器 SSH 私钥与 GitHub Deploy Key 分离，Deploy Key 只读。
-- [ ] 部署脚本先校验 localHead == originHead，再 `git pull --ff-only`。
-- [ ] 部署是长命令：异步执行 + 轮询状态，不要同步阻塞等待。
-- [ ] 发版后必须跑健康检查，不能只看"容器起来了"。
+- [ ] 服务器用**只读** deploy key（`/root/.ssh/deploy_x1`）。
+- [ ] 本地 `origin` 走 SSH；GitHub HTTPS 在本机与服务器都不稳定。
+- [ ] 脚本先比对 `localHead == originHead`，再 `git pull --ff-only`。
+- [ ] 构建是长命令：异步执行 + 轮询状态，别同步死等。
+- [ ] 发版后跑健康检查，不能只看"容器起来了"。
 
 **Nginx / 网络**
 
 - [ ] SSE：`proxy_buffering off` + `proxy_cache off` + 长 `proxy_read_timeout`。
-- [ ] WebSocket：`Upgrade` + `Connection "upgrade"` 两个 header。
-- [ ] `ALLOWED_HOSTS` 覆盖全部对外域名与 IP。
-- [ ] uvicorn 带 `--proxy-headers --forwarded-allow-ips`。
-- [ ] 证书/私钥不入仓库；安全组只放行必要端口。
-- [ ] **仓库里的 nginx conf 与服务器实际 conf 定期 diff**（本项目已出现漂移：仓库 `proxy_read_timeout 180s`，线上为 `600s`，建议以线上为准回写仓库）。
+- [ ] WebSocket：`Upgrade` + `Connection "upgrade"` 两个 header 缺一不可。
+- [ ] 同一端口不得重复声明同一 `server_name`（只会 warn，静默丢弃）。
+- [ ] `nginx -t` 通过后再 `reload`；改配置前先 `cp` 备份。
+- [ ] 仓库里的 nginx conf 与服务器实际 conf **定期 diff**（旧平台出现过漂移）。
 
 **密钥卫生**
 
-- [ ] SSH 私钥、API Key、DB 密码一律只存在于服务器 `.env` 与 `.deploy/`，**不打印、不入库、不进镜像**。
-- [ ] Windows 下 OpenSSH 报 `UNPROTECTED PRIVATE KEY FILE` 时执行：
-      `icacls <key> /inheritance:r /grant:r '<用户名>:R'`
+- [ ] SSH 私钥、API Key、`APP_SECRET`、账号密码只存在于服务器 `.env`（600）与本地 `.deploy/`、`.env`（均被 gitignore）。
+- [ ] 本仓库是**公开仓库**，提交前核对：`git status` 里不出现 `.env` / `data/` / `.deploy/` / `assets/`。
+- [ ] Windows 下 OpenSSH 报 `UNPROTECTED PRIVATE KEY FILE`：`icacls <key> /inheritance:r /grant:r '<用户名>:R'`。
 
 ---
 
-## 12. 换到新项目：只需替换这些变量
+## 12. 已知风险与待办
 
-| 类别 | 本项目取值 | 新项目替换为 |
+| # | 事项 | 影响 | 建议 |
+|---|---|---|---|
+| 1 | **443 未放行 + 域名未备案** | `https://www.pgytcm.com` 默认端口不可用，80 被阿里云拦截返回 403 | 阿里云控制台放行 443；完成 ICP 备案。临时用 `:8443` |
+| 2 | 备份无异地副本 | 服务器损坏 = 账号丢失 | 配 `ossutil`/`rclone` 同步 `/root/backups` |
+| 3 | 无用户管理界面 | 增删账号、改密码需走重建流程 | 后续加管理页（admin 角色已就位） |
+| 4 | Docker 构建缓存约 29GB | 磁盘占用 | 定期 `docker builder prune -f`（注意会让旧平台重建变慢） |
+| 5 | 知识资产不在 git | 新环境需手动同步 | 依赖 `deploy-x1.ps1 -SyncAssets` 或对象存储分发 |
+
+---
+
+## 13. 换到新项目：只需替换这些变量
+
+| 类别 | 本项目取值 | 替换为 |
 |---|---|---|
-| 服务器 | `<SERVER_IP>` / 用户 `root` | 你的 ECS 地址与账号 |
+| 服务器 | `101.132.42.13` / `root` | 你的 ECS |
 | 登录私钥 | `.deploy/pgy_deploy` | 你的 SSH 私钥 |
-| 仓库 | `git@github.com:<ORG>/<REPO>.git` | 你的私有仓库 |
-| Deploy Key | 服务器 `/root/.ssh/deploy_v29` | 你的服务器端部署私钥路径 |
-| 部署目录 | `/opt/pgy-v29` | `/opt/<你的项目>-<版本>`（**目录名即 Compose 项目名**） |
-| 宿主端口 | `8443` / `443` → `8001` | 你的对外端口 → 应用端口 |
-| 命名卷 | `pgy-v29_pgy_pgdata` 等 | `<项目>_<卷名>` |
-| 域名 / 证书 | `www.pgytcm.com` | 你的域名与证书路径 |
-| 环境变量 | `ALLOWED_HOSTS` / `APP_PORT` / `KNOWLEDGE_RELEASE` | 你的对应项 |
+| 部署目录 | `/opt/pgy-x1`（目录名即 Compose 项目名） | `/opt/<项目>` |
+| 服务器部署私钥 | `/root/.ssh/deploy_x1` | 你的 deploy key |
+| 宿主端口 | `8002` → 容器 `8787` | 你的端口对 |
+| 命名卷 | `pgy-x1_data` | `<项目>_data` |
+| 域名 / 证书 | `www.pgytcm.com` / `/etc/nginx/ssl/pgytcm.com.pem` | 你的域名与证书 |
+| 知识资产 | `assets/knowledge/{releases,runtime-catalog}` | 你的知识目录 |
 
-其余（Dockerfile 结构、entrypoint 四步序、compose 六条规则、Nginx 三坑、发布四段式、运维命令、坑位清单）**可原样复用**。
+其余（Dockerfile 结构、entrypoint 启动序、compose 数据分级、Nginx 三坑、发布脚本五段式、运维命令、坑位清单）可原样复用。
