@@ -287,6 +287,13 @@ export interface CandidateReference {
   name?: string;
   /** Hypotheses this candidate was presented in support of (many-to-many). */
   originatingHypothesisRefs?: string[];
+  /** H15.2.6：P2 case-derived fallback 的来源标记（不升级处方权）。 */
+  sourceAuthority?: 'P1' | 'P2_CASE_DERIVED';
+  sourceCaseRef?: string;
+  /** H15.2.7：formula-level 证据单元（encounter-level）追溯字段。 */
+  sourceEvidenceRef?: string;
+  visitRef?: string;
+  stage?: string;
 }
 
 /** 带稳定身份（CF_xxx）的病例事实。 */

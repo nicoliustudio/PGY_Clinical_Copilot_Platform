@@ -10,5 +10,5 @@
   "negativeExamples": [],
   "knowledgeScopes": ["general"],
   "skillIds": ["tcm-clinical-cognition"],
-  "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"]
+  "toolIds": ["knowledge.search", "formula.search_candidates", "formula.get_evidence", "formula.validate"]
 }

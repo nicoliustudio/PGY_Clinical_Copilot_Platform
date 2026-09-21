@@ -179,11 +179,9 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     if (!id) return false;
 
     if (event.type === 'evidence.added') {
-      this.applyEvidenceAdded(id, event.payload);
-      return true;
+      return this.applyEvidenceAdded(id, event.payload);
     } else if (event.type === 'candidate.presented') {
-      this.applyCandidatePresented(id, event.payload);
-      return true;
+      return this.applyCandidatePresented(id, event.payload);
     } else if (event.type === 'candidate.focused') {
       return this.applyCandidateFocused(id);
     } else if (event.type === 'candidate.selected') {
@@ -220,9 +218,11 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     return false;
   }
 
-  private applyEvidenceAdded(id: string, payload: Record<string, unknown>) {
+  private applyEvidenceAdded(id: string, payload: Record<string, unknown>): boolean {
     const sourceId = asString(payload.sourceId);
-    this.workspace.evidenceRefs.push({ id, sourceId });
+    if (!this.workspace.evidenceRefs.some((r) => r.id === id)) {
+      this.workspace.evidenceRefs.push({ id, sourceId });
+    }
 
     const evidence: EvidenceItem = {
       id,
@@ -243,17 +243,20 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       },
     };
 
+    // H15.5 deterministic dedup：同一 canonical evidence id 不重复写入（不产生重复 evidence.added event）。
     const existing = this.workspace.evidenceState.evidenceItems.find((e) => e.id === id);
     if (existing) {
       Object.assign(existing, evidence);
-    } else {
-      this.workspace.evidenceState.evidenceItems.push(evidence);
+      return false;
     }
+    this.workspace.evidenceState.evidenceItems.push(evidence);
+    return true;
   }
 
-  private applyCandidatePresented(id: string, payload: Record<string, unknown>) {
+  private applyCandidatePresented(id: string, payload: Record<string, unknown>): boolean {
     const originating = asStringArray(payload.originatingHypothesisRefs);
     const existing = this.workspace.candidates.find((c) => c.id === id);
+    let changed = false;
     if (!existing) {
       this.workspace.candidates.push({
         id,
@@ -262,10 +265,19 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         sourceId: asString(payload.sourceId),
         composition: asStringArray(payload.composition),
         name: asString(payload.name),
+        sourceAuthority: asString(payload.sourceAuthority) as 'P1' | 'P2_CASE_DERIVED' | undefined,
+        sourceCaseRef: asString(payload.sourceCaseRef),
+        sourceEvidenceRef: asString(payload.sourceEvidenceRef),
+        visitRef: asString(payload.visitRef),
+        stage: asString(payload.stage),
         originatingHypothesisRefs: originating,
       });
+      changed = true;
     } else if (originating.length > 0) {
+      // H15.5 deterministic dedup：同一 candidate id 不重复 present；仅当新增 originating 关联时才视为有意义变化。
+      const before = new Set(existing.originatingHypothesisRefs ?? []);
       existing.originatingHypothesisRefs = Array.from(new Set([...(existing.originatingHypothesisRefs ?? []), ...originating]));
+      if (existing.originatingHypothesisRefs.some((r) => !before.has(r))) changed = true;
     }
 
     const sourceId = asString(payload.sourceId);
@@ -298,6 +310,8 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       if (!workItem.candidateRefs.includes(id)) workItem.candidateRefs.push(id);
       if (workItem.candidateRefs.length > 0) workItem.status = 'resolved';
     }
+
+    return changed;
   }
 
   private applyCandidateStatus(id: string, status: CandidateComparison['status']) {

@@ -31,7 +31,7 @@ export class SafetyInvariantStage implements AuthorityStage {
       proposal: {
         ...proposal,
         status: 'BLOCKED',
-        safety: { status: 'BLOCK' },
+        safety: { ...proposal.safety, status: 'BLOCK' },
         formula: { ...proposal.formula, authority: 'BLOCKED' },
       },
     };

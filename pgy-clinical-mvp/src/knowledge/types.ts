@@ -18,7 +18,7 @@ export type KnowledgeRole =
   | 'CLINICAL_CASE';
 
 /** 文档功能形态（仅作 provenance，不参与临床路由）。 */
-export type Kind = 'normative' | 'case' | 'diagnostic' | 'standard';
+export type Kind = 'normative' | 'case' | 'case-formula' | 'diagnostic' | 'standard';
 
 /** 来源流派（School-aware Evidence 元数据）。 */
 export type SourceSchool = 'shen_zhongli' | 'national_standard' | 'classical' | 'general_tcm';
@@ -61,6 +61,18 @@ export interface KnowledgeDoc {
   releaseVersion: string;
   kind: Kind;
   raw?: unknown;
+  /**
+   * H15.2.7：病例方药证据单元（kind = 'case-formula'）的追溯字段。
+   * 来自 release 内已结构化的 encounters.json，不通过 runtime LLM 重新抽取。
+   */
+  caseId?: string;
+  visit?: string;
+  composition?: string;
+  patient?: string;
+  symptoms?: string;
+  sourceSpanId?: string;
+  /** H15.2.7：来源若有正式方名（formula_name），否则为空（用稳定 identity 兜底）。 */
+  formulaName?: string;
 }
 
 /** 索引 breakdown（build 报告 + 可观测性）。 */
@@ -110,4 +122,13 @@ export interface SearchHit {
   matchedConcepts?: string[];
   candidateRefs?: string[];
   detailAvailable?: boolean;
+  /** H15.2.7：病例方药证据单元（encounter-level）字段，供 P2 fallback 直接形成 formula-level candidate。 */
+  kind?: Kind;
+  caseId?: string;
+  visit?: string;
+  composition?: string;
+  sourceSpanId?: string;
+  patient?: string;
+  symptoms?: string;
+  formulaName?: string;
 }

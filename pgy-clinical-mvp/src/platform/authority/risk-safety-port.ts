@@ -1,7 +1,7 @@
 import type { SafetyPort } from '../../contracts/ports.js';
 import type { SafetyDecision } from '../../contracts/runtime.js';
 import type { ClinicalUnderstanding } from '../../contracts/understanding.js';
-import { resolveRiskState, isFormulaCommitAllowed } from '../../clinical/risk.js';
+import { resolveRiskState, isFormulaCommitAllowed, resolveReviewRequirement } from '../../clinical/risk.js';
 
 export class RiskHypothesisSafetyPort implements SafetyPort {
   async evaluate(understanding: ClinicalUnderstanding): Promise<SafetyDecision> {
@@ -9,11 +9,14 @@ export class RiskHypothesisSafetyPort implements SafetyPort {
     const reasons = understanding.risks
       .filter((risk) => risk.disposition !== 'routine')
       .map((risk) => `[${risk.disposition}] ${risk.description}`);
+    const review = resolveReviewRequirement(understanding.risks);
 
     return {
       status: riskState === 'URGENT' ? 'BLOCK' : riskState === 'UNCERTAIN' ? 'CAUTION' : 'PASS',
       reasons,
       blockNormativeCommit: !isFormulaCommitAllowed(riskState, 'NORMATIVE'),
+      reviewRequired: review.reviewRequired,
+      reviewReasons: review.reviewReasons,
     };
   }
 }

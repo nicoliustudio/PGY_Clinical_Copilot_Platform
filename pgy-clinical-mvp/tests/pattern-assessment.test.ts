@@ -105,14 +105,25 @@ test('WorkingView：Pattern Structure ON 时渲染 Pattern Structure 区块', ()
   assert.ok(rendered.includes('Treatment Target'));
 });
 
-test('WorkingView：Pattern Structure OFF 时不渲染 Pattern Structure 区块', () => {
+test('WorkingView：patternAssessment 是核心 artifact，不随 flag 关闭而隐藏', () => {
   config.experiment.patternAssessment = false;
   const ws = seededWorkspace();
   ws.patternAssessment = sampleAssessment();
   const view = buildClinicalWorkingView(ws, emptyClinicalStrategy());
-  assert.equal(view.patternStructure, undefined);
+  assert.ok(view.patternStructure);
   const rendered = renderClinicalWorkingView(view);
-  assert.ok(!rendered.includes('Pattern Structure'));
+  assert.ok(rendered.includes('Pattern Structure'));
+});
+
+test('WorkingView：暴露 Kernel 确定性 Clinical Completion State（非医学指令）', () => {
+  const ws = seededWorkspace();
+  const view = buildClinicalWorkingView(ws, emptyClinicalStrategy());
+  assert.equal(view.clinicalCompletionState.coreComplete, false);
+  assert.equal(view.clinicalCompletionState.formulaSelected, false);
+  const rendered = renderClinicalWorkingView(view);
+  assert.ok(rendered.includes('Clinical Completion State'));
+  assert.ok(rendered.includes('clinical core: INCOMPLETE'));
+  assert.ok(rendered.includes('formula: unresolved'));
 });
 
 test.after(() => {

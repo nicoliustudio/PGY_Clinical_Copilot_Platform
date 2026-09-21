@@ -1,6 +1,7 @@
 import type { AgentResult, ClinicalResult, ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { getCanonicalFormula } from '../../clinical/formula.js';
+import { getP2CaseFormulaComposition } from '../../clinical/formula-evidence.js';
 import type { KnowledgeDoc } from '../../knowledge/types.js';
 
 /**
@@ -46,6 +47,23 @@ export async function canonicalizeProposalSubmit(
           source_id: canonical.sourceId,
           evidence_refs: [canonical.sourceId],
           candidate_ref: ref,
+        };
+      } else if (candidate.sourceAuthority === 'P2_CASE_DERIVED') {
+        // H15.2.6/H15.2.7：P2 case-derived fallback —— 不升级 authority，保留 provenance（name + composition + case/visit/evidence）。
+        // composition 从源病例方药单元确定性读取（不塞回病例全文，不补药/改剂量）。
+        const p2 = await getP2CaseFormulaComposition(candidate.sourceId ?? '', docs);
+        formula = {
+          authority: 'GENERATED_DRAFT',
+          formula_id: candidate.formulaId,
+          name: p2?.formulaName ?? candidate.name ?? '',
+          composition: p2 ? [p2.composition] : candidate.composition ?? [],
+          source_id: candidate.sourceId,
+          evidence_refs: candidate.sourceCaseRef ? [candidate.sourceCaseRef] : [],
+          candidate_ref: ref,
+          source_authority: 'P2_CASE_DERIVED',
+          source_case_ref: candidate.sourceCaseRef,
+          visit_ref: candidate.visitRef,
+          source_evidence_ref: candidate.sourceEvidenceRef,
         };
       }
     }

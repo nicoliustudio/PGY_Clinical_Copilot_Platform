@@ -30,9 +30,20 @@ export const clinicalResultSchema = z.object({
     source_id: z.string(),
     evidence_refs: z.array(z.string()),
     candidate_ref: z.string().optional(),
+    /** H15.2.6：P2 case-derived fallback 的来源标记（不升级 authority）。 */
+    source_authority: z.enum(['P1', 'P2_CASE_DERIVED']).optional(),
+    /** H15.2.7：P2 formula-level 证据单元的 provenance（encounter-level，不升级 authority）。 */
+    source_case_ref: z.string().optional(),
+    visit_ref: z.string().optional(),
+    source_evidence_ref: z.string().optional(),
   }),
   missing_information: z.array(z.string()),
-  safety: z.object({ status: z.enum(['PASS', 'BLOCK']) }),
+  safety: z.object({
+    status: z.enum(['PASS', 'BLOCK']),
+    /** H15.4：确定性 clinician review requirement（非 formula authority，非 Agent 决定）。 */
+    reviewRequired: z.boolean().optional(),
+    reviewReasons: z.array(z.string()).optional(),
+  }),
   run_id: z.string().optional(),
 });
 

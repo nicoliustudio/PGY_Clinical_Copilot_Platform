@@ -18,7 +18,7 @@ async function measurePlannerLatency(): Promise<number> {
       capabilityNeeds: [],
       uncertainties: [],
     },
-    safety: { status: 'PASS', reasons: [], blockNormativeCommit: false },
+    safety: { status: 'PASS', reasons: [], blockNormativeCommit: false, reviewRequired: false, reviewReasons: [] },
     availableCapabilities: [],
   });
   return Date.now() - started;

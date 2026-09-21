@@ -1,5 +1,6 @@
 import type {
   DecisionImpact,
+  FormulaRetrievalInfo,
   RecentRetrievalFeedback,
   RetrievalDisciplineMetrics,
 } from '../../contracts/execution.js';
@@ -29,8 +30,19 @@ export const RETRIEVAL_TOOL_NAMES = [
 ] as const;
 export type RetrievalToolName = (typeof RETRIEVAL_TOOL_NAMES)[number];
 
+/** H15.2.9：formula 检索工具（其信息增量在 WorkingView 中反馈为 NEW/NO_NEW_INFORMATION）。 */
+export const FORMULA_RETRIEVAL_TOOL_NAMES = [
+  'formula.search_normative',
+  'formula.search_candidates',
+  'formula.get_evidence',
+] as const;
+
 export function isRetrievalTool(toolName: string): toolName is RetrievalToolName {
   return (RETRIEVAL_TOOL_NAMES as readonly string[]).includes(toolName);
+}
+
+export function isFormulaRetrievalTool(toolName: string): boolean {
+  return (FORMULA_RETRIEVAL_TOOL_NAMES as readonly string[]).includes(toolName);
 }
 
 /** A formula candidate is "viable" when it carries a stable canonical identity (sourceId + formulaId). */
@@ -104,6 +116,9 @@ export interface RecordToolExecutionInput {
   rawOutput: unknown;
   candidateIdsBefore: ReadonlySet<string>;
   evidenceIdsBefore: ReadonlySet<string>;
+  /** H15.2.9：本次调用实际新增的 candidate / evidence 数（用于信息增量反馈）。 */
+  newCandidateCount?: number;
+  newEvidenceCount?: number;
 }
 
 const RECENT_WINDOW = 6;
@@ -125,6 +140,7 @@ export class RetrievalDisciplineTracker {
   private evidenceReuseCount = 0;
 
   private recentWindow: { impact: DecisionImpact; reused: boolean }[] = [];
+  private lastFormulaRetrieval?: FormulaRetrievalInfo;
 
   /** 在 workspace 首次出现 viable candidate 时记录（幂等）。 */
   recordViableCandidateIfAbsent(workspace: ClinicalWorkspace, step: number, nowMs: number): void {
@@ -139,6 +155,17 @@ export class RetrievalDisciplineTracker {
 
   recordToolExecution(input: RecordToolExecutionInput): void {
     const { toolName, reused, decisionImpact, rawOutput, candidateIdsBefore, evidenceIdsBefore } = input;
+
+    if (isFormulaRetrievalTool(toolName)) {
+      const newCandidateCount = input.newCandidateCount ?? 0;
+      const newEvidenceCount = input.newEvidenceCount ?? 0;
+      this.lastFormulaRetrieval = {
+        tool: toolName,
+        newCandidateCount,
+        newEvidenceCount,
+        info: (newCandidateCount > 0 || newEvidenceCount > 0) ? 'NEW_INFORMATION' : 'NO_NEW_INFORMATION',
+      };
+    }
 
     if (isRetrievalTool(toolName)) {
       const before = this.firstViableCandidateRef === undefined;
@@ -191,6 +218,9 @@ export class RetrievalDisciplineTracker {
     };
     if (this.firstViableCandidateRef !== undefined) {
       feedback.firstViableCandidateRef = this.firstViableCandidateRef;
+    }
+    if (this.lastFormulaRetrieval !== undefined) {
+      feedback.lastFormulaRetrieval = this.lastFormulaRetrieval;
     }
     return feedback;
   }

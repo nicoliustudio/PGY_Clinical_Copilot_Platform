@@ -22,6 +22,7 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
   { id: 'formula.search_normative', description: '检索当前 scope 的 P1 规范方', risk: 'low', treatmentSpecific: true },
   { id: 'formula.search_candidates', description: '两阶段方剂检索第一阶段：召回少量基础方候选卡', risk: 'low', treatmentSpecific: true },
   { id: 'formula.get_evidence', description: '两阶段方剂检索第二阶段：展开完整方剂证据', risk: 'low', treatmentSpecific: true },
+  { id: 'formula.get_modification_evidence', description: '基础方已选后检索随证 ADD 加味证据（ADVISORY）', risk: 'low', treatmentSpecific: true },
   { id: 'formula.validate', description: '验证 source/formula/composition 同源绑定', risk: 'low' },
   { id: 'workspace.focus_candidates', description: '选择进入 Deliberation Frontier 的候选', risk: 'low' },
   { id: 'workspace.record_candidate_assessment', description: '记录 candidate × hypothesis 的候选评估', risk: 'low' },
@@ -31,7 +32,11 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
   ...EXPERIMENTAL_TOOLS,
   ...STANDARD_RUNTIME_TOOLS,
 ];
-export const BASELINE_TOOL_IDS: string[] = PLATFORM_TOOLS.map((t) => t.id);
+export const BASELINE_TOOL_IDS: string[] = PLATFORM_TOOLS.map((t) => t.id)
+  // H15.2.10：formula.search_normative 不再是基础临床的 Agent-visible primary search entry。
+  // 统一由 formula.search_candidates（applicable P1 → P2 fallback）承担；
+  // search_normative 保留为 gaofang 能力（膏方基础方 P1 检索）专用工具。
+  .filter((id) => id !== 'formula.search_normative');
 export const CLASSIC_BASELINE_TOOL_IDS: string[] = BASELINE_TOOL_IDS.filter((id) => id !== 'knowledge.get_source');
 export const BASELINE_KNOWLEDGE_SCOPES: string[] = ['general'];
 

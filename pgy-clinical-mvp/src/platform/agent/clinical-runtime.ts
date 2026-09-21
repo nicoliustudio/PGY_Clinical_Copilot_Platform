@@ -119,7 +119,14 @@ export class ClinicalRuntime {
     const proposal = await hydrateFormulaProposal(output.proposal, context);
     // canonical safety truth：模型 proposal.safety 不覆盖 canonical safety disposition。
     const withCanonicalSafety: AgentResult = proposal.mode === 'clinical'
-      ? { ...proposal, safety: { status: context.safety.blockNormativeCommit ? 'BLOCK' : 'PASS' } }
+      ? {
+          ...proposal,
+          safety: {
+            status: context.safety.blockNormativeCommit ? 'BLOCK' : 'PASS',
+            reviewRequired: context.safety.reviewRequired,
+            reviewReasons: context.safety.reviewReasons,
+          },
+        }
       : proposal;
     const authority = await this.authority.resolve(withCanonicalSafety, context);
 

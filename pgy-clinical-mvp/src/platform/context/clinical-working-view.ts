@@ -1,8 +1,8 @@
 import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
 import type { ClinicalWorkspace, DecisionState, PatternAssessment } from '../../contracts/workspace.js';
-import type { RecentRetrievalFeedback } from '../../contracts/execution.js';
-import { config } from '../../config.js';
+import type { FormulaRetrievalInfo, RecentRetrievalFeedback } from '../../contracts/execution.js';
 import { buildDecisionState } from '../workspace/decision-state-projection.js';
+import { checkClinicalCompletion, checkClinicalCoreCompletion } from '../workspace/clinical-workspace.js';
 
 /**
  * ClinicalWorkingView —— Agent 每一步默认看到的「目标驱动工作上下文」。
@@ -62,6 +62,54 @@ export interface ClinicalWorkingView {
   activeCapabilities: string[];
   recentUsefulActions: string[];
   retrievalFeedback?: RecentRetrievalFeedback;
+  /** H15.2.8：Kernel 确定性推导的完成状态（state validity/completion，非医学指令）。 */
+  clinicalCompletionState: ClinicalCompletionState;
+  /** H15.2.9：formula 决策的紧凑事实状态（非医学指令）。 */
+  formulaDecisionState: FormulaDecisionState;
+}
+
+export interface ClinicalCompletionState {
+  coreComplete: boolean;
+  coreMissing: string[];
+  formulaSelected: boolean;
+  formulaSelectedRef?: string;
+  obligationComplete: boolean;
+  obligationMissing: string[];
+}
+
+/** H15.2.9：formula 决策的紧凑事实状态（candidates / evidence / selection / 最近检索增量）。 */
+export interface FormulaDecisionState {
+  candidateCount: number;
+  evidenceCount: number;
+  selectedCandidateRef?: string;
+  lastRetrieval?: FormulaRetrievalInfo;
+}
+
+/** H15.2.8：Kernel 确定性推导完成状态，复用既有 completion 检查（不新增临床规则）。 */
+function buildClinicalCompletionState(workspace: ClinicalWorkspace): ClinicalCompletionState {
+  const core = checkClinicalCoreCompletion(workspace);
+  const obligation = checkClinicalCompletion(workspace);
+  const selectedRef = workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
+  return {
+    coreComplete: core.ok,
+    coreMissing: core.missing,
+    formulaSelected: typeof selectedRef === 'string' && selectedRef.trim() !== '',
+    formulaSelectedRef: selectedRef,
+    obligationComplete: obligation.ok,
+    obligationMissing: obligation.missingArtifacts,
+  };
+}
+
+/** H15.2.9：formula 决策的紧凑事实状态（确定性，非医学指令）。 */
+function buildFormulaDecisionState(workspace: ClinicalWorkspace, retrievalFeedback?: RecentRetrievalFeedback): FormulaDecisionState {
+  const candidateCount = workspace.candidates.filter((c) => c.kind === 'formula').length;
+  const evidenceCount = workspace.evidenceState.evidenceItems.filter((e) => e.evidenceKind === 'treatment_knowledge').length;
+  return {
+    candidateCount,
+    evidenceCount,
+    selectedCandidateRef: workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef,
+    lastRetrieval: retrievalFeedback?.lastFormulaRetrieval,
+  };
 }
 
 export function buildClinicalWorkingView(
@@ -116,11 +164,13 @@ export function buildClinicalWorkingView(
     retrievedInterpretations,
     focusedCandidates,
     decisionChangingUncertainty,
-    patternStructure: config.experiment.patternAssessment ? (workspace.patternAssessment ?? undefined) : undefined,
+    patternStructure: workspace.patternAssessment ?? undefined,
     activeSkills: workspace.activeSkills ?? [],
     activeCapabilities: workspace.activeCapabilities ?? [],
     recentUsefulActions: recentActions.map((a) => `${a.toolName}: ${a.summary}`),
     retrievalFeedback,
+    clinicalCompletionState: buildClinicalCompletionState(workspace),
+    formulaDecisionState: buildFormulaDecisionState(workspace, retrievalFeedback),
   };
 }
 
@@ -202,6 +252,33 @@ function renderRetrievalFeedback(fb?: RecentRetrievalFeedback): string {
   return lines.join('\n');
 }
 
+function renderClinicalCompletionState(s: ClinicalCompletionState): string {
+  const core = s.coreComplete ? 'complete' : `INCOMPLETE (missing: ${s.coreMissing.join(', ') || '—'})`;
+  const formula = s.formulaSelected ? `selected (${s.formulaSelectedRef})` : 'unresolved';
+  const obligation = s.obligationComplete
+    ? 'complete'
+    : (s.obligationMissing.length > 0 ? `INCOMPLETE (missing: ${s.obligationMissing.join(', ')})` : 'none declared');
+  return [
+    `clinical core: ${core}`,
+    `formula: ${formula}`,
+    `declared obligation: ${obligation}`,
+  ].join('\n');
+}
+
+function renderFormulaDecisionState(s: FormulaDecisionState): string {
+  const selection = s.selectedCandidateRef ? `selected (${s.selectedCandidateRef})` : 'unresolved';
+  const last = s.lastRetrieval
+    ? `${s.lastRetrieval.tool} → ${s.lastRetrieval.info}` +
+      ` (newCandidates=${s.lastRetrieval.newCandidateCount}, newEvidence=${s.lastRetrieval.newEvidenceCount})`
+    : '—';
+  return [
+    `formula candidates: ${s.candidateCount}`,
+    `evidence available: ${s.evidenceCount}`,
+    `selection: ${selection}`,
+    `last retrieval: ${last}`,
+  ].join('\n');
+}
+
 /** 将 WorkingView 渲染为 Agent 上下文片段。 */
 export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
   const block = (title: string, body: string) => `## ${title}\n${body}`;
@@ -223,11 +300,11 @@ export function renderClinicalWorkingView(view: ClinicalWorkingView): string {
       ].join('\n'),
     ),
     block('Retrieval Feedback', renderRetrievalFeedback(view.retrievalFeedback)),
+    block('Clinical Completion State', renderClinicalCompletionState(view.clinicalCompletionState)),
+    block('Formula Decision State', renderFormulaDecisionState(view.formulaDecisionState)),
     block('Case Frame', renderCaseFrame(view.caseFrame)),
     block('Active Patient Hypotheses', renderHypotheses(view.leadingHypotheses)),
-    ...(config.experiment.patternAssessment
-      ? [block('Pattern Structure', renderPatternStructure(view.patternStructure))]
-      : []),
+    block('Pattern Structure', renderPatternStructure(view.patternStructure)),
     block(
       'Retrieved Knowledge Interpretations (source labels, not patient diagnosis)',
       renderRetrievedInterpretations(view.retrievedInterpretations),

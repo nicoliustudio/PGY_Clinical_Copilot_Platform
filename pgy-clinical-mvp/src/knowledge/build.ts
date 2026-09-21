@@ -68,6 +68,25 @@ interface CaseEntry {
   knowledge_domain?: string;
 }
 
+interface EncounterEntry {
+  id?: string;
+  case_id?: string;
+  source?: string;
+  source_file?: string;
+  specialty?: string;
+  disease?: string;
+  patient?: string;
+  sex?: string;
+  visit?: string;
+  syndrome?: string;
+  symptoms?: string;
+  treatment?: string;
+  formula?: string;
+  formula_name?: string;
+  source_span_id?: string;
+  knowledge_domain?: string;
+}
+
 interface S1AnchorDoc {
   doc_id?: string;
   doc_type?: string;
@@ -171,6 +190,57 @@ function loadCases(layer: RuntimeLayer): KnowledgeDoc[] {
   });
 }
 
+/**
+ * H15.2.7：加载 release 内已结构化的 encounters.json，把每个诊次规范化为
+ * formula-level 证据单元（kind='case-formula'）。composition / syndrome / treatment /
+ * visit 全部来自离线结构化字段，不在 runtime 用 LLM 重新抽取病例全文。
+ */
+function loadEncounters(layer: RuntimeLayer): KnowledgeDoc[] {
+  const encounterFile = path.join(config.kb.releaseDir, 'encounters.json');
+  if (!existsSync(encounterFile)) return [];
+  const entries = loadJson<EncounterEntry[]>(encounterFile);
+  const docs: KnowledgeDoc[] = [];
+  for (const e of entries) {
+    const id = str(e.id);
+    const caseId = str(e.case_id);
+    const formula = str(e.formula).trim();
+    if (!id || !caseId || !formula) continue;
+    const domain = str(e.knowledge_domain) || layer.scope || 'general';
+    const parts = [
+      e.disease ? `病名：${e.disease}` : '',
+      e.patient ? `病人：${e.patient}` : '',
+      e.visit ? `诊次：${e.visit}` : '',
+      e.syndrome ? `辨证分型：${e.syndrome}` : '',
+      e.symptoms ? `病症描述：${e.symptoms}` : '',
+      e.treatment ? `治法：${e.treatment}` : '',
+      `方药：${formula}`,
+    ].filter(Boolean);
+    docs.push(baseDoc(layer, {
+      id: `P2:${id}`,
+      text: parts.join('\n'),
+      title: `${e.disease ?? ''}｜${e.patient ?? ''}｜${e.visit ?? ''}`,
+      kind: 'case-formula',
+      disease: str(e.disease),
+      syndrome: str(e.syndrome),
+      treatment: str(e.treatment),
+      source: str(e.source) || layer.source,
+      sourceFile: str(e.source_file),
+      sourceSchool: classifySourceSchool(str(e.source)),
+      scope: domain,
+      specialty: str(e.specialty) || undefined,
+      caseId,
+      visit: str(e.visit),
+      composition: formula,
+      formulaName: str(e.formula_name) || undefined,
+      patient: str(e.patient),
+      symptoms: str(e.symptoms),
+      sourceSpanId: str(e.source_span_id),
+      raw: e,
+    }));
+  }
+  return docs;
+}
+
 function loadS1(layer: RuntimeLayer): KnowledgeDoc[] {
   const docs: KnowledgeDoc[] = [];
   const anchorFile = path.join(config.kb.releaseDir, 's1/symptom_anchor_docs.jsonl');
@@ -252,7 +322,8 @@ function loadStandard2024(layer: RuntimeLayer): KnowledgeDoc[] {
 function loadLayerDocs(layer: RuntimeLayer): KnowledgeDoc[] {
   switch (layer.loader) {
     case 'normative': return loadNormative(layer);
-    case 'cases': return loadCases(layer);
+    case 'cases': return [...loadCases(layer), ...loadEncounters(layer)];
+    case 'encounters': return loadEncounters(layer);
     case 's1': return loadS1(layer);
     case 'standard-2024': return loadStandard2024(layer);
     default: return [];

@@ -231,6 +231,12 @@ export function workspaceEventsForTool(
           formulaId: readField(c, 'formulaId'),
           sourceId: readField(c, 'sourceId'),
           name: readField(c, 'formulaName'),
+          sourceAuthority: readField(c, 'sourceAuthority'),
+          sourceCaseRef: readField(c, 'sourceCaseRef'),
+          sourceEvidenceRef: readField(c, 'sourceEvidenceRef'),
+          visitRef: readField(c, 'visitRef'),
+          stage: readField(c, 'stage'),
+          composition: readField(c, 'composition'),
           originatingHypothesisRefs: [],
         },
       });

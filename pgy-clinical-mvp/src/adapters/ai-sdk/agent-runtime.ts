@@ -758,6 +758,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           rawOutput,
           candidateIdsBefore,
           evidenceIdsBefore,
+          newCandidateCount: reused ? 0 : context.workspace.candidates.filter((c) => !candidateIdsBefore.has(c.id)).length,
+          newEvidenceCount,
         });
         tracker.recordViableCandidateIfAbsent(context.workspace, currentStep, nowMs);
 

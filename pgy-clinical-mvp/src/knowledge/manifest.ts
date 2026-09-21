@@ -13,7 +13,7 @@
 
 import type { KnowledgeRole, SourceTier } from './types.js';
 
-export type LayerLoader = 'normative' | 'cases' | 's1' | 'standard-2024';
+export type LayerLoader = 'normative' | 'cases' | 'encounters' | 's1' | 'standard-2024';
 
 export interface RuntimeLayer {
   /** 稳定来源身份（对应 catalog layer id）。 */
@@ -80,7 +80,7 @@ export const knowledgeManifest: RuntimeLayer[] = [
     sourceTier: 'P2',
     prescriptionAuthority: false,
     runtime: true,
-    assets: ['cases.json'],
+    assets: ['cases.json', 'encounters.json'],
     loader: 'cases',
   },
   {

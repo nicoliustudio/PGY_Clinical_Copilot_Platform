@@ -122,6 +122,16 @@ export interface RecentRetrievalFeedback {
   recentNonDecisionChangingRetrievals: number;
   recentEvidenceReuseCount: number;
   firstViableCandidateRef?: string;
+  /** H15.2.9：最近一次 formula 检索的信息增量（事实反馈，非临床指令）。 */
+  lastFormulaRetrieval?: FormulaRetrievalInfo;
+}
+
+/** H15.2.9：一次 formula 检索动作的信息增量事实（确定性推导）。 */
+export interface FormulaRetrievalInfo {
+  tool: string;
+  newCandidateCount: number;
+  newEvidenceCount: number;
+  info: 'NEW_INFORMATION' | 'NO_NEW_INFORMATION';
 }
 
 /** Run 级执行可观测指标。 */

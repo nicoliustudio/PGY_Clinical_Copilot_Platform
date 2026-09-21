@@ -1,6 +1,6 @@
 import { loadIndex } from './build.js';
 import { cosine, embed, rerank } from '../model/adapter.js';
-import type { KnowledgeDoc, KnowledgeRole, SearchHit } from './types.js';
+import type { Kind, KnowledgeDoc, KnowledgeRole, SearchHit } from './types.js';
 import type { RetrievalDiagnostics } from './diagnostics.js';
 
 const HYBRID_CANDIDATE_K = 40;
@@ -13,6 +13,8 @@ export interface SearchWithDiagnostics {
 export interface SearchOptions {
   /** role-aware 检索：仅在该知识角色内召回。 */
   role?: KnowledgeRole;
+  /** kind 过滤：仅在指定文档形态内召回（如 P2 病例方药单元 kind='case-formula'）。 */
+  kind?: Kind;
   /** P1 → P2 fallback 原因（由 Agent 标注，可选）。 */
   fallbackReason?: string;
 }
@@ -42,6 +44,7 @@ export async function searchWithDiagnostics(
   for (let i = 0; i < idx.docs.length; i++) {
     const doc = idx.docs[i];
     if (options.role && doc.knowledgeRole !== options.role) continue;
+    if (options.kind && doc.kind !== options.kind) continue;
     if (!scopeSet.has(doc.scope ?? 'general')) continue;
     roleFiltered.push({ doc, i });
   }
@@ -90,6 +93,14 @@ export async function searchWithDiagnostics(
       matchedConcepts: [doc.disease, doc.syndrome].filter(Boolean),
       candidateRefs: doc.formulas.map((f) => `${doc.id}::${f.id}`),
       detailAvailable: true,
+      kind: doc.kind,
+      caseId: doc.caseId,
+      visit: doc.visit,
+      composition: doc.composition,
+      sourceSpanId: doc.sourceSpanId,
+      patient: doc.patient,
+      symptoms: doc.symptoms,
+      formulaName: doc.formulaName,
     };
   });
 

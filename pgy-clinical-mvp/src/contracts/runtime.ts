@@ -11,6 +11,9 @@ export interface SafetyDecision {
   status: 'PASS' | 'CAUTION' | 'BLOCK';
   reasons: string[];
   blockNormativeCommit: boolean;
+  /** H15.4：确定性 clinician review requirement（非 Agent 决定，由 structured risk attributes 导出）。 */
+  reviewRequired: boolean;
+  reviewReasons: string[];
 }
 
 export interface ModelProfile {

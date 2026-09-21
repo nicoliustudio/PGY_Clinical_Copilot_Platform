@@ -7,6 +7,7 @@ import { getDiseaseStandard, getSyndromeStandard, getDiseaseStandards } from '..
 import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
+import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
 import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
@@ -394,6 +395,11 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       return card;
     },
   }),
+  'formula.get_modification_evidence': (context) => tool({
+    description: '基础方已选后，检索已有加减知识（medication_rules，仅 action=ADD）中与当前患者现症/病名/证型确定性匹配的加味证据。返回少量候选（含来源与患者证据 ref）。检索到不等于采用；是否写入 ModificationPlan 由你决定。所有命中均为 ADVISORY + 需显式患者证据，不自动加味。',
+    inputSchema: z.object({ topK: z.number().optional() }),
+    execute: async ({ topK }) => searchModificationEvidence(context.workspace, topK ?? 3),
+  }),
   'formula.validate': (context) => tool({
     description: '校验 source_id + formula_id + composition 是否绑定于同一条 P1 规范记录。也可只传 candidateId，Harness 内部 canonical hydrate 后校验。',
     inputSchema: z.object({
@@ -464,7 +470,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_deliberation': (context) => tool({
-    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）' + (config.experiment.patternAssessment ? '、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）' : '') + '。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
+    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
     inputSchema: z.object({
       focusedCandidates: z.array(z.string()).optional(),
       assessments: z.array(z.object({
@@ -491,7 +497,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       modificationPlan: modificationPlanSchema.optional(),
       formulaReview: formulaReviewSchema.optional(),
       completionObligation: completionObligationSchema.optional(),
-      ...(config.experiment.patternAssessment ? { patternAssessment: patternAssessmentSchema.optional() } : {}),
+      patternAssessment: patternAssessmentSchema.optional(),
     }),
     execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment }) => {
       for (const ref of focusedCandidates ?? []) assertKnownCandidateRef(context, ref);
@@ -512,7 +518,25 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         if (errors.length > 0) throw new Error(errors.join('; '));
       }
       if (formulaSelection?.selectedCandidateRef) assertKnownCandidateRef(context, formulaSelection.selectedCandidateRef);
-      return { focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment };
+      // H15.5 compact receipt：不回显完整 payload，只返回本次写入的 artifact 摘要 + 剩余未决项。
+      const updatedArtifacts: string[] = [];
+      if (diseaseAssessment) updatedArtifacts.push('diseaseAssessment');
+      if (patternAssessment) updatedArtifacts.push('patternAssessment');
+      if (treatmentPlan) updatedArtifacts.push('treatmentPlan');
+      if (formulaSelection) updatedArtifacts.push('formulaSelection');
+      if (modificationPlan) updatedArtifacts.push('modificationPlan');
+      if (formulaReview) updatedArtifacts.push('formulaReview');
+      if (completionObligation) updatedArtifacts.push('completionObligation');
+      if (focusedCandidates && focusedCandidates.length > 0) updatedArtifacts.push('focusedCandidates');
+      if (assessments && assessments.length > 0) updatedArtifacts.push('candidateAssessments');
+      if (exclusions && exclusions.length > 0) updatedArtifacts.push('candidateExclusions');
+      if (hypothesisUpdates && hypothesisUpdates.length > 0) updatedArtifacts.push('hypotheses');
+      if (resolvedUncertaintyRefs && resolvedUncertaintyRefs.length > 0) updatedArtifacts.push('resolvedUncertainty');
+      return {
+        accepted: true,
+        updatedArtifacts,
+        remainingDecisionChangingUnknowns: remainingDecisionChangingUnknowns ?? [],
+      };
     },
   }),
   'workspace.consider_hypotheses': (context) => tool({
