@@ -1,13 +1,14 @@
 import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
-import { searchRuntimeCards, getRuntimeAsset } from '../../knowledge/runtime-catalog.js';
+import { searchRuntimeCards, getRuntimeAsset, getRuntimeAssetScope } from '../../knowledge/runtime-catalog.js';
 import { getDiagnosticPatterns } from '../../knowledge/diagnostic-patterns.js';
 import { getDiseaseStandard, getSyndromeStandard, getDiseaseStandards } from '../../knowledge/standard-runtime.js';
 import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
 import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
+import { recordSearchReceipt, recordHydrationReceipt } from '../../clinical/capability-evidence.js';
 import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
@@ -258,6 +259,8 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         diseaseContext: caseDiseaseContext,
         topK,
       });
+      // H15.7：确定性记录 discovery receipt（Runtime 拥有，模型无写入通道）。
+      recordSearchReceipt(context.workspace, context.knowledgeScopes, cards);
       addRetrievalDiagnostics(context.runId, {
         tool: 'knowledge.search_cards',
         query,
@@ -278,6 +281,11 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     inputSchema: z.object({ assetId: z.string() }),
     execute: async ({ assetId }) => {
       const asset = getRuntimeAsset(assetId, context.knowledgeScopes);
+      // H15.7：确定性记录 hydration receipt（Runtime 拥有，模型无写入通道）。
+      if (asset) {
+        const scope = getRuntimeAssetScope(assetId);
+        if (scope) recordHydrationReceipt(context.workspace, assetId, scope);
+      }
       addRetrievalDiagnostics(context.runId, {
         tool: 'knowledge.get_asset',
         query: assetId,

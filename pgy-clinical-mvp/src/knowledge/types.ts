@@ -31,6 +31,8 @@ export interface NormativeFormula {
   sourceTier: string;
   /** 公式级 knowledge_role（源自源数据，provenance 字符串）。 */
   knowledgeRole: string;
+  /** 公式级实体状态（源自源数据 entity_status，如 ACTIVE / INACTIVE）。仅 INACTIVE 视为非交付方。 */
+  entityStatus?: string;
 }
 
 /** 一个可检索的知识单元（对应一个 chunk / 向量）。 */

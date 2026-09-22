@@ -35,6 +35,9 @@ export class HarnessSession implements HarnessControlPort {
         treatmentSpecific: descriptor.treatmentSpecific,
         requiresTreatmentFormDecision: descriptor.requiresTreatmentFormDecision,
         treatmentFormEvidenceToolIds: descriptor.treatmentFormEvidenceToolIds,
+        knowledgeScopes: [...descriptor.knowledgeScopes],
+        evidenceObligations: descriptor.evidenceObligations,
+        deliveryObligations: descriptor.deliveryObligations,
       };
       this.context.capabilities.push(resolved);
     }

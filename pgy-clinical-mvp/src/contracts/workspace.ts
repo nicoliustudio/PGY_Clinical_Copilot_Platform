@@ -238,6 +238,110 @@ export interface FormulaReview {
   disposition: 'SUPPORTED' | 'REVISE' | 'UNCERTAIN';
 }
 
+/**
+ * H15.6 Source Formula Adoption State —— 分离「来源完整性」与「临床采纳」。
+ * 一个被采用的权威病-证 parent 下，所有 ACTIVE 原典方必须确定性水合；
+ * 主选方只有一个，其余是 SOURCE_ALTERNATIVE，只有存在明确临床排除依据时才是 CLINICALLY_EXCLUDED。
+ * `not selected` ≠ `clinically rejected`。
+ */
+export type FormulaAdoptionState = 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
+
+/** 同源原典方集合中的一个方。 */
+export interface SourceFormulaEntry {
+  /** 稳定公式引用 `${sourceId}::${formulaId}`。 */
+  formulaRef: string;
+  formulaId: string;
+  formulaName: string;
+  composition: string;
+  /** 来源完整性与临床采纳的分离状态。 */
+  relation: FormulaAdoptionState;
+  exclusionReason?: string;
+  exclusionEvidenceRefs?: string[];
+  /** 该方当前适用的加减证据（逐 formula 独立，非共享）。空数组 = 明确无适用加减。 */
+  applicableModifications: ModificationEvidenceCandidate[];
+}
+
+/**
+ * H15.6 Source Formula Set —— 确定性水合一个已采用 P1 parent 下的全部 ACTIVE 方。
+ * 由 Runtime 直接 hydrate，不经过 semantic search / topK / rerank / candidate frontier 截断。
+ */
+export interface SourceFormulaSet {
+  parentRecordRef: string;
+  disease: string;
+  syndrome: string;
+  treatmentMethod: string;
+  completeness: 'COMPLETE';
+  formulas: SourceFormulaEntry[];
+}
+
+/**
+ * H15.6 Modification Evidence Closure —— Runtime 确定性完成义务（非模型自觉）。
+ * 状态表达「是否真的查过、是否命中」，不表达「是否采用」。
+ */
+export interface ModificationEvidenceClosure {
+  status: 'FOUND' | 'SEARCHED_NONE' | 'NOT_APPLICABLE';
+  baseCandidateRef?: string;
+  parentSourceId?: string;
+  matchedRuleRefs: string[];
+  evaluatedPatientEvidenceRefs: string[];
+  version: number;
+}
+
+/**
+ * H15.6 Capability Evidence Closure —— 治疗形式能力（膏方/针灸/制剂/未来能力）的证据闭环。
+ * activation ≠ evidence acquired；低 Decision Authority 不降低 Discovery/Delivery 义务。
+ */
+export interface CapabilityEvidenceClosure {
+  capabilityId: string;
+  /** 关联的义务 id（来自 capability metadata，如 treatment-asset-evidence）。 */
+  obligationId?: string;
+  status: 'EVIDENCE_ACQUIRED' | 'SEARCHED_NONE' | 'NOT_APPLICABLE';
+  assetRefs: string[];
+  /** 是否真实执行过 discovery 检索（SEARCHED_NONE 必须为 true，禁止伪造「没搜」）。 */
+  searched?: boolean;
+  retrievalSurface?: string;
+  queryRefs?: string[];
+  reason?: string;
+}
+
+/**
+ * H15.7：Runtime 拥有的证据 receipt（确定性，由工具执行产生，模型无写入通道）。
+ * 按 capability activation scope + 工具（discovery/hydration）聚合，用于 obligation-level closure 投影。
+ */
+export interface CapabilityEvidenceReceipt {
+  scope: string;
+  /** discovery 工具 → 返回的 asset ids（toolId 来自 obligation.discoveryToolIds）。 */
+  discoveryByTool: Record<string, string[]>;
+  /** hydration 工具 → 已水合的 asset ids（toolId 来自 obligation.hydrationToolIds）。 */
+  hydrationByTool: Record<string, string[]>;
+}
+
+/**
+ * H15.9 / Phase 3.5 Capability Delivery Closure —— 治疗交付闭环。
+ * 区分「证据取得」与「交付完成」：EVIDENCE_ACQUIRED 只证明系统读过相关知识，
+ * DELIVERED 才证明对应 durable artifact 已真实形成。
+ * 由 Runtime 从 durable artifact satisfaction 投影，不由模型声明。
+ */
+export type CapabilityDeliveryStatus = 'DELIVERED' | 'NOT_DELIVERABLE';
+
+export interface CapabilityDeliveryClosure {
+  capabilityId: string;
+  obligationId: string;
+  status: CapabilityDeliveryStatus;
+  /** 交付所满足的 durable artifact key（如 treatmentFormDecision）。 */
+  artifactRef?: string;
+}
+
+/** 加减证据候选（逐 formula 独立命中；ADVISORY，不自动加味）。 */
+export interface ModificationEvidenceCandidate {
+  modificationEvidenceRef: string;
+  trigger: string;
+  matchedPatientEvidenceRefs: string[];
+  medication: string;
+  dose: string;
+  sourceRef: string;
+}
+
 export interface ClinicalDecisionSpine {
   clinicalQuestion?: { statement: string; version: number };
   diseaseAssessment?: DiseaseAssessment;
@@ -387,6 +491,19 @@ export interface ClinicalWorkspace {
   patternAssessment: PatternAssessment | null;
   /** H15 临床决策主干（引用型；固定因果顺序，不固定医学答案）。 */
   clinicalDecisionSpine: ClinicalDecisionSpine;
+  /**
+   * H15.6 确定性来源完整性子图：选中权威 parent 后由 Runtime 水合，不依赖模型。
+   * not selected ≠ clinically rejected；所有 ACTIVE 原典方都不会 silent drop。
+   */
+  sourceFormulaSet?: SourceFormulaSet;
+  /** H15.6 加减证据闭环（Runtime 完成义务，非模型自觉）。 */
+  modificationEvidenceClosure?: ModificationEvidenceClosure;
+  /** H15.6 各治疗形式能力的证据闭环（activation ≠ evidence acquired）。 */
+  capabilityEvidenceClosures?: CapabilityEvidenceClosure[];
+  /** H15.7：Runtime 拥有的证据 receipt（按 scope 聚合；模型无写入通道）。 */
+  capabilityEvidenceReceipts?: Record<string, CapabilityEvidenceReceipt>;
+  /** H15.9 / Phase 3.5：各治疗形式能力的交付闭环（evidence acquired ≠ delivery delivered）。 */
+  capabilityDeliveryClosures?: CapabilityDeliveryClosure[];
 }
 
 export type WorkspaceEventType =

@@ -72,6 +72,26 @@ function sameStringArray(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
+/**
+ * H15.6 semantic no-op 检测：对任意值的稳定序列化（递归对象键排序）。
+ * 用于 durable artifact 写入前 canonicalize + deep-equal，避免重复写入 bump version 制造假进展。
+ */
+function stableStringify(value: unknown): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  const t = typeof value;
+  if (t === 'string') return JSON.stringify(value);
+  if (t === 'number' || t === 'boolean') return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  return stableStringify(a) === stableStringify(b);
+}
+
 function sameAssessment(a: CandidateAssessment, b: CandidateAssessment): boolean {
   return (
     a.candidateRef === b.candidateRef &&
@@ -500,7 +520,9 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
   }
 
   private applyPatternAssessment(payload: Record<string, unknown>): boolean {
-    this.workspace.patternAssessment = parsePatternAssessment(payload);
+    const next = parsePatternAssessment(payload);
+    if (sameValue(this.workspace.patternAssessment, next)) return false;
+    this.workspace.patternAssessment = next;
     const version = this.events.length + 1;
     this.workspace.clinicalDecisionSpine.patternAssessmentRef = `PA_${version}`;
     this.workspace.clinicalDecisionSpine.patternAssessmentVersion = version;
@@ -510,13 +532,18 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
   private applyDiseaseAssessment(payload: Record<string, unknown>): boolean {
     const statement = asString(payload.statement);
     if (!statement) return false;
-    this.workspace.clinicalDecisionSpine.diseaseAssessment = {
+    const next = {
       statement,
       diseaseRefs: asStringArray(payload.diseaseRefs),
       evidenceRefs: asStringArray(payload.evidenceRefs),
       uncertainty: asStringArray(payload.uncertainty),
-      version: this.events.length + 1,
     };
+    const existing = this.workspace.clinicalDecisionSpine.diseaseAssessment;
+    if (existing && sameValue(
+      { statement: existing.statement, diseaseRefs: existing.diseaseRefs, evidenceRefs: existing.evidenceRefs, uncertainty: existing.uncertainty },
+      next,
+    )) return false;
+    this.workspace.clinicalDecisionSpine.diseaseAssessment = { ...next, version: this.events.length + 1 };
     return true;
   }
 
@@ -524,44 +551,62 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const primaryPrinciple = asString(payload.primaryPrinciple);
     const treatmentTarget = asString(payload.treatmentTarget);
     if (!primaryPrinciple || !treatmentTarget) return false;
-    this.workspace.clinicalDecisionSpine.treatmentPlan = {
+    const treatmentFormDecision = (() => {
+      const raw = payload.treatmentFormDecision;
+      if (!raw || typeof raw !== 'object') return undefined;
+      const x = raw as Record<string, unknown>;
+      const form = asString(x.form);
+      const disposition = asString(x.disposition);
+      const statement = asString(x.statement);
+      if (!form || !statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
+      return {
+        form,
+        disposition: disposition as TreatmentFormDisposition,
+        statement,
+        sourceEvidenceRefs: asStringArray(x.sourceEvidenceRefs),
+        advisoryComposition: asStringArray(x.advisoryComposition),
+        preparation: asString(x.preparation),
+        usage: asString(x.usage),
+      };
+    })();
+    const next = {
       primaryPrinciple,
       adjunctPrinciples: asStringArray(payload.adjunctPrinciples),
       treatmentTarget,
       priority: asString(payload.priority),
       rationale: asString(payload.rationale),
       evidenceRefs: asStringArray(payload.evidenceRefs),
-      treatmentFormDecision: (() => {
-        const raw = payload.treatmentFormDecision;
-        if (!raw || typeof raw !== 'object') return undefined;
-        const x = raw as Record<string, unknown>;
-        const form = asString(x.form);
-        const disposition = asString(x.disposition);
-        const statement = asString(x.statement);
-        if (!form || !statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
-        return {
-          form,
-          disposition: disposition as TreatmentFormDisposition,
-          statement,
-          sourceEvidenceRefs: asStringArray(x.sourceEvidenceRefs),
-          advisoryComposition: asStringArray(x.advisoryComposition),
-          preparation: asString(x.preparation),
-          usage: asString(x.usage),
-        };
-      })(),
-      version: this.events.length + 1,
+      treatmentFormDecision,
     };
+    const existing = this.workspace.clinicalDecisionSpine.treatmentPlan;
+    if (existing && sameValue({
+      primaryPrinciple: existing.primaryPrinciple,
+      adjunctPrinciples: existing.adjunctPrinciples,
+      treatmentTarget: existing.treatmentTarget,
+      priority: existing.priority,
+      rationale: existing.rationale,
+      evidenceRefs: existing.evidenceRefs,
+      treatmentFormDecision: existing.treatmentFormDecision,
+    }, next)) return false;
+    this.workspace.clinicalDecisionSpine.treatmentPlan = { ...next, version: this.events.length + 1 };
     return true;
   }
 
   private applyFormulaSelection(payload: Record<string, unknown>): boolean {
-    this.workspace.clinicalDecisionSpine.formulaSelection = {
+    const next = {
       selectedCandidateRef: asString(payload.selectedCandidateRef),
       rationale: asString(payload.rationale),
       supportingEvidenceRefs: asStringArray(payload.supportingEvidenceRefs),
       contradictingEvidenceRefs: asStringArray(payload.contradictingEvidenceRefs),
-      version: this.events.length + 1,
     };
+    const existing = this.workspace.clinicalDecisionSpine.formulaSelection;
+    if (existing && sameValue({
+      selectedCandidateRef: existing.selectedCandidateRef,
+      rationale: existing.rationale,
+      supportingEvidenceRefs: existing.supportingEvidenceRefs,
+      contradictingEvidenceRefs: existing.contradictingEvidenceRefs,
+    }, next)) return false;
+    this.workspace.clinicalDecisionSpine.formulaSelection = { ...next, version: this.events.length + 1 };
     return true;
   }
 
@@ -581,6 +626,8 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
           })
           .filter((x): x is NonNullable<typeof x> => x !== undefined)
       : [];
+    const existing = this.workspace.clinicalDecisionSpine.modificationPlan;
+    if (existing && sameValue(existing.items, items)) return false;
     this.workspace.clinicalDecisionSpine.modificationPlan = {
       items,
       version: this.events.length + 1,
@@ -592,13 +639,16 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const assessment = asString(payload.assessment);
     const disposition = asString(payload.disposition) as 'SUPPORTED' | 'REVISE' | 'UNCERTAIN' | undefined;
     if (!assessment || !disposition) return false;
-    this.workspace.clinicalDecisionSpine.formulaReview = {
+    const next = {
       assessment,
       coveredTargets: asStringArray(payload.coveredTargets),
       uncoveredProblems: asStringArray(payload.uncoveredProblems),
       conflicts: asStringArray(payload.conflicts),
       disposition,
     };
+    const existing = this.workspace.clinicalDecisionSpine.formulaReview;
+    if (existing && sameValue(existing, next)) return false;
+    this.workspace.clinicalDecisionSpine.formulaReview = next;
     return true;
   }
 
@@ -606,6 +656,10 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const requestedOutcome = asString(payload.requestedOutcome);
     if (!requestedOutcome) return false;
     const requiredArtifacts = asStringArray(payload.requiredArtifacts);
+    const existing = this.workspace.clinicalDecisionSpine.completionObligation;
+    if (existing && existing.requestedOutcome === requestedOutcome && sameStringArray(existing.requiredArtifacts, requiredArtifacts)) {
+      return false;
+    }
     this.workspace.clinicalDecisionSpine.completionObligation = {
       requestedOutcome,
       requiredArtifacts,
@@ -873,7 +927,31 @@ export interface ClinicalCompletionResult {
   missingArtifacts: string[];
 }
 
-function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: string): boolean {
+export function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: string): boolean {
+  // H15.7/H15.8：capability evidence obligation（obligation 粒度）的满足 = 存在 terminal closure。
+  if (artifact.startsWith('capabilityEvidence:')) {
+    const rest = artifact.slice('capabilityEvidence:'.length);
+    const idx = rest.lastIndexOf(':');
+    const capabilityId = idx === -1 ? rest : rest.slice(0, idx);
+    const obligationId = idx === -1 ? undefined : rest.slice(idx + 1);
+    const closure = (workspace.capabilityEvidenceClosures ?? []).find(
+      (c) => c.capabilityId === capabilityId && (obligationId === undefined || c.obligationId === obligationId),
+    );
+    return closure !== undefined
+      && (closure.status === 'EVIDENCE_ACQUIRED' || closure.status === 'SEARCHED_NONE' || closure.status === 'NOT_APPLICABLE');
+  }
+  // H15.9 / Phase 3.5：capability delivery obligation（obligation 粒度）的满足 = 存在 terminal delivery closure。
+  if (artifact.startsWith('capabilityDelivery:')) {
+    const rest = artifact.slice('capabilityDelivery:'.length);
+    const idx = rest.lastIndexOf(':');
+    const capabilityId = idx === -1 ? rest : rest.slice(0, idx);
+    const obligationId = idx === -1 ? undefined : rest.slice(idx + 1);
+    const closure = (workspace.capabilityDeliveryClosures ?? []).find(
+      (c) => c.capabilityId === capabilityId && (obligationId === undefined || c.obligationId === obligationId),
+    );
+    return closure !== undefined
+      && (closure.status === 'DELIVERED' || closure.status === 'NOT_DELIVERABLE');
+  }
   const spine = workspace.clinicalDecisionSpine;
   switch (artifact) {
     case 'diseaseAssessment': return spine.diseaseAssessment !== undefined;
@@ -961,11 +1039,17 @@ export function computeClinicalClosure(workspace: ClinicalWorkspace): ClinicalCl
   const core = checkClinicalCoreCompletion(workspace);
   if (!core.ok || !workspace.clinicalDecisionSpine.treatmentPlan) return { required: false };
   const hasFormulaCandidate = workspace.candidates.some((c) => c.kind === 'formula');
+  // 治疗形式能力（针灸/膏方/制剂）不产出 formula candidate，但会产生 terminal capability evidence closure；
+  // 否则 closure 永远不触发，broad knowledge.search 无法收口（T15 ksearch 发散根因）。
+  const hasTerminalEvidenceClosure = (workspace.capabilityEvidenceClosures ?? []).some(
+    (c) => c.status === 'EVIDENCE_ACQUIRED' || c.status === 'SEARCHED_NONE',
+  );
   const hasEvidence = workspace.evidenceState.evidenceItems.length > 0;
-  if (hasFormulaCandidate && hasEvidence) {
+  const hasDecisionSurface = hasFormulaCandidate || hasTerminalEvidenceClosure;
+  if (hasDecisionSurface && hasEvidence) {
     return {
       required: true,
-      reason: 'clinical core formed + non-urgent + candidate/evidence surface available',
+      reason: 'clinical core formed + non-urgent + decision/evidence surface available',
     };
   }
   return { required: false };

@@ -22,5 +22,13 @@
   "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"],
   "treatmentSpecific": true,
   "requiresTreatmentFormDecision": true,
-  "treatmentFormEvidenceToolIds": ["knowledge.search_cards", "knowledge.get_asset"]
+  "treatmentFormEvidenceToolIds": ["knowledge.search_cards", "knowledge.get_asset"],
+  "evidenceObligations": [
+    {
+      "id": "treatment-asset-evidence",
+      "evidenceType": "treatment-asset",
+      "discoveryToolIds": ["knowledge.search_cards"],
+      "hydrationToolIds": ["knowledge.get_asset"]
+    }
+  ]
 }

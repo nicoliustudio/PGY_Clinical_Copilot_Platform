@@ -18,5 +18,19 @@
   "knowledgeScopes": ["tcm.preparation"],
   "skillIds": [],
   "toolIds": [],
-  "treatmentSpecific": true
+  "treatmentSpecific": true,
+  "evidenceObligations": [
+    {
+      "id": "treatment-asset-evidence",
+      "evidenceType": "treatment-asset",
+      "discoveryToolIds": ["knowledge.search_cards"],
+      "hydrationToolIds": ["knowledge.get_asset"]
+    }
+  ],
+  "deliveryObligations": [
+    {
+      "id": "treatment-form-delivery",
+      "requiredArtifact": "treatmentFormDecision"
+    }
+  ]
 }

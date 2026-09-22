@@ -9,10 +9,20 @@ export class ClassicSemanticNeedResolver {
   ): Promise<ResolvedCapability[]> {
     const needs = new Set(understanding.capabilityNeeds.map((need) => need.capability));
     return candidates
-      .map((candidate) => {
+      .map((candidate): ResolvedCapability | undefined => {
         const matched = candidate.provides.filter((key) => needs.has(key));
         if (!matched.length) return undefined;
-        return { id: candidate.id, confidence: 0.7, reason: `legacy exact-key match: ${matched.join(', ')}` };
+        return {
+          id: candidate.id,
+          confidence: 0.7,
+          reason: `legacy exact-key match: ${matched.join(', ')}`,
+          treatmentSpecific: candidate.treatmentSpecific,
+          requiresTreatmentFormDecision: candidate.requiresTreatmentFormDecision,
+          treatmentFormEvidenceToolIds: candidate.treatmentFormEvidenceToolIds,
+          knowledgeScopes: [...candidate.knowledgeScopes],
+          evidenceObligations: candidate.evidenceObligations,
+          deliveryObligations: candidate.deliveryObligations,
+        };
       })
       .filter((value): value is ResolvedCapability => value !== undefined);
   }

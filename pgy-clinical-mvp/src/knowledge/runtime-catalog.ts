@@ -24,6 +24,10 @@ export interface RuntimeCard {
   disease?: { name?: string; raw_name?: string; specialty?: string };
   syndrome_pattern?: string;
   applies_to_syndromes?: string[];
+  /** 治法（开放文本，来自源数据）。 */
+  treatment_method?: string;
+  /** 适应证预览（开放文本，来自源数据）。 */
+  indication_preview?: string;
   source_label?: string;
   source_kind?: string;
   can_decide_base_formula?: boolean;
@@ -48,6 +52,12 @@ export interface RuntimeCardHit {
   source_label?: string;
   can_decide_base_formula?: boolean;
   detail_ref?: { file?: string; line?: number; asset_id?: string };
+  /** H15.6 lean card 判别摘要：证型标签（syndrome_pattern + applies_to_syndromes 归一）。 */
+  syndromeLabels?: string[];
+  /** H15.6 lean card 判别摘要：治法（非决策型，只用于判断是否值得 hydrate）。 */
+  treatmentMethod?: string;
+  /** H15.6 lean card 判别摘要：适应证预览（非决策型）。 */
+  indicationPreview?: string;
   /** 知识相关性（disease/source/document/query relevance），非患者匹配分。 */
   relevance: number;
 }
@@ -299,6 +309,11 @@ function tokenize(text: string): Set<string> {
 }
 
 function toHit(card: RuntimeCard, query: string): RuntimeCardHit {
+  const syndromeLabels: string[] = [];
+  if (card.syndrome_pattern && card.syndrome_pattern.trim()) syndromeLabels.push(card.syndrome_pattern.trim());
+  for (const s of card.applies_to_syndromes ?? []) {
+    if (s && s.trim() && !syndromeLabels.includes(s.trim())) syndromeLabels.push(s.trim());
+  }
   return {
     asset_id: card.asset_id,
     title: asString(card.title),
@@ -310,6 +325,9 @@ function toHit(card: RuntimeCard, query: string): RuntimeCardHit {
     source_label: card.source_label,
     can_decide_base_formula: card.can_decide_base_formula,
     detail_ref: card.detail_ref,
+    syndromeLabels,
+    treatmentMethod: card.treatment_method?.trim() ? card.treatment_method.trim() : undefined,
+    indicationPreview: card.indication_preview?.trim() ? card.indication_preview.trim() : undefined,
     relevance: knowledgeRelevance(query, card),
   };
 }
@@ -341,6 +359,23 @@ export function searchRuntimeCards(
 
   const scored = pool.map((card) => toHit(card, query)).sort((a, b) => b.relevance - a.relevance);
   const limit = options.topK ?? config.kb.runtimeCardLimit;
+
+  // H15.6：零相关卡不当 evidence surface。若最高 relevance 仍为 0，返回 []（SEARCHED_NONE），
+  // 不把 active-scope catalog 里的任意头部卡片塞给 Agent。
+  if (scored.length === 0 || scored[0].relevance <= 0) {
+    return {
+      cards: [],
+      telemetry: {
+        activeScopes: scopes.filter((s) => loadScopeIndex().has(s)),
+        catalogTotalCount: all.length,
+        candidateCount: pool.length,
+        cardsReturnedCount: 0,
+        cardsReturnedAssetIds: [],
+        narrowedBy: candidate.narrowedBy,
+      },
+    };
+  }
+
   const cards = scored.slice(0, limit);
 
   return {
@@ -359,6 +394,12 @@ export function searchRuntimeCards(
 /** 当前激活 scope 下、去 deferred 后的卡片总数（观测/验收用）。 */
 export function countRuntimeCards(scopes: string[]): number {
   return loadRuntimeCards(scopes).length;
+}
+
+/** H15.7：返回某 asset 的 activation_scope（来自 locator），用于 hydration receipt → closure 投影。 */
+export function getRuntimeAssetScope(assetId: string): string | undefined {
+  const loc = loadLocator().get(assetId);
+  return loc?.activation_scope ?? undefined;
 }
 
 function readDataLine(file: string, line: number): unknown | null {

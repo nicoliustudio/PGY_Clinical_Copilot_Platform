@@ -27,8 +27,8 @@ import { buildEvidenceProjection } from '../../platform/workspace/evidence-proje
 import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-projection.js';
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
-import { computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
+import { parseEvidenceArtifactKey } from '../../clinical/capability-evidence.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
@@ -142,14 +142,132 @@ function activeToolIds(context: RuntimeContext, bindings: AiSdkToolBindings, mod
   return [...allowed].filter((id) => Boolean(bindings[id])).map((id) => toApiToolName(id));
 }
 
-function treatmentFormEvidenceToolIds(context: RuntimeContext): Set<string> {
-  const ids = new Set<string>();
-  for (const capability of context.capabilities) {
-    if (capability.requiresTreatmentFormDecision !== true) continue;
-    for (const id of capability.treatmentFormEvidenceToolIds ?? []) ids.add(id);
-  }
-  return ids;
+/**
+ * H15.8.3 / Phase 3.4：Clinical Action Phase —— 由 Runtime 状态推导的取证/合成/决策阶段。
+ * pure derived state，可逆（不一次性 lock），不识别病种/方/能力。
+ */
+type ClinicalActionPhase =
+  | 'EVIDENCE_ACQUISITION'
+  | 'CORE_SYNTHESIS'
+  | 'HYPOTHESIS_DISPOSITION'
+  | 'DECISION_COMMIT'
+  | 'READY';
+
+/**
+ * 阶段由「requirement 是否满足」推导（复用 evaluateProposalReadiness 的单一真源）：
+ * - 存在未 terminal 的 capability evidence obligation → EVIDENCE_ACQUISITION
+ * - 临床核心（disease/pattern/treatment/formalHypotheses）未形成 → CORE_SYNTHESIS
+ * - 核心已形成、但存在未 disposition 的 agent 假说 → HYPOTHESIS_DISPOSITION
+ * - 核心/假说已定、但最终 decision artifact 未完成 → DECISION_COMMIT
+ * - 全部 satisfied → READY
+ */
+/** 临床核心 artifact 集合（core 未形成 → CORE_SYNTHESIS）。 */
+const CORE_ARTIFACTS = new Set(['diseaseAssessment', 'patternAssessment', 'treatmentPlan', 'formalHypotheses']);
+
+function deriveClinicalActionPhase(context: RuntimeContext): ClinicalActionPhase {
+  const readiness = evaluateProposalReadiness(context);
+  if (readiness.missingArtifacts.some((a) => a.startsWith('capabilityEvidence:'))) return 'EVIDENCE_ACQUISITION';
+  if (readiness.coreMissing.length > 0 || readiness.missingArtifacts.some((a) => CORE_ARTIFACTS.has(a))) return 'CORE_SYNTHESIS';
+  if (readiness.unresolvedHypotheses.length > 0) return 'HYPOTHESIS_DISPOSITION';
+  if (!readiness.ready) return 'DECISION_COMMIT';
+  return 'READY';
 }
+
+/**
+ * H15.10 / Phase 4：Retrieval Orchestration —— 当前 active evidence work item。
+ * 当多个 evidence obligation 同时 unmet 时，按稳定顺序（capabilityId:obligationId 字典序）返回第一个（active），
+ * 让 evidence acquisition 从「自由探索」收敛为「有明确工作项的取证」。
+ * 全部 terminal 时返回 null（无 active work item，应离开 EVIDENCE_ACQUISITION）。
+ * 纯 derived state，不识别病种/方/能力。
+ */
+export function activeEvidenceObligation(
+  context: RuntimeContext,
+): { capabilityId: string; obligationId: string } | null {
+  const readiness = evaluateProposalReadiness(context);
+  const unmet = readiness.missingArtifacts
+    .filter((a) => a.startsWith('capabilityEvidence:'))
+    .sort();
+  if (unmet.length === 0) return null;
+  return parseEvidenceArtifactKey(unmet[0]);
+}
+
+/**
+ * 工具职责分类（通用 Runtime action class，非业务枚举）。
+ * 关键区分（对应 T15/T18 诊断）：
+ * - CAPABILITY_EVIDENCE：治疗形式能力的证据义务工具（search_cards / get_asset）——证据 terminal 后应收口。
+ * - CORE_KNOWLEDGE：辨证/辨病规范知识检索（standards）——只产出诊断依据，不扩张方剂 frontier。
+ * - GENERAL_SEARCH：通用 broad 检索（knowledge.search，可返回方剂）——须由 phase 约束其检索目的。
+ * - EVIDENCE_READ：精确读取已取得证据（get_source）。
+ * - DECISION：方剂/候选决策工具——由 addFormulaDecisionTools 做 state-driven 收窄。
+ */
+type ActionClass =
+  | 'CAPABILITY_EVIDENCE'
+  | 'CORE_KNOWLEDGE'
+  | 'GENERAL_SEARCH'
+  | 'EVIDENCE_READ'
+  | 'HYPOTHESIS_PRESENTATION'
+  | 'CLINICAL_SYNTHESIS'
+  | 'DECISION'
+  | 'SUBMISSION'
+  | 'CAPABILITY'
+  | 'OTHER';
+
+function actionClassOf(toolId: string): ActionClass {
+  switch (toolId) {
+    case 'knowledge.search_cards':
+    case 'knowledge.get_asset':
+      return 'CAPABILITY_EVIDENCE';
+    case 'knowledge.search':
+      return 'GENERAL_SEARCH';
+    case 'knowledge.get_source':
+      return 'EVIDENCE_READ';
+    case 'knowledge.get_diagnostic_patterns':
+    case 'knowledge.get_disease_standard':
+    case 'knowledge.get_syndrome_standard':
+      return 'CORE_KNOWLEDGE';
+    case 'workspace.consider_hypotheses':
+      return 'HYPOTHESIS_PRESENTATION';
+    case 'workspace.record_deliberation':
+      return 'CLINICAL_SYNTHESIS';
+    case 'workspace.focus_candidates':
+    case 'workspace.record_candidate_assessment':
+    case 'workspace.record_candidate_exclusion':
+    case 'formula.validate':
+    case 'formula.search_normative':
+    case 'formula.search_candidates':
+    case 'formula.get_evidence':
+    case 'formula.get_modification_evidence':
+      return 'DECISION';
+    case 'proposal.submit':
+      return 'SUBMISSION';
+    case 'capability.discover':
+    case 'capability.activate':
+      return 'CAPABILITY';
+    default:
+      return 'OTHER';
+  }
+}
+
+/**
+ * 每个 phase 允许的 action class。DECISION 类不在此平铺，而由 addFormulaDecisionTools 做
+ * candidate/frontier state 驱动收窄（发现 → 聚焦 → 取证 → 选择）。
+ *
+ * SUBMISSION（Phase 3.1）：READY / 核心未形成 时可用；核心已形成但未 ready（HYPOTHESIS_DISPOSITION /
+ * DECISION_COMMIT）时隐藏，逼模型补齐而不是反复探 submit。
+ * HYPOTHESIS_PRESENTATION（Phase 3.3 + 3.6）：只在 EVIDENCE_ACQUISITION / CORE_SYNTHESIS 开放（辨证尚未收敛）。
+ * HYPOTHESIS_DISPOSITION（存在未 disposition 假说）与 DECISION_COMMIT（假说已 disposition 且无新证据）均隐藏——
+ * 不因模型继续发散思考而重新 present 新假说。真正的新证据（unmet evidence obligation / core 未形成）会通过
+ * phase 回退到 EVIDENCE_ACQUISITION / CORE_SYNTHESIS 自动重新开放 generation。
+ * GENERAL_SEARCH（Phase 4）：broad 检索（knowledge.search）只在辨证未收敛（EVIDENCE_ACQUISITION / CORE_SYNTHESIS）
+ * 开放；一旦进入 disposition / decision 阶段即收口，避免用 broad search 重新扩张方剂 frontier。
+ */
+const PHASE_ALLOWED_CLASSES: Record<ClinicalActionPhase, ActionClass[]> = {
+  EVIDENCE_ACQUISITION: ['CAPABILITY_EVIDENCE', 'CORE_KNOWLEDGE', 'GENERAL_SEARCH', 'EVIDENCE_READ', 'HYPOTHESIS_PRESENTATION', 'CLINICAL_SYNTHESIS', 'CAPABILITY', 'SUBMISSION'],
+  CORE_SYNTHESIS: ['CORE_KNOWLEDGE', 'GENERAL_SEARCH', 'EVIDENCE_READ', 'HYPOTHESIS_PRESENTATION', 'CLINICAL_SYNTHESIS', 'CAPABILITY', 'SUBMISSION'],
+  HYPOTHESIS_DISPOSITION: ['CORE_KNOWLEDGE', 'EVIDENCE_READ', 'CLINICAL_SYNTHESIS', 'CAPABILITY'],
+  DECISION_COMMIT: ['CLINICAL_SYNTHESIS', 'DECISION', 'CAPABILITY'],
+  READY: ['SUBMISSION'],
+};
 
 function hasExpandedFormulaEvidence(context: RuntimeContext, candidateRef: string): boolean {
   return context.workspace.evidenceState.evidenceItems.some((e) => e.relatedCandidates.includes(candidateRef));
@@ -169,13 +287,10 @@ function addFormulaDecisionTools(context: RuntimeContext, allowed: Set<string>):
   const frontier = context.workspace.deliberationState.frontier.filter((ref) => candidates.some((c) => c.id === ref));
 
   [
-    'workspace.consider_hypotheses',
     'workspace.focus_candidates',
     'workspace.record_candidate_assessment',
     'workspace.record_candidate_exclusion',
-    'workspace.record_deliberation',
     'formula.validate',
-    'proposal.submit',
   ].forEach((t) => allowed.add(t));
 
   if (selected) {
@@ -196,47 +311,45 @@ function addFormulaDecisionTools(context: RuntimeContext, allowed: Set<string>):
 }
 
 /**
- * Decision closure is not an EarlyStop engine. It only removes further exploration once
- * the clinical core, candidate surface, and treatment-specific evidence are already present.
+ * Phase 3.4：统一 action-surface 投影。由 deriveClinicalActionPhase 推导阶段，
+ * 再按 phase 允许的 action class 投影工具面（DECISION 类由 addFormulaDecisionTools 做 state-driven 收窄）。
+ * 这是 closureAwareActiveToolIds 与 recoveryActiveToolIds 的共同真源，避免各自维护一套零散 gate。
  */
+function projectActiveToolSurface(
+  context: RuntimeContext,
+  bindings: AiSdkToolBindings,
+  mode: 'harness' | 'classic',
+): string[] {
+  const phase = deriveClinicalActionPhase(context);
+  const all = activeToolIds(context, bindings, mode);
+  const allowed = new Set<string>();
+  const classes = PHASE_ALLOWED_CLASSES[phase];
+
+  // 非 DECISION 类：按 class 过滤（allowed 统一存 internal 名）。
+  for (const t of all) {
+    const internal = fromApiToolName(t);
+    const cls = actionClassOf(internal);
+    if (cls !== 'DECISION' && classes.includes(cls)) allowed.add(internal);
+  }
+
+  // DECISION 类：state-driven 收窄（发现 → 聚焦 → 取证 → 选择）。
+  if (classes.includes('DECISION')) {
+    addFormulaDecisionTools(context, allowed);
+  }
+
+  // H15.9 / Phase 3.5：DECISION_COMMIT 缺 delivery artifact 时，需要的是 synthesis / delivery commit，
+  // 而不是重新取证。已闭环的 CAPABILITY_EVIDENCE 工具不因 delivery missing 重新开放。
+  // 只有出现新的 unmet evidence obligation（→ EVIDENCE_ACQUISITION）才重新开放取证。
+
+  return all.filter((t) => allowed.has(fromApiToolName(t)));
+}
+
 function closureAwareActiveToolIds(
   context: RuntimeContext,
   bindings: AiSdkToolBindings,
   mode: 'harness' | 'classic',
 ): string[] {
-  const all = activeToolIds(context, bindings, mode);
-  const closure = computeClinicalClosure(context.workspace);
-  if (!closure.required) {
-    // H15.5.3：closure 未正式触发（常因缺 treatmentPlan），但检索面已就绪、core 未写全时，
-    // 限制 broad search，逼模型 commit 而不是无限检索。
-    const contract = completionContractFor(context);
-    const hasRetrievalSurface = context.workspace.candidates.length > 0 && context.workspace.evidenceState.evidenceItems.length > 0;
-    const coreIncomplete = contract.missingArtifacts.some((m) => ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan'].includes(m));
-    if (hasRetrievalSurface && coreIncomplete) {
-      // 检索面已就绪、core 未写全：只留「认领假设 + 持久化判断 + 聚焦/评估候选 + 提交」，不放任何检索/证据工具。
-      const commitOnly = new Set(['workspace.consider_hypotheses', 'workspace.record_deliberation', 'workspace.focus_candidates', 'workspace.record_candidate_assessment', 'workspace.record_candidate_exclusion', 'proposal.submit']);
-      return all.filter((x) => commitOnly.has(fromApiToolName(x)));
-    }
-    return all;
-  }
-
-  const contract = completionContractFor(context);
-  if (contract.ok) {
-    const submitOnly = new Set(['proposal.submit']);
-    return all.filter((x) => submitOnly.has(fromApiToolName(x)));
-  }
-
-  const allowed = new Set<string>();
-  if (contract.missingArtifacts.includes('formulaSelection') || contract.missingArtifacts.includes('formulaReview')) {
-    addFormulaDecisionTools(context, allowed);
-  } else {
-    ['workspace.consider_hypotheses', 'workspace.record_deliberation', 'proposal.submit'].forEach((t) => allowed.add(t));
-  }
-  if (contract.missingArtifacts.includes('treatmentFormDecision')) {
-    allowed.add('workspace.record_deliberation');
-    for (const id of treatmentFormEvidenceToolIds(context)) allowed.add(id);
-  }
-  return all.filter((x) => allowed.has(fromApiToolName(x)));
+  return projectActiveToolSurface(context, bindings, mode);
 }
 
 /** H15.5.3：Natural stop 后的恢复阶段。submit = 仅提交；completion = 补齐缺失产物。 */
@@ -256,38 +369,16 @@ export function completionContractFor(context: RuntimeContext): { requiredArtifa
 }
 
 /**
- * H15.5.3：Recovery active tools 由 missing artifacts 决定，不恢复所有工具。
- * 不硬编码业务能力词；treatmentFormDecision 只开放激活能力已声明的 evidence tools（search_cards / get_asset）。
+ * H15.5.3：Recovery active tools。与主 loop 共用同一 phase-driven action-surface 投影
+ * （missing 参数冗余，phase 从 workspace 重新推导，保证主/recovery 口径一致）。
  */
 export function recoveryActiveToolIds(
   context: RuntimeContext,
   bindings: AiSdkToolBindings,
   mode: 'harness' | 'classic',
-  missing: string[],
+  _missing: string[],
 ): string[] {
-  const all = activeToolIds(context, bindings, mode);
-  if (missing.length === 0) {
-    const submitOnly = new Set(['proposal.submit']);
-    return all.filter((x) => submitOnly.has(fromApiToolName(x)));
-  }
-  const allowed = new Set<string>();
-  const coreMissing = missing.some((m) => ['diseaseAssessment', 'formalHypotheses', 'patternAssessment', 'treatmentPlan'].includes(m));
-  if (coreMissing) {
-    // 缺 core 时只留「认领假设 + 持久化判断 + 精确查看已有证据」，不放 broad search（避免继续检索而不 commit）。
-    ['workspace.consider_hypotheses', 'workspace.record_deliberation', 'knowledge.get_source', 'knowledge.get_asset'].forEach((t) => allowed.add(t));
-  }
-  if (missing.includes('formulaSelection')) {
-    addFormulaDecisionTools(context, allowed);
-  }
-  if (missing.includes('formulaReview')) {
-    addFormulaDecisionTools(context, allowed);
-  }
-  if (missing.includes('treatmentFormDecision')) {
-    allowed.add('workspace.record_deliberation');
-    for (const id of treatmentFormEvidenceToolIds(context)) allowed.add(id);
-  }
-  allowed.add('proposal.submit');
-  return all.filter((x) => allowed.has(fromApiToolName(x)));
+  return projectActiveToolSurface(context, bindings, mode);
 }
 
 /** H15.5.3：Recovery 复用原始剩余预算（不重新给一套 maxSteps）。 */

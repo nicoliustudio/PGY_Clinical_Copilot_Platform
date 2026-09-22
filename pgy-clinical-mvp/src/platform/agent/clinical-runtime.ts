@@ -10,6 +10,9 @@ import { AuthorityPipeline } from '../authority/pipeline.js';
 import { EVIDENCE_EVENT_TYPES } from '../workspace/evidence-projection.js';
 import { HYPOTHESIS_EVENT_TYPES } from '../workspace/hypothesis-projection.js';
 import { getCanonicalFormula } from '../../clinical/formula.js';
+import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
+import { computeModificationEvidenceClosure } from '../../clinical/modification-evidence.js';
+import { loadIndex } from '../../knowledge/build.js';
 import { setFormulaIdentityTrace, type FormulaIdentityTrace } from '../../trace.js';
 
 export interface ClinicalRunResult extends RuntimeRunResult {
@@ -27,7 +30,11 @@ export interface ClinicalRunResult extends RuntimeRunResult {
   contextMetrics?: ContextMetrics;
 }
 
-/** 依据 proposal 的 candidate_ref 记录候选比较结果：选中 vs 放弃。 */
+/**
+ * 依据 proposal 的 candidate_ref 记录候选比较结果：仅标记主选方为 selected。
+ * H15.6：不再把「未选中」的同源原典方 blanket 标为 rejected ——
+ * `not selected` ≠ `clinically rejected`。同源多方完整性由 sourceFormulaSet 确定性水合表达。
+ */
 function recordCandidateDecision(proposal: AgentResult, context: RuntimeContext): void {
   if (proposal.mode !== 'clinical') return;
   const ref = proposal.formula.candidate_ref;
@@ -36,10 +43,36 @@ function recordCandidateDecision(proposal: AgentResult, context: RuntimeContext)
     if (candidate.kind !== 'formula') continue;
     if (candidate.id === ref) {
       context.workspaceStore.append('candidate.selected', { id: candidate.id });
-    } else {
-      context.workspaceStore.append('candidate.rejected', { id: candidate.id });
     }
   }
+}
+
+/**
+ * H15.6 确定性来源/证据闭环（Runtime 完成义务，非模型自觉）：
+ * - 选中 P1 主选方后，水合同一 parent 下的全部 ACTIVE 原典方（sourceFormulaSet）。
+ * - 计算加减证据闭环（modificationEvidenceClosure）。
+ * 不经过 semantic search / topK / rerank；不产生新 Agent step。
+ */
+async function finalizeSourceClosures(proposal: AgentResult, context: RuntimeContext): Promise<void> {
+  if (proposal.mode !== 'clinical') return;
+  const ref = proposal.formula.candidate_ref;
+  const candidate = ref ? context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula') : undefined;
+
+  // H15.6 同源多方水合：以 P1 sourceId 为 gate，而不是 sourceAuthority 字段。
+  // sourceAuthority 只在 formula.search_candidates 单一路径被写入 payload；而 knowledge.search /
+  // formula.search_normative 同样会产出 P1 候选却未标注该字段，导致同源多方被静默丢弃。
+  // sourceId 以 `P1:` 为稳定前缀，且 hydrateSourceFormulaSet 内部已 fail-closed 校验 sourceTier === 'P1'。
+  if (candidate?.sourceId?.startsWith('P1:')) {
+    try {
+      const idx = await loadIndex();
+      const sourceFormulaSet = hydrateSourceFormulaSet(idx.docs, ref ?? '');
+      if (sourceFormulaSet) context.workspace.sourceFormulaSet = sourceFormulaSet;
+    } catch {
+      // fail-closed：索引不可用（如单测无 .kb-cache）时跳过同源多方水合，不影响 authority/提交。
+    }
+  }
+
+  context.workspace.modificationEvidenceClosure = computeModificationEvidenceClosure(context.workspace, ref);
 }
 
 /** 依据 proposal 的 syndrome 记录最终领先 hypothesis（不覆盖已有 support/contradiction 状态）。 */
@@ -117,6 +150,8 @@ export class ClinicalRuntime {
     recordHypothesisDecision(output.proposal, context);
     const rawFormula = output.proposal.mode === 'clinical' ? output.proposal.formula : undefined;
     const proposal = await hydrateFormulaProposal(output.proposal, context);
+    // H15.6：确定性同源多方水合 + 加减证据闭环（先于 Authority，不改处方权）。
+    await finalizeSourceClosures(output.proposal, context);
     // canonical safety truth：模型 proposal.safety 不覆盖 canonical safety disposition。
     const withCanonicalSafety: AgentResult = proposal.mode === 'clinical'
       ? {

@@ -54,6 +54,7 @@ interface NormativeEntry {
     raw_composition?: string;
     source_tier?: string;
     knowledge_role?: string;
+    entity_status?: string;
   }[];
 }
 
@@ -143,6 +144,7 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
       composition: str(f.composition ?? f.raw_composition),
       sourceTier: str(f.source_tier),
       knowledgeRole: str(f.knowledge_role),
+      entityStatus: str(f.entity_status),
     }));
     const parts = [
       n.disease ? `病名：${n.disease}` : '',
