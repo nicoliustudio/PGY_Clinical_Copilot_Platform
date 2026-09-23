@@ -19,6 +19,7 @@ ui-shell-2026-09-16/
 
 # 依赖与生成物
 node_modules/
+.npm-cache/
 dist/
 .kb-cache/
 reports/
@@ -64,3 +65,4 @@ H15.5.2-gaofang-closure-repair-plan.md
 # 实测原始 trace 与本地全链路记录（含真实病例运行数据，不公开）
 蒲公英AI-三例实测原始trace/
 蒲公英中医AI-*本地实测全链路记录*.md
+三个测试样例.md
