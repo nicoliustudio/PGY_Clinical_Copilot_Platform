@@ -62,6 +62,25 @@ for (const dir of guarded) {
   }
 }
 
+// 外部参考包边界：production source 绝不能 import 外部专家参考包 / 历史交付解压目录。
+// 参考包只用于人工 diff 对照（见仓库根 _reference/README.md），不参与构建；
+// 这条守卫把「不要 import 参考包」从文字约定变成可执行测试（历史上曾因 reference-implementation/src
+// 与主 src 并存而形成"第二真源"）。
+const forbiddenReferenceImports = ['_reference/', 'reference-implementation/', '_extracted/'];
+for (const file of await walk(join(root, 'src'))) {
+  if (!['.ts', '.tsx', '.js', '.mjs'].includes(extname(file))) continue;
+  const text = await readFile(file, 'utf8');
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('import') && !trimmed.startsWith('export')) continue;
+    for (const marker of forbiddenReferenceImports) {
+      if (trimmed.includes(marker)) {
+        violations.push(`${relative(root, file)}: source imports external reference package "${marker}"`);
+      }
+    }
+  }
+}
+
 
 // H1 Harness invariants: the production Runtime must not regress to exact-key pre-routing.
 const preparerPath = join(root, 'src/platform/runtime/runtime-preparer.ts');

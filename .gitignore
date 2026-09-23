@@ -53,6 +53,11 @@ pgy-clinical-mvp.bak/
 exports/
 zip/
 
+# 外部专家参考包（只读参考：绝不 import / 绝不编译；与 exports「对外交付物」职责分开）
+# 内容不入库，仅保留约定文档 _reference/README.md
+_reference/*
+!_reference/README.md
+
 # 运行分析 / 架构提案 / 本地记录（不纳入代码仓库）
 H3_ARCHITECTURE.md
 病例运行分析-*.md
