@@ -28,4 +28,5 @@ else
 fi
 
 # ③ exec 让应用成为 PID 1，docker stop 时能收到 SIGTERM 优雅退出
-exec node --import tsx src/server/index.ts
+#    --experimental-sqlite：运行记录库（data/runs.sqlite3）使用内置 node:sqlite（Node 22 需显式开关）
+exec node --experimental-sqlite --import tsx src/server/index.ts

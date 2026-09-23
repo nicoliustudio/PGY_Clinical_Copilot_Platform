@@ -14,6 +14,7 @@ import { getGold } from '../eval/metrics.js';
 import { isAsrEnabled, relayAsr } from './asr.js';
 import { getTrace } from '../trace.js';
 import { json, readBody } from './http-utils.js';
+import { RunStore } from './run-store.js';
 import {
   clearedCookieValue,
   ensureBootstrapUsers,
@@ -47,6 +48,26 @@ interface RunRecord {
 }
 
 const runs = new Map<string, RunRecord>();
+
+/**
+ * 运行记录落盘（SQLite，随 data 卷保留）。null = 数据库不可用，退回纯内存态。
+ * 内存 Map 仍是热路径（在跑 / 最近完成），落盘是「重启与容器重建后仍可取回」的真源。
+ */
+let runStore: RunStore | null = null;
+
+/** 元数据列表项（与 RunRecord 同构，但不含 session/trace 大字段）。 */
+function runSummaryOf(record: RunRecord): Omit<RunRecord, 'session' | 'trace'> {
+  const { session: _session, trace: _trace, ...rest } = record;
+  return rest;
+}
+
+/** 内存热态 + 落盘历史合并（按 runId 去重，内存优先，按开始时间倒序）。 */
+function mergedRunSummaries(limit = 500): Omit<RunRecord, 'session' | 'trace'>[] {
+  const byId = new Map<string, Omit<RunRecord, 'session' | 'trace'>>();
+  for (const item of runStore?.list(limit) ?? []) byId.set(item.runId, item);
+  for (const record of runs.values()) byId.set(record.runId, runSummaryOf(record));
+  return [...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
+}
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -218,6 +239,7 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
       session,
     };
     runs.set(session.runId, rec);
+    runStore?.save(rec);
     sse(res, 'result', session);
     sse(res, 'done', {});
   } catch (e) {
@@ -235,6 +257,7 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
       trace: trace ? buildTraceView(trace) : undefined,
     };
     runs.set(runId, rec);
+    runStore?.save(rec);
     sse(res, 'error', { message, runId });
     sse(res, 'lifecycle', { stage: 'no-commit' });
     sse(res, 'done', {});
@@ -256,11 +279,13 @@ function listRuns(): RunRecord[] {
 async function handleTraces(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
   const match = pathname.match(/^\/api\/traces\/([^/]+)$/);
   if (match) {
-    const rec = runs.get(decodeURIComponent(match[1]));
+    const runId = decodeURIComponent(match[1]);
+    const rec = runs.get(runId) ?? runStore?.get(runId) ?? null;
     if (!rec) return json(res, 404, { detail: '未找到该运行记录' });
     return json(res, 200, rec);
   }
-  json(res, 200, { total: runs.size, items: listRuns().map((r) => ({ runId: r.runId, input: r.input, startedAt: r.startedAt, finishedAt: r.finishedAt, status: r.status, model: r.model, error: r.error })) });
+  const items = mergedRunSummaries();
+  json(res, 200, { total: items.length, items });
 }
 
 async function handleEvalCases(res: ServerResponse): Promise<void> {
@@ -304,8 +329,20 @@ async function handleKnowledgeSource(req: IncomingMessage, res: ServerResponse, 
   const match = pathname.match(/^\/api\/knowledge\/source\/([^/]+)$/);
   if (!match) return json(res, 404, { detail: 'Not found' });
   const sourceId = decodeURIComponent(match[1]);
-  // 从最近的运行记录中按 sourceId 还原 provenance
+  // 从最近的运行记录中按 sourceId 还原 provenance：
+  // 先内存热态；未命中再回落到落盘记录（有上限，避免反序列化全部历史），重启后溯源页仍可用。
+  const visited = new Set<string>();
+  const candidates: RunRecord[] = [];
   for (const rec of listRuns()) {
+    visited.add(rec.runId);
+    candidates.push(rec);
+  }
+  for (const summary of runStore?.list(20) ?? []) {
+    if (visited.has(summary.runId)) continue;
+    const rec = runStore?.get(summary.runId);
+    if (rec) candidates.push(rec);
+  }
+  for (const rec of candidates) {
     if (!rec.session) continue;
     const view = buildKnowledgeSourceView(sourceId, rec.session.trace);
     if (view) return json(res, 200, view);
@@ -318,6 +355,9 @@ export async function startServer(port = Number(process.env.APP_PORT ?? 8787)): 
   if (bootstrapped.created.length) {
     console.log(`[pgy] 已建立账号：${bootstrapped.created.join('、')}`);
   }
+
+  runStore = RunStore.open(path.resolve(process.env.RUN_DB_FILE ?? 'data/runs.sqlite3'));
+  if (runStore) console.log(`[pgy] 运行记录库：${runStore.file}（已有 ${runStore.count()} 条，重启/容器重建后仍可取回）`);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');

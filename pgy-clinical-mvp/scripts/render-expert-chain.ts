@@ -503,10 +503,111 @@ function renderTraceability(result: any, ws: any): string {
 ${rows.join('\n')}`;
 }
 
+/** 例序号标签：例一 / 例二 / …（超出中文数字表时退回「例N」）。 */
+function caseIndexLabel(idx: number): string {
+  return `例${['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'][idx] ?? idx + 1}`;
+}
+
+/**
+ * V2.1 执行契约与义务图（Control Plane）——运行结果的确定性骨架。
+ *
+ * Request IR 的 outcome 承诺（含 REQUIRED 不可表示 → blocking unresolved）与 obligation 终态、
+ * readiness 缺失集在同一处呈现；`execution_incomplete` 这类终止原因只有在这里才能看到成因。
+ */
+function renderControlPlane(cp: any): string {
+  if (!cp) return '（本运行没有 Control Plane 快照。）';
+  const out: string[] = [];
+  out.push(`- 编译状态：\`${cp.requestCompileStatus}\`${cp.requestCompileError ? `（${esc(cp.requestCompileError)}）` : ''}`);
+  out.push(`- 输出策略：exclusive=\`${cp.exclusive}\` ｜ formulaCardinality=\`${cp.formulaCardinality}\` ｜ knowledgeSource=\`${cp.knowledgeSourcePolicy}\``);
+  out.push('');
+  out.push('**Request IR outcome 契约（承诺等级正交于语义身份）**');
+  out.push('');
+  out.push('| 等级 | 值 |');
+  out.push('| --- | --- |');
+  out.push(`| required（必须交付） | ${cp.requiredOutcomes?.length ? cp.requiredOutcomes.map((x: string) => `\`${esc(x)}\``).join('、') : '（空）'} |`);
+  out.push(`| preferred（希望但不阻塞） | ${cp.preferredOutcomes?.length ? cp.preferredOutcomes.map((x: string) => `\`${esc(x)}\``).join('、') : '（空）'} |`);
+  out.push(`| allowed（可以考虑，不产生义务） | ${cp.allowedOutcomes?.length ? cp.allowedOutcomes.map((x: string) => `\`${esc(x)}\``).join('、') : '（空）'} |`);
+  out.push(`| excluded（明确不要） | ${cp.excludedOutcomes?.length ? cp.excludedOutcomes.map((x: string) => `\`${esc(x)}\``).join('、') : '（空）'} |`);
+  out.push(`| unresolved（REQUIRED 且不可表示 → 阻断） | ${cp.unresolvedOutcomes?.length ? cp.unresolvedOutcomes.map((x: string) => `\`${esc(x)}\``).join('、') : '（无）'} |`);
+  out.push(`| preferredShortfalls（非阻断缺口） | ${cp.preferredShortfalls?.length ? cp.preferredShortfalls.map((x: string) => `\`${esc(x)}\``).join('、') : '（无）'} |`);
+  out.push('');
+  out.push('**用户点名形式与承诺等级（mentions）**');
+  out.push('');
+  if (cp.mentionOutcomes?.length) {
+    out.push('| 点名（原话） | 承诺等级 |');
+    out.push('| --- | --- |');
+    for (const m of cp.mentionOutcomes) out.push(`| ${esc(m.name)} | \`${esc(m.commitment)}\` |`);
+  } else out.push('（无）');
+  out.push('');
+  out.push('**语义判定（Deterministic Semantic Validator）**');
+  out.push('');
+  if (cp.semanticValidation?.resolutions?.length) {
+    out.push('| 点名 | 关系 | 解析到的 registry term |');
+    out.push('| --- | --- | --- |');
+    for (const r of cp.semanticValidation.resolutions) out.push(`| ${esc(r.mention)} | \`${esc(r.relation)}\` | ${r.term ? `\`${esc(r.term)}\`` : '-'} |`);
+  } else out.push('- 解析结果：（无）');
+  if (cp.semanticValidation?.rejected?.length) {
+    out.push('');
+    out.push('_被判定为「更宽泛家族项顶替具体点名形式」而移除的 required：_');
+    out.push('');
+    out.push('| term | 点名 | 关系 |');
+    out.push('| --- | --- | --- |');
+    for (const r of cp.semanticValidation.rejected) out.push(`| \`${esc(r.term)}\` | ${esc(r.mention)} | \`${esc(r.relation)}\` |`);
+  }
+  out.push('');
+  out.push('**规划问题（planning issues）**');
+  out.push('');
+  out.push(cp.planningIssues?.length
+    ? cp.planningIssues.map((i: any) => `- \`${esc(i.type)}\`：${esc(i.message)}`).join('\n')
+    : '- （无）');
+  out.push('');
+  out.push('**义务图（obligation graph）**');
+  out.push('');
+  if (cp.obligations?.length) {
+    out.push('| obligation | artifact 类型 | outcome | provider | 来源 | 必需 | 终态 | blocker |');
+    out.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+    for (const ob of cp.obligations) {
+      out.push(`| \`${esc(ob.id)}\` | \`${esc(ob.type)}\` | ${ob.outcome ? `\`${esc(ob.outcome)}\`` : '-'} | ${ob.provider ? `\`${esc(ob.provider)}\`` : '-'} | \`${esc(ob.source)}\` | ${ob.required ? '是' : '否'} | \`${esc(ob.status)}\` | ${ob.blocker ? `\`${esc(ob.blocker)}\`` : '-'} |`);
+    }
+  } else out.push('（无）');
+  out.push('');
+  out.push('**终态汇总（与 readiness 同一真源）**');
+  out.push('');
+  out.push(`- 义务计数：required=${cp.requiredObligationCount ?? '-'} ｜ satisfied=${cp.satisfiedObligationCount ?? '-'} ｜ open=${cp.openObligations?.length ?? 0} ｜ blocked=${cp.blockedObligations?.length ?? 0} ｜ notDeliverable=${cp.notDeliverableObligations?.length ?? 0}`);
+  out.push(`- graphComplete=\`${cp.graphComplete}\` ｜ readiness.ready=\`${cp.readiness?.ready}\` ｜ blockerCodes=[${(cp.readiness?.blockerCodes ?? []).map((c: string) => `\`${esc(c)}\``).join(', ')}]`);
+  out.push(`- 未满足的必需义务（readiness 缺失集）：${cp.unmetObligations?.length ? cp.unmetObligations.map((x: string) => `\`${esc(x)}\``).join('、') : '（无）'}`);
+  out.push(`- 缺失 artifact：${cp.readiness?.missingArtifacts?.length ? cp.readiness.missingArtifacts.map((x: string) => `\`${esc(x)}\``).join('、') : '（无）'}`);
+  out.push('');
+  out.push(`**outcome 覆盖投影（最终结果装配输入）**`);
+  out.push('');
+  out.push(cp.outcomeCoverage?.length
+    ? `| outcome | 覆盖状态 |\n| --- | --- |\n${cp.outcomeCoverage.map((c: any) => `| \`${esc(c.outcome)}\` | \`${esc(c.status)}\` |`).join('\n')}`
+    : '（无）');
+  if (cp.appliedBlockers?.length) {
+    out.push('');
+    out.push('**已施加的 typed blocker（唯一允许重新打开定向检索的通道）**');
+    out.push('');
+    out.push('| obligation | 类型 | 问题 |');
+    out.push('| --- | --- | --- |');
+    for (const b of cp.appliedBlockers) out.push(`| \`${esc(b.obligationId)}\` | \`${esc(b.type)}\` | ${esc(b.question)} |`);
+  }
+  if (cp.steps?.length) {
+    out.push('');
+    out.push('**逐步 runnable 义务与当时可执行动作面**');
+    out.push('');
+    out.push('| 步 | runnable obligations | legal effect surface |');
+    out.push('| --- | --- | --- |');
+    for (const st of cp.steps) {
+      out.push(`| ${st.step} | ${st.runnable?.length ? st.runnable.map((x: string) => `\`${esc(short(x, 40))}\``).join('、') : '-'} | ${st.surface?.length ? esc(short(st.surface.join(', '), 160)) : '-'} |`);
+    }
+  }
+  return out.join('\n');
+}
+
 function renderCase(d: RunRecord, idx: number): string {
   const s = d.session;
   const trace = s.trace;
-  const label = `例${['一', '二', '三', '四', '五', '六'][idx] ?? idx + 1}`;
+  const label = caseIndexLabel(idx);
   return `## ${label}｜${esc(caseLabel(d.input))}
 
 > 运行 ID：\`${d.runId}\` ｜ 输出形态：\`${s.result?.mode}\` ｜ 耗时：${sec(trace.totalMs)}
@@ -560,6 +661,13 @@ ${renderKeyEventPayloads(trace)}
 #### 2.10 工作区终态
 
 ${renderWorkspaceFinal(s.workspace)}
+
+#### 2.11 执行契约与义务图（Control Plane V2.1）
+
+> Request IR 在 prepare 阶段编译；本节是运行结果的确定性骨架——outcome 承诺等级、obligation 终态、
+> readiness 缺失集三者同源。\`execution_incomplete\` 之类终止原因的成因只在这里可见。
+
+${renderControlPlane(trace.agentLoop?.controlPlane)}
 
 ### 三、结果输出
 
@@ -617,10 +725,10 @@ async function main(): Promise<void> {
   for (const r of records) writeFileSync(path.join(rawDir, `${r.runId}.json`), `${JSON.stringify(r, null, 2)}\n`);
 
   const cases = records.map(renderCase).join('\n');
-  const md = `# 蒲公英中医临床 AI · 三例全链路记录（专家审核用）
+  const md = `# 蒲公英中医临床 AI · ${records.length} 例全链路记录（专家审核用）
 
-> **本文件为只读导出**：内容全部来自本地运行实例 \`${BASE_URL}\` 已完成的三次真实运行记录，未经人工改写。
-> 三条记录在链路中完全等价于医生端 \`POST /api/run/stream\` 的一次完整会话（同一套 Runtime 装配，不绕开 Authority）。
+> **本文件为只读导出**：内容全部来自本地运行实例 \`${BASE_URL}\` 已完成的 ${records.length} 次真实运行记录，未经人工改写。
+> 每条记录在链路中完全等价于医生端 \`POST /api/run/stream\` 的一次完整会话（同一套 Runtime 装配，不绕开 Authority）。
 > 导出时间：${new Date().toISOString()} ｜ 时间戳均为 UTC。
 
 ## 0. 运行环境
@@ -631,27 +739,33 @@ async function main(): Promise<void> {
 | Runtime 模式 | \`clinical-primary:harness\`（Agent 自主发现能力） |
 | 模型 | \`deepseek-chat\`（fast = deep） |
 | 知识库 release | \`2026.09.18-agent-ready-r1\`（医生端 /api/health 报告 docCount=4428） |
-| promptHash | \`${records[0]?.session?.trace?.snapshot?.promptHash ?? '-'}\`（三例一致） |
-| 记录条数 | ${records.length} ｜ 全部 \`status=done\` |
+| promptHash | \`${records[0]?.session?.trace?.snapshot?.promptHash ?? '-'}\`（${records.length} 例一致） |
+| 记录条数 | ${records.length} ｜ ${records.every((d) => d.status === 'done') ? '全部 `status=done`' : '存在非 done 记录'} |
 
 ## 0.1 结果速览
 
-| 例 | 运行 ID | 输出形态 | 终止原因 | 耗时 | 结论摘要 |
-| --- | --- | --- | --- | --- | --- |
+| 例 | 运行 ID | 输出形态 | 终止原因 | 耗时 | graph / ready | outcome 覆盖 | unresolved | 结论摘要 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 ${records
   .map((d, i) => {
     const r = d.session.result;
+    const cp = d.session.trace.agentLoop?.controlPlane;
+    const graph = cp ? `${cp.graphComplete ? '✔' : '✘'} / ${cp.readiness?.ready ? '✔' : '✘'}` : '-';
+    const coverage = cp?.outcomeCoverage?.length
+      ? cp.outcomeCoverage.map((c: any) => `${c.outcome}=${c.status}`).join('、')
+      : '-';
+    const unresolved = cp?.unresolvedOutcomes?.length ? cp.unresolvedOutcomes.join('、') : '-';
     let brief: string;
     if (r?.mode === 'clinical') brief = [r.disease?.name, r.syndrome?.name, r.formula?.name].filter(Boolean).join('｜') || 'clinical';
     else if (r?.mode === 'clarification') brief = `追问 ${(r.questions ?? []).length} 项`;
     else brief = short(r?.message ?? '', 70);
-    return `| 例${['一', '二', '三'][i]} | \`${d.runId}\` | \`${r?.mode}\` | \`${d.session.trace.agentLoop?.terminationReason ?? '-'}\` | ${sec(d.session.trace.totalMs)} | ${esc(brief)} |`;
+    return `| ${caseIndexLabel(i)} | \`${d.runId}\` | \`${r?.mode}\` | \`${d.session.trace.agentLoop?.terminationReason ?? '-'}\` | ${sec(d.session.trace.totalMs)} | ${graph} | ${esc(coverage)} | ${esc(unresolved)} | ${esc(brief)} |`;
   })
   .join('\n')}
 
 ## 0.2 阅读指引
 
-每条记录按 **输入 → 处理过程（2.1–2.10）→ 结果输出（3.1–3.4）→ 原样数据** 排列：
+每条记录按 **输入 → 处理过程（2.1–2.11）→ 结果输出（3.1–3.5）→ 原样数据** 排列：
 
 | 阶段 | 含义 | 对应代码位置（供核对） |
 | --- | --- | --- |
@@ -660,6 +774,7 @@ ${records
 | 2.4 能力与技能 | 由 Agent 依语义需求发现并激活，Core 不做业务预路由 | \`src/platform/runtime/harness-session.ts\`、\`src/platform/registry/*\` |
 | 2.5–2.7 工具与检索 | Agent 每一步调了什么、拿到什么；检索诊断用于核对「检索不自动生成结论」 | \`src/adapters/ai-sdk/agent-runtime.ts\`、\`src/knowledge/diagnostics.ts\` |
 | 2.8–2.10 工作区 | 事件溯源 + 终态（证据 / 假设 / 候选 / 权衡），是提交门禁的唯一依据 | \`src/platform/workspace/*\` |
+| 2.11 执行契约与义务图 | Request IR 的 outcome 承诺等级、obligation graph 终态、readiness 缺失集（同一真源）；终止原因的成因面 | \`src/control-plane-v2/*\`、\`src/control-plane-v21/*\`、\`src/platform/control-plane/*\` |
 | 3.1 结论 | 模型产出的 Proposal（未获授权前的形态） | \`src/contracts/result.ts\` |
 | 3.2 内核裁决 | Safety 不变量 + 规范方 Authority；Agent 不可绕过 | \`src/platform/authority/*\`、\`src/authority/formula-authority.ts\` |
 | 3.3 指标 | 提交可靠性（模型主动提交 vs Runtime 兜底）与完成义务缺失项 | \`src/platform/workspace/proposal-readiness.ts\` |
@@ -676,17 +791,17 @@ ${records
 ---
 
 ${cases}
-## 附录 A · 三条记录的原始数据
+## 附录 A · ${records.length} 条记录的原始数据
 
 | 例 | 原始记录文件 |
 | --- | --- |
-${records.map((d, i) => `| 例${['一', '二', '三'][i]} | \`raw/${d.runId}.json\` |`).join('\n')}
+${records.map((d, i) => `| ${caseIndexLabel(i)} | \`raw/${d.runId}.json\` |`).join('\n')}
 
 > 原始记录为服务端返回的完整 SessionView（result / authority / workspace / trace），未做任何裁剪。
 `;
 
   mkdirSync(OUT_DIR, { recursive: true });
-  const outFile = path.join(OUT_DIR, '三例全链路记录.md');
+  const outFile = path.join(OUT_DIR, `${records.length}例全链路记录.md`);
   writeFileSync(outFile, md);
   console.log(`[expert-chain] 已生成：${outFile}`);
   console.log(`[expert-chain] 原始记录目录：${rawDir}`);

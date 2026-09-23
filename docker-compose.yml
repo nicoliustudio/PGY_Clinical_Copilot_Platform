@@ -3,7 +3,7 @@
 #
 # 运行时配置只认一个文件：pgy-clinical-mvp/.env（即应用自身 dotenv 读取的路径）。
 # 本地 `npm run serve` 与容器 `docker compose up` 因此使用完全相同的配置，不会漂移。
-# 不可再生数据只有「账号与会话」（命名卷 data）；知识库为宿主只读挂载，向量索引可重建。
+# 不可再生数据只有「账号与会话」与「运行记录库」（命名卷 data）；知识库为宿主只读挂载，向量索引可重建。
 services:
   app:
     build:
