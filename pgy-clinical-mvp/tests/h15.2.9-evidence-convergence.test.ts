@@ -37,6 +37,11 @@ test('H15.2.9 invariant: 写入四个 hard-required artifact 后 clinical core �
   store.append('disease.assessment.recorded', { statement: '胃痛', evidenceRefs: [], version: 1 });
   store.append('pattern.assessment.recorded', { primary: { statement: '湿热中阻', supportingEvidenceRefs: ['CF_1'] } });
   store.append('hypothesis.presented', { id: 'H_1', label: '湿热中阻', origin: 'agent_reasoning' });
+  // V2.1.1：H12 disposition 是 clinical-core truth 的一部分（不再与 readiness 双口径）。
+  const beforeDisposition = checkClinicalCoreCompletion(ws);
+  assert.equal(beforeDisposition.ok, false, '未处置 formal hypothesis 时 clinical core 不得 complete');
+  assert.ok(beforeDisposition.missing.includes('hypothesisDisposition'));
+  store.append('hypothesis.selected', { id: 'H_1' });
   const core = checkClinicalCoreCompletion(ws);
   assert.equal(core.ok, true, `clinical core 应可达 complete，实际 missing=${core.missing.join(',')}`);
 });

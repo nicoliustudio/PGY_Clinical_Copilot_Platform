@@ -1,0 +1,20 @@
+ M package.json
+ M scripts/control-plane-v2-check.mjs
+ M scripts/control-plane-v21-check.mjs
+ M src/adapters/ai-sdk/agent-runtime.ts
+ M src/adapters/ai-sdk/tool-bindings.ts
+ M src/clinical/capability-delivery.ts
+ M src/composition/platform-assets.ts
+ M src/contracts/result.ts
+ M src/contracts/workspace.ts
+ M src/control-plane-v2/request-ir.ts
+ M src/control-plane-v2/types.ts
+ M src/control-plane-v21/planner.ts
+ M src/platform/agent/clinical-runtime.ts
+ M src/platform/runtime/runtime-preparer.ts
+ M src/platform/workspace/clinical-workspace.ts
+ M tests/control-plane-v21-integration.test.ts
+?? CHANGED_FILES_V211.txt
+?? CONTROL_PLANE_V211_CHANGELOG.md
+?? TRAE_EXECUTION_V211.md
+?? VALIDATION_V211.md

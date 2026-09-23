@@ -37,6 +37,25 @@ export const clinicalResultSchema = z.object({
     visit_ref: z.string().optional(),
     source_evidence_ref: z.string().optional(),
   }),
+  /** V2.1.1 deterministic multi-formula projection; formula remains the primary compatibility field. */
+  formula_set: z.array(z.object({
+    formula_ref: z.string(),
+    formula_id: z.string(),
+    name: z.string(),
+    composition: z.string(),
+    relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
+  })).optional(),
+  /** V2.1.1 deterministic multi-modality deliveries from durable Workspace state. */
+  treatment_deliveries: z.array(z.object({
+    outcome: z.string().optional(),
+    form: z.string(),
+    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
+    statement: z.string(),
+    source_evidence_refs: z.array(z.string()),
+    advisory_composition: z.array(z.string()).optional(),
+    preparation: z.string().optional(),
+    usage: z.string().optional(),
+  })).optional(),
   missing_information: z.array(z.string()),
   safety: z.object({
     status: z.enum(['PASS', 'BLOCK']),

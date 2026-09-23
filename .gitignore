@@ -48,6 +48,10 @@ desktop.ini
 *.zip
 pgy-clinical-mvp.bak/
 
+# 本地交付物料与整改指令（含真实病例 trace，公开仓库不入库）
+exports/
+zip/
+
 # 运行分析 / 架构提案 / 本地记录（不纳入代码仓库）
 H3_ARCHITECTURE.md
 病例运行分析-*.md

@@ -4,6 +4,9 @@ import type { ClinicalUnderstanding } from '../src/contracts/understanding.js';
 import type { RuntimeContext } from '../src/contracts/runtime.js';
 import type { ClinicalStrategy } from '../src/contracts/clinical-strategy.js';
 import { emptyClinicalStrategy } from '../src/contracts/clinical-strategy.js';
+import type { ClinicalRequestIR } from '../src/control-plane-v2/types.js';
+import type { ModelPort, StructuredRequest } from '../src/ports/model.js';
+import { CONTROL_PLANE_V21_POLICY } from '../src/composition/control-plane-v21-policy.js';
 import { ClinicalRuntime } from '../src/platform/agent/clinical-runtime.js';
 import { FormulaAuthorityStage } from '../src/platform/authority/formula-stage.js';
 import { AuthorityPipeline } from '../src/platform/authority/pipeline.js';
@@ -47,6 +50,11 @@ export interface TestRuntimeOptions {
   extraCapabilities?: CapabilityDescriptor[];
   /** 可选 Planner 替身，默认返回空策略。 */
   plan?(): ClinicalStrategy;
+  /**
+   * Control Plane V2.1：给定该 Request IR 时启用闭世界执行契约（Request IR 编译替身）。
+   * 未提供时 V2.1 保持休眠（legacy 行为）。
+   */
+  requestIR?: ClinicalRequestIR;
 }
 
 /**
@@ -78,6 +86,14 @@ export async function buildTestRuntime(
     baselineToolIds: BASELINE_TOOL_IDS,
     baselineSkillIds: BASELINE_SKILL_IDS,
     baselineKnowledgeScopes: BASELINE_KNOWLEDGE_SCOPES,
+    ...(options.requestIR
+      ? {
+          controlPlane: {
+            compiler: stubRequestCompiler(options.requestIR),
+            policy: CONTROL_PLANE_V21_POLICY,
+          },
+        }
+      : {}),
   });
 
   const authority = new AuthorityPipeline([
@@ -99,6 +115,13 @@ export async function buildTestRuntime(
     { run: async (context) => ({ proposal: options.propose(context) }) },
     authority,
   );
+}
+
+/** 测试替身：Request IR 编译器（用目标 schema 校验给定 IR，保证与生产 compileClinicalRequest 同构）。 */
+export function stubRequestCompiler(ir: ClinicalRequestIR): ModelPort {
+  return {
+    generateStructured: async <T>(request: StructuredRequest<T>): Promise<T> => request.schema.parse(ir),
+  };
 }
 
 /** 测试用临床提案 */

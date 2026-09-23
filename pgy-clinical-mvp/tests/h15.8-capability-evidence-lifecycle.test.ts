@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  deriveRequiredEvidenceArtifacts,
   deriveCapabilityEvidenceClosures,
+  isEvidenceClosureTerminal,
   recordSearchReceipt,
   recordHydrationReceipt,
   evidenceArtifactKey,
@@ -10,15 +10,16 @@ import {
 } from '../src/clinical/capability-evidence.js';
 import * as capEv from '../src/clinical/capability-evidence.js';
 import { createClinicalWorkspace, ClinicalWorkspaceStore } from '../src/platform/workspace/clinical-workspace.js';
-import { evaluateProposalReadiness } from '../src/platform/workspace/proposal-readiness.js';
-import { emptyClinicalStrategy } from '../src/contracts/clinical-strategy.js';
-import type { RuntimeContext } from '../src/contracts/runtime.js';
 import type { ClinicalWorkspace } from '../src/contracts/workspace.js';
+import type { CapabilityEvidenceReceipt } from '../src/contracts/workspace.js';
 import type { ResolvedCapability, CapabilityEvidenceObligation } from '../src/contracts/capability.js';
 
 /**
  * H15.8 Capability Evidence Obligation Lifecycle —— NOT_APPLICABLE 保留态 + obligation-level identity。
- * 验证：NOT_APPLICABLE 无合法 producer（不可伪造）；readiness 按 obligation 粒度验证。
+ *
+ * 验证：NOT_APPLICABLE 无合法 producer（不可伪造）；obligation 粒度 terminality 由 receipt 确定性推导。
+ * 该推导是 V2.1 图与 readiness 的唯一真源（refreshControlPlaneV21 注入 workspace closure），
+ * 因此这里直接断言推导结果，不再断言已被删除的 legacy readiness key 投影。
  */
 
 const OBLIGATION: CapabilityEvidenceObligation = {
@@ -43,23 +44,25 @@ function coreWorkspace(): ClinicalWorkspace {
   return ws;
 }
 
-function ctx(ws: ClinicalWorkspace, capabilities: ResolvedCapability[], provisional: string[] = []): RuntimeContext {
-  return {
-    workspace: ws,
-    capabilities,
-    strategy: { ...emptyClinicalStrategy(), provisionalRequiredArtifacts: provisional },
-    understanding: { interaction: { mode: 'clinical' } },
-  } as unknown as RuntimeContext;
+/** obligation 粒度的 terminal closure（推导唯一真源）。 */
+function terminalObligationIds(
+  capabilities: ResolvedCapability[],
+  receipts: Record<string, CapabilityEvidenceReceipt> | undefined,
+): string[] {
+  return deriveCapabilityEvidenceClosures(capabilities, receipts)
+    .filter((closure) => isEvidenceClosureTerminal(closure))
+    .map((closure) => closure.obligationId)
+    .filter((id): id is string => typeof id === 'string')
+    .sort();
 }
 
-// ---------- L1：required obligation 无任何 receipt → no closure / not ready ----------
+// ---------- L1：required obligation 无任何 receipt → no closure ----------
 
-test('L1: 有 obligation 但无 search/invalidation receipt → 无 closure，readiness=false', () => {
+test('L1: 有 obligation 但无 search/invalidation receipt → 无 closure（义务未 terminal）', () => {
   const ws = coreWorkspace();
   const caps = [cap('tcm.external-therapy', [OBLIGATION])];
   assert.deepEqual(deriveCapabilityEvidenceClosures(caps, ws.capabilityEvidenceReceipts), []);
-  const readiness = evaluateProposalReadiness(ctx(ws, caps));
-  assert.equal(readiness.ready, false);
+  assert.deepEqual(terminalObligationIds(caps, ws.capabilityEvidenceReceipts), []);
 });
 
 // ---------- L2：真实 search=0 → SEARCHED_NONE（绝不是 NOT_APPLICABLE） ----------
@@ -103,44 +106,37 @@ test('L4: deriveCapabilityEvidenceClosures 永不产出 NOT_APPLICABLE（无合�
   assert.equal(typeof (capEv as Record<string, unknown>)['recordInvalidationReceipt'], 'undefined', '不存在 invalidation producer');
 });
 
-// ---------- L5：伪造 NOT_APPLICABLE 不能满足 readiness（被 derivation 覆盖） ----------
+// ---------- L5：伪造 NOT_APPLICABLE 声明不产生 terminal 义务 ----------
 
-test('L5: 手工伪造 NOT_APPLICABLE closure 被 readiness 覆盖，仍 not ready', () => {
+test('L5: 手工伪造 NOT_APPLICABLE closure 不改变推导结果（仍无 terminal 义务）', () => {
   const ws = coreWorkspace();
   const caps = [cap('tcm.external-therapy', [OBLIGATION])];
   // 模型/外部直接写入伪造 closure。
   ws.capabilityEvidenceClosures = [{ capabilityId: 'tcm.external-therapy', obligationId: 'treatment-asset-evidence', status: 'NOT_APPLICABLE', assetRefs: [] }];
-  // readiness 会用真实 receipt 重新推导，覆盖伪造 closure。
-  const readiness = evaluateProposalReadiness(ctx(ws, caps));
-  assert.equal(readiness.ready, false, '无真实 receipt 时伪造 NOT_APPLICABLE 不成立');
-  assert.ok(!readiness.ready);
+  // 推导只读真实 receipt，覆盖伪造值。
+  assert.deepEqual(terminalObligationIds(caps, ws.capabilityEvidenceReceipts), [], '无真实 receipt 时伪造 NOT_APPLICABLE 不成立');
 });
 
-// ---------- L7/L8/L9：一个 capability 两个 obligations 的 obligation-level readiness ----------
+// ---------- L7/L8/L9：一个 capability 两个 obligations 的 obligation-level terminality ----------
 
 const OBL_A: CapabilityEvidenceObligation = { id: 'ob-a', evidenceType: 'asset', discoveryToolIds: ['knowledge.search_cards'], hydrationToolIds: ['knowledge.get_asset'] };
 const OBL_B: CapabilityEvidenceObligation = { id: 'ob-b', evidenceType: 'reference', discoveryToolIds: ['knowledge.search'], hydrationToolIds: ['knowledge.get_source'] };
 const MULTI = () => cap('test.multi', [OBL_A, OBL_B], ['test.multi']);
 
-test('L7: A 完成 B 未完成 → readiness 仍 not ready（obligation 粒度）', () => {
+test('L7: A 完成 B 未完成 → 仅 A terminal（obligation 粒度）', () => {
   const ws = coreWorkspace();
   // 只完成 A（search_cards + get_asset）。
   recordSearchReceipt(ws, ['test.multi'], [{ activation_scope: 'test.multi', asset_id: 'X-001' }]);
   recordHydrationReceipt(ws, 'X-001', 'test.multi', 'knowledge.get_asset');
 
-  const artifacts = deriveRequiredEvidenceArtifacts([MULTI()]);
-  assert.deepEqual(artifacts, ['capabilityEvidence:test.multi:ob-a', 'capabilityEvidence:test.multi:ob-b']);
-
   const closures = deriveCapabilityEvidenceClosures([MULTI()], ws.capabilityEvidenceReceipts);
   assert.equal(closures.length, 1, '仅 A 有 closure');
   assert.equal(closures[0].obligationId, 'ob-a');
 
-  const readiness = evaluateProposalReadiness(ctx(ws, [MULTI()]));
-  assert.equal(readiness.ready, false);
-  assert.ok(readiness.missingArtifacts.includes('capabilityEvidence:test.multi:ob-b'));
+  assert.deepEqual(terminalObligationIds([MULTI()], ws.capabilityEvidenceReceipts), ['ob-a'], 'B 仍不 terminal');
 });
 
-test('L8: 两个 obligations 都 terminal → ready', () => {
+test('L8: 两个 obligations 都 terminal', () => {
   const ws = coreWorkspace();
   // A：search_cards + get_asset → EVIDENCE_ACQUIRED。
   recordSearchReceipt(ws, ['test.multi'], [{ activation_scope: 'test.multi', asset_id: 'X-001' }]);
@@ -150,11 +146,10 @@ test('L8: 两个 obligations 都 terminal → ready', () => {
 
   const closures = deriveCapabilityEvidenceClosures([MULTI()], ws.capabilityEvidenceReceipts);
   assert.equal(closures.length, 2);
-  const readiness = evaluateProposalReadiness(ctx(ws, [MULTI()]));
-  assert.equal(readiness.ready, true);
+  assert.deepEqual(terminalObligationIds([MULTI()], ws.capabilityEvidenceReceipts), ['ob-a', 'ob-b']);
 });
 
-test('L9: A=EVIDENCE_ACQUIRED + B=SEARCHED_NONE → ready（不同合法终态可组合）', () => {
+test('L9: A=EVIDENCE_ACQUIRED + B=SEARCHED_NONE → 不同合法终态可组合', () => {
   const ws = coreWorkspace();
   recordSearchReceipt(ws, ['test.multi'], [{ activation_scope: 'test.multi', asset_id: 'X-001' }]);
   recordHydrationReceipt(ws, 'X-001', 'test.multi', 'knowledge.get_asset');
@@ -164,18 +159,15 @@ test('L9: A=EVIDENCE_ACQUIRED + B=SEARCHED_NONE → ready（不同合法终态�
   const byId = Object.fromEntries(closures.map((c) => [c.obligationId, c.status]));
   assert.equal(byId['ob-a'], 'EVIDENCE_ACQUIRED');
   assert.equal(byId['ob-b'], 'SEARCHED_NONE');
-  const readiness = evaluateProposalReadiness(ctx(ws, [MULTI()]));
-  assert.equal(readiness.ready, true);
+  assert.deepEqual(terminalObligationIds([MULTI()], ws.capabilityEvidenceReceipts), ['ob-a', 'ob-b']);
 });
 
-test('L10: NOT_APPLICABLE 不可达 → B 无法通过 invalidation 达成 ready（保留态）', () => {
+test('L10: NOT_APPLICABLE 不可达 → B 无法通过 invalidation 达成 terminal（保留态）', () => {
   const ws = coreWorkspace();
   // A 完成，B 无任何 receipt。B 不能靠「不适用」蒙混过关。
   recordSearchReceipt(ws, ['test.multi'], [{ activation_scope: 'test.multi', asset_id: 'X-001' }]);
   recordHydrationReceipt(ws, 'X-001', 'test.multi', 'knowledge.get_asset');
-  const readiness = evaluateProposalReadiness(ctx(ws, [MULTI()]));
-  assert.equal(readiness.ready, false, 'B 无法通过 NOT_APPLICABLE 达成 ready');
-  assert.ok(readiness.missingArtifacts.includes('capabilityEvidence:test.multi:ob-b'));
+  assert.deepEqual(terminalObligationIds([MULTI()], ws.capabilityEvidenceReceipts), ['ob-a'], 'B 无法通过 NOT_APPLICABLE 达成 terminal');
 });
 
 // ---------- obligation identity 稳定性 ----------

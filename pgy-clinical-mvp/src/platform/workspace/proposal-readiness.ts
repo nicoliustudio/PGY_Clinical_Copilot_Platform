@@ -1,7 +1,6 @@
 import type { ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
-import { deriveRequiredEvidenceArtifacts, deriveCapabilityEvidenceClosures } from '../../clinical/capability-evidence.js';
-import { deriveRequiredDeliveryArtifacts, deriveCapabilityDeliveryClosures } from '../../clinical/capability-delivery.js';
+import type { ObligationNodeV21 } from '../../control-plane-v21/types.js';
 import {
   checkClinicalCoreCompletion,
   checkCompletionAgainst,
@@ -9,6 +8,7 @@ import {
   computeRequiredArtifacts,
   findUnresolvedFormalHypotheses,
 } from './clinical-workspace.js';
+import { refreshControlPlaneV21, requiredArtifactsFromGraphV21 } from '../control-plane/control-plane-v21-session.js';
 
 /**
  * Proposal Readiness —— structured clinical run 的唯一 deterministic readiness projection。
@@ -81,24 +81,69 @@ export function evaluateProposalReadiness(
     });
   }
 
-  const requiresFormDecision = (context.capabilities ?? []).some((c) => c.requiresTreatmentFormDecision === true);
+  const controlState = context.controlPlaneV21;
+  if (controlState && controlState.compileStatus === 'COMPILED') {
+    // Phase 7：V2.1 obligation graph 是未满足义务的**唯一真源**。
+    // runtime scheduler（action surface）与 readiness 读同一张图，required artifacts 也由图派生，
+    // 因此 planner 的 provisional 预判不会再把「用户明确只要针灸」强行要求成 formulaSelection。
+    refreshControlPlaneV21(context);
+    const blockedRequired = controlState.graph.nodes.filter((n) => n.required && n.status === 'BLOCKED');
+    if (blockedRequired.length > 0) {
+      // typed planning blocker（unsupported / ambiguous / cycle）：闭世界下不可交付，必须阻断提交，
+      // 不允许用「模型自拟」绕过，也不允许静默降级为可提交。
+      blockers.push({
+        code: 'CLINICAL_DECISION_INCOMPLETE',
+        message: `control plane blocked: ${blockedRequired
+          .map((n) => n.blocker?.question ?? n.target.type)
+          .join(' | ')}`,
+        missing: [...new Set(blockedRequired.map((n) => n.target.type))],
+      });
+    }
+    const graphRequired = requiredArtifactsFromGraphV21(controlState);
+    const completion = checkCompletionAgainst(context.workspace, graphRequired);
+    // requiredArtifacts 只覆盖「可映射为 workspace artifact key」的义务；证据类义务没有对应 key。
+    // 因此 readiness 必须再直接读图，保证「任一 required obligation 未 terminal → 不可提交」，
+    // 否则会出现「formulaSelection 已选但 formula-evidence 未取得仍可提交」的闸门漏洞。
+    const describeNode = (node: ObligationNodeV21): string =>
+      `${node.target.type}${typeof node.target.qualifiers.outcome === 'string' ? `(${node.target.qualifiers.outcome})` : ''}`;
+    const unmetGraphNodes = controlState.graph.nodes.filter((n) => n.required && n.status === 'OPEN');
+    // V2.1.1/V2.1.2 单一真源：缺失集 =「workspace 缺 key」∪「图里未 terminal 的义务」（OPEN 与 BLOCKED 都算）。
+    // 否则会出现 artifact 已写入（key 已满足）但其 prerequisite 义务仍未 terminal 的情况：
+    // 图说 2 个义务未完成，readiness 却说 missing=[]，recovery/final 消息因此给出空缺失集。
+    const missingArtifacts = [...new Set([
+      ...completion.missingArtifacts,
+      ...unmetGraphNodes.map(describeNode),
+      ...blockedRequired.map(describeNode),
+    ])];
+    if (!completion.ok) {
+      blockers.push({
+        code: completion.missingArtifacts.includes('formulaSelection') ? 'FORMULA_SELECTION_INCOMPLETE' : 'CLINICAL_DECISION_INCOMPLETE',
+        message:
+          'control plane incomplete: required outcome obligations are still unmet (unmet obligations decide retrieval/commit legality). Satisfy or legally terminate them before submitting.',
+        missing: missingArtifacts,
+      });
+    }
+    if (unmetGraphNodes.length > 0) {
+      blockers.push({
+        code: 'CLINICAL_DECISION_INCOMPLETE',
+        message: 'control plane incomplete: required obligations are not terminal (see missing).',
+        missing: missingArtifacts,
+      });
+    }
+    return {
+      ready: blockers.length === 0,
+      requiredArtifacts: graphRequired,
+      missingArtifacts,
+      coreMissing: core.missing,
+      unresolvedHypotheses: unresolved,
+      blockers,
+    };
+  }
 
-  // H15.7：确定性推导治疗证据闭环（activation → obligation → receipt → closure），并注入 workspace。
-  const evidenceClosures = deriveCapabilityEvidenceClosures(context.capabilities ?? [], context.workspace.capabilityEvidenceReceipts);
-  context.workspace.capabilityEvidenceClosures = evidenceClosures;
-  const evidenceArtifacts = deriveRequiredEvidenceArtifacts(context.capabilities ?? []);
-
-  // H15.9 / Phase 3.5：确定性推导治疗交付闭环（durable artifact satisfaction → closure），并注入 workspace。
-  const deliveryClosures = deriveCapabilityDeliveryClosures(context.capabilities ?? [], context.workspace, evidenceClosures);
-  context.workspace.capabilityDeliveryClosures = deliveryClosures;
-  const deliveryArtifacts = deriveRequiredDeliveryArtifacts(context.capabilities ?? []);
-
-  const baseArtifacts = computeRequiredArtifacts(
+  const requiredArtifacts = computeRequiredArtifacts(
     context.strategy?.provisionalRequiredArtifacts,
-    requiresFormDecision,
     context.workspace.clinicalDecisionSpine.completionObligation?.requiredArtifacts,
   );
-  const requiredArtifacts = [...new Set([...baseArtifacts, ...evidenceArtifacts, ...deliveryArtifacts])];
   const completion = checkCompletionAgainst(context.workspace, requiredArtifacts);
   if (!completion.ok) {
     const formulaSelectionIncomplete = completion.missingArtifacts.includes('formulaSelection');

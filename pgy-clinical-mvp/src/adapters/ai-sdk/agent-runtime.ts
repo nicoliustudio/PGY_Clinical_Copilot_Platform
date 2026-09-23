@@ -6,7 +6,7 @@ import { agentResultSchema, type AgentResult, type ProposalSubmitInput } from '.
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { PrimaryAgentOutput, PrimaryAgentPort } from '../../contracts/ports.js';
 import type { AgentStreamEvent, LifecycleStage } from '../../contracts/stream.js';
-import type { AgentLoopTrace, CommitReliabilityMetrics, TerminationReason, ContextMetrics, PromptComponents } from '../../contracts/agent-loop.js';
+import type { AgentLoopTrace, CommitReliabilityMetrics, TerminationReason, ContextMetrics, PromptComponents, ControlPlaneTraceV21 } from '../../contracts/agent-loop.js';
 import { addToolCall, addActionReceipt, setRunMetrics, addH14TreatmentRetrieval } from '../../trace.js';
 import { executionProtocolVersion, type ActionReceipt, type DecisionImpact, type ExecutionRole, type ExecutionRoleCost, type RunExecutionMetrics, type RecentRetrievalFeedback, type H14TreatmentRetrieval } from '../../contracts/execution.js';
 import { DEFAULT_AI_SDK_TOOL_BINDINGS, type AiSdkToolBindings } from './tool-bindings.js';
@@ -28,7 +28,19 @@ import { buildHypothesisProjection } from '../../platform/workspace/hypothesis-p
 import { buildComparisonMatrix } from '../../platform/workspace/deliberation-projection.js';
 import { buildDecisionState } from '../../platform/workspace/decision-state-projection.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
-import { parseEvidenceArtifactKey } from '../../clinical/capability-evidence.js';
+import {
+  applyEvidenceNeedBlocker,
+  blockedObligationsV21,
+  openObligationsV21,
+  outcomeCoverage,
+  refreshControlPlaneV21,
+  runnableObligations,
+  unmetObligationsV21,
+  v21ToolSurface,
+} from '../../platform/control-plane/control-plane-v21-session.js';
+import type { EffectTerm } from '../../control-plane-v21/types.js';
+import { formulaFrontierPending } from '../../platform/control-plane/artifact-bridge.js';
+import { evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
@@ -143,205 +155,164 @@ function activeToolIds(context: RuntimeContext, bindings: AiSdkToolBindings, mod
 }
 
 /**
- * H15.8.3 / Phase 3.4：Clinical Action Phase —— 由 Runtime 状态推导的取证/合成/决策阶段。
- * pure derived state，可逆（不一次性 lock），不识别病种/方/能力。
- */
-type ClinicalActionPhase =
-  | 'EVIDENCE_ACQUISITION'
-  | 'CORE_SYNTHESIS'
-  | 'HYPOTHESIS_DISPOSITION'
-  | 'DECISION_COMMIT'
-  | 'READY';
-
-/**
- * 阶段由「requirement 是否满足」推导（复用 evaluateProposalReadiness 的单一真源）：
- * - 存在未 terminal 的 capability evidence obligation → EVIDENCE_ACQUISITION
- * - 临床核心（disease/pattern/treatment/formalHypotheses）未形成 → CORE_SYNTHESIS
- * - 核心已形成、但存在未 disposition 的 agent 假说 → HYPOTHESIS_DISPOSITION
- * - 核心/假说已定、但最终 decision artifact 未完成 → DECISION_COMMIT
- * - 全部 satisfied → READY
- */
-/** 临床核心 artifact 集合（core 未形成 → CORE_SYNTHESIS）。 */
-const CORE_ARTIFACTS = new Set(['diseaseAssessment', 'patternAssessment', 'treatmentPlan', 'formalHypotheses']);
-
-function deriveClinicalActionPhase(context: RuntimeContext): ClinicalActionPhase {
-  const readiness = evaluateProposalReadiness(context);
-  if (readiness.missingArtifacts.some((a) => a.startsWith('capabilityEvidence:'))) return 'EVIDENCE_ACQUISITION';
-  if (readiness.coreMissing.length > 0 || readiness.missingArtifacts.some((a) => CORE_ARTIFACTS.has(a))) return 'CORE_SYNTHESIS';
-  if (readiness.unresolvedHypotheses.length > 0) return 'HYPOTHESIS_DISPOSITION';
-  if (!readiness.ready) return 'DECISION_COMMIT';
-  return 'READY';
-}
-
-/**
- * H15.10 / Phase 4：Retrieval Orchestration —— 当前 active evidence work item。
- * 当多个 evidence obligation 同时 unmet 时，按稳定顺序（capabilityId:obligationId 字典序）返回第一个（active），
- * 让 evidence acquisition 从「自由探索」收敛为「有明确工作项的取证」。
- * 全部 terminal 时返回 null（无 active work item，应离开 EVIDENCE_ACQUISITION）。
- * 纯 derived state，不识别病种/方/能力。
- */
-export function activeEvidenceObligation(
-  context: RuntimeContext,
-): { capabilityId: string; obligationId: string } | null {
-  const readiness = evaluateProposalReadiness(context);
-  const unmet = readiness.missingArtifacts
-    .filter((a) => a.startsWith('capabilityEvidence:'))
-    .sort();
-  if (unmet.length === 0) return null;
-  return parseEvidenceArtifactKey(unmet[0]);
-}
-
-/**
- * 工具职责分类（通用 Runtime action class，非业务枚举）。
- * 关键区分（对应 T15/T18 诊断）：
- * - CAPABILITY_EVIDENCE：治疗形式能力的证据义务工具（search_cards / get_asset）——证据 terminal 后应收口。
- * - CORE_KNOWLEDGE：辨证/辨病规范知识检索（standards）——只产出诊断依据，不扩张方剂 frontier。
- * - GENERAL_SEARCH：通用 broad 检索（knowledge.search，可返回方剂）——须由 phase 约束其检索目的。
- * - EVIDENCE_READ：精确读取已取得证据（get_source）。
- * - DECISION：方剂/候选决策工具——由 addFormulaDecisionTools 做 state-driven 收窄。
- */
-type ActionClass =
-  | 'CAPABILITY_EVIDENCE'
-  | 'CORE_KNOWLEDGE'
-  | 'GENERAL_SEARCH'
-  | 'EVIDENCE_READ'
-  | 'HYPOTHESIS_PRESENTATION'
-  | 'CLINICAL_SYNTHESIS'
-  | 'DECISION'
-  | 'SUBMISSION'
-  | 'CAPABILITY'
-  | 'OTHER';
-
-function actionClassOf(toolId: string): ActionClass {
-  switch (toolId) {
-    case 'knowledge.search_cards':
-    case 'knowledge.get_asset':
-      return 'CAPABILITY_EVIDENCE';
-    case 'knowledge.search':
-      return 'GENERAL_SEARCH';
-    case 'knowledge.get_source':
-      return 'EVIDENCE_READ';
-    case 'knowledge.get_diagnostic_patterns':
-    case 'knowledge.get_disease_standard':
-    case 'knowledge.get_syndrome_standard':
-      return 'CORE_KNOWLEDGE';
-    case 'workspace.consider_hypotheses':
-      return 'HYPOTHESIS_PRESENTATION';
-    case 'workspace.record_deliberation':
-      return 'CLINICAL_SYNTHESIS';
-    case 'workspace.focus_candidates':
-    case 'workspace.record_candidate_assessment':
-    case 'workspace.record_candidate_exclusion':
-    case 'formula.validate':
-    case 'formula.search_normative':
-    case 'formula.search_candidates':
-    case 'formula.get_evidence':
-    case 'formula.get_modification_evidence':
-      return 'DECISION';
-    case 'proposal.submit':
-      return 'SUBMISSION';
-    case 'capability.discover':
-    case 'capability.activate':
-      return 'CAPABILITY';
-    default:
-      return 'OTHER';
-  }
-}
-
-/**
- * 每个 phase 允许的 action class。DECISION 类不在此平铺，而由 addFormulaDecisionTools 做
- * candidate/frontier state 驱动收窄（发现 → 聚焦 → 取证 → 选择）。
+ * Control Plane V2.1 action surface 投影（Phase 6 —— 调度主权）。
  *
- * SUBMISSION（Phase 3.1）：READY / 核心未形成 时可用；核心已形成但未 ready（HYPOTHESIS_DISPOSITION /
- * DECISION_COMMIT）时隐藏，逼模型补齐而不是反复探 submit。
- * HYPOTHESIS_PRESENTATION（Phase 3.3 + 3.6）：只在 EVIDENCE_ACQUISITION / CORE_SYNTHESIS 开放（辨证尚未收敛）。
- * HYPOTHESIS_DISPOSITION（存在未 disposition 假说）与 DECISION_COMMIT（假说已 disposition 且无新证据）均隐藏——
- * 不因模型继续发散思考而重新 present 新假说。真正的新证据（unmet evidence obligation / core 未形成）会通过
- * phase 回退到 EVIDENCE_ACQUISITION / CORE_SYNTHESIS 自动重新开放 generation。
- * GENERAL_SEARCH（Phase 4）：broad 检索（knowledge.search）只在辨证未收敛（EVIDENCE_ACQUISITION / CORE_SYNTHESIS）
- * 开放；一旦进入 disposition / decision 阶段即收口，避免用 broad search 重新扩张方剂 frontier。
+ * - 只有声明了 `effectPatternsV21` 的工具受 V2.1 管辖；proposal.submit / capability.* 等控制类工具不受影响。
+ * - 工具可见 ⟺ 它的某个 effect pattern 与**当前 runnable obligation** 的 admissible effect 结构匹配。
+ * - 检索是否开放因此由 unmet obligation 决定，而不是「搜索 N 次」的阈值。
+ * - Request IR 未能建立（compileStatus=FAILED）时不接管（避免用不完整的闭世界契约阻断临床工作）。
  */
-const PHASE_ALLOWED_CLASSES: Record<ClinicalActionPhase, ActionClass[]> = {
-  EVIDENCE_ACQUISITION: ['CAPABILITY_EVIDENCE', 'CORE_KNOWLEDGE', 'GENERAL_SEARCH', 'EVIDENCE_READ', 'HYPOTHESIS_PRESENTATION', 'CLINICAL_SYNTHESIS', 'CAPABILITY', 'SUBMISSION'],
-  CORE_SYNTHESIS: ['CORE_KNOWLEDGE', 'GENERAL_SEARCH', 'EVIDENCE_READ', 'HYPOTHESIS_PRESENTATION', 'CLINICAL_SYNTHESIS', 'CAPABILITY', 'SUBMISSION'],
-  HYPOTHESIS_DISPOSITION: ['CORE_KNOWLEDGE', 'EVIDENCE_READ', 'CLINICAL_SYNTHESIS', 'CAPABILITY'],
-  DECISION_COMMIT: ['CLINICAL_SYNTHESIS', 'DECISION', 'CAPABILITY'],
-  READY: ['SUBMISSION'],
-};
+export function projectControlPlaneV21Surface(context: RuntimeContext, internalToolIds: string[]): string[] {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return internalToolIds;
+  refreshControlPlaneV21(context);
+  const patternsFor = (id: string): EffectTerm[] | undefined =>
+    context.tools.find((t) => t.id === id)?.effectPatternsV21 as EffectTerm[] | undefined;
+  const { closed } = v21ToolSurface(state, internalToolIds, patternsFor);
+  const closedSet = new Set(closed);
+  // V2.1.1: provider selection is already deterministic in the graph and RuntimePreparer activates
+  // those providers. Keeping discover/activate exposed would reintroduce a second orchestration loop.
+  closedSet.add('capability.discover');
+  closedSet.add('capability.activate');
 
-function hasExpandedFormulaEvidence(context: RuntimeContext, candidateRef: string): boolean {
-  return context.workspace.evidenceState.evidenceItems.some((e) => e.relatedCandidates.includes(candidateRef));
+  // V2.1.1 evidence lifecycle refinement: discovery and hydration are different execution states
+  // even though they serve the same generic obligation. A retrieval tool stays legal only while it
+  // can still advance **some** runnable evidence obligation; otherwise every call is a guaranteed
+  // no-op (search→search / hydrate→hydrate loops). The progress is derived from declared
+  // evidenceObligations + receipts, so no modality-specific branch is involved.
+  const evidenceNodes = runnableObligations(state)
+    .filter((node) => node.target.type === 'artifact:treatment-evidence' && node.target.producerCapabilityId);
+  if (evidenceNodes.length > 0) {
+    const progress = evidenceRetrievalProgress(
+      context.capabilities,
+      context.workspace.capabilityEvidenceReceipts,
+      evidenceNodes.map((node) => node.target.producerCapabilityId as string),
+    );
+    const open = new Set<string>();
+    const declared = new Set<string>();
+    for (const p of progress) {
+      const obligation = context.capabilities
+        .find((c) => c.id === p.capabilityId)
+        ?.evidenceObligations?.find((o) => o.id === p.obligationId);
+      for (const toolId of obligation?.discoveryToolIds ?? []) {
+        declared.add(toolId);
+        if (p.requiresDiscovery) open.add(toolId);
+      }
+      for (const toolId of obligation?.hydrationToolIds ?? []) {
+        declared.add(toolId);
+        if (p.requiresHydration) open.add(toolId);
+      }
+    }
+    for (const toolId of declared) if (!open.has(toolId)) closedSet.add(toolId);
+  }
+
+  // Formula evidence follows the same progress rule: discovery is useful only until concrete
+  // candidates exist. Once they do, the only state-advancing retrieval is candidate hydration.
+  const currentFormulaEvidence = runnableObligations(state)
+    .find((node) => node.target.type === 'artifact:formula-evidence');
+  if (currentFormulaEvidence) {
+    const formulaCandidates = context.workspace.candidates.filter((candidate) => candidate.kind === 'formula');
+    if (formulaCandidates.length === 0) {
+      closedSet.add('formula.get_evidence');
+      closedSet.add('formula.validate');
+    } else {
+      closedSet.add('formula.search_candidates');
+      closedSet.add('formula.search_normative');
+    }
+  }
+  return internalToolIds.filter((id) => !closedSet.has(id));
 }
 
-/**
- * Formula decision surface：由 durable state 决定可用动作，不使用“最多搜 N 次”之类阈值。
- *
- * - 没有候选：允许 search_candidates 一次去形成候选面；
- * - 已有候选但尚未 focus：先收窄 frontier，不继续 broad formula retrieval；
- * - 已 focus：只允许为 frontier 中尚无完整 formula evidence 的候选读取证据；
- * - frontier 证据已齐：隐藏 retrieval，只保留 deliberation / selection / review / submit。
- */
-function addFormulaDecisionTools(context: RuntimeContext, allowed: Set<string>): void {
-  const selected = context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
-  const candidates = context.workspace.candidates.filter((c) => c.kind === 'formula');
-  const frontier = context.workspace.deliberationState.frontier.filter((ref) => candidates.some((c) => c.id === ref));
-
-  [
-    'workspace.focus_candidates',
-    'workspace.record_candidate_assessment',
-    'workspace.record_candidate_exclusion',
-    'formula.validate',
-  ].forEach((t) => allowed.add(t));
-
-  if (selected) {
-    if (!hasExpandedFormulaEvidence(context, selected)) allowed.add('formula.get_evidence');
-    allowed.add('formula.get_modification_evidence');
-    return;
-  }
-
-  if (candidates.length === 0) {
-    allowed.add('formula.search_candidates');
-    return;
-  }
-
-  if (frontier.length === 0) return;
-  if (frontier.some((ref) => !hasExpandedFormulaEvidence(context, ref))) {
-    allowed.add('formula.get_evidence');
-  }
-}
-
-/**
- * Phase 3.4：统一 action-surface 投影。由 deriveClinicalActionPhase 推导阶段，
- * 再按 phase 允许的 action class 投影工具面（DECISION 类由 addFormulaDecisionTools 做 state-driven 收窄）。
- * 这是 closureAwareActiveToolIds 与 recoveryActiveToolIds 的共同真源，避免各自维护一套零散 gate。
- */
 function projectActiveToolSurface(
   context: RuntimeContext,
   bindings: AiSdkToolBindings,
   mode: 'harness' | 'classic',
 ): string[] {
-  const phase = deriveClinicalActionPhase(context);
-  const all = activeToolIds(context, bindings, mode);
-  const allowed = new Set<string>();
-  const classes = PHASE_ALLOWED_CLASSES[phase];
+  const allInternal = activeToolIds(context, bindings, mode).map(fromApiToolName);
+  // Phase 6：工具合法性**只**由 V2.1 obligation 投影决定，不存在第二种调度权威。
+  // 未建立 Request IR（编译器失败）时不再回退到 phase/action-class 调度器 —— 保留完整工具面，
+  // 由 readiness / Authority 继续做提交闸门（fail-closed 在 commit，而不是靠 legacy 调度猜测）。
+  return projectControlPlaneV21Surface(context, allInternal).map(toApiToolName);
+}
 
-  // 非 DECISION 类：按 class 过滤（allowed 统一存 internal 名）。
-  for (const t of all) {
-    const internal = fromApiToolName(t);
-    const cls = actionClassOf(internal);
-    if (cls !== 'DECISION' && classes.includes(cls)) allowed.add(internal);
-  }
+/**
+ * Phase 5：合成义务已可执行、但模型仍无法完成时，才由 Runtime 施加 NEED_EVIDENCE blocker，
+ * 重新打开**定向**检索。这是重新打开检索的唯一通道（不使用搜索次数阈值）。
+ */
+function maybeApplyEvidenceNeedBlocker(context: RuntimeContext): void {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return;
+  refreshControlPlaneV21(context);
+  const runnable = runnableObligations(state);
+  // 已有可执行的取证义务 → 模型应直接执行，不需要 blocker。
+  if (runnable.some((n) => n.allowedEffects.some((e) => e.op === 'retrieve'))) return;
+  const target = runnable.find((n) => n.allowedEffects.some((e) => e.op === 'commit'));
+  if (!target) return;
+  applyEvidenceNeedBlocker(
+    state,
+    context.workspace,
+    target.id,
+    `synthesis obligation ${target.target.type} reported insufficient evidence`,
+  );
+}
 
-  // DECISION 类：state-driven 收窄（发现 → 聚焦 → 取证 → 选择）。
-  if (classes.includes('DECISION')) {
-    addFormulaDecisionTools(context, allowed);
-  }
-
-  // H15.9 / Phase 3.5：DECISION_COMMIT 缺 delivery artifact 时，需要的是 synthesis / delivery commit，
-  // 而不是重新取证。已闭环的 CAPABILITY_EVIDENCE 工具不因 delivery missing 重新开放。
-  // 只有出现新的 unmet evidence obligation（→ EVIDENCE_ACQUISITION）才重新开放取证。
-
-  return all.filter((t) => allowed.has(fromApiToolName(t)));
+/** Control Plane V2.1 遥测快照。 */
+export function controlPlaneTraceV21(
+  context: RuntimeContext,
+  steps: ControlPlaneTraceV21['steps'],
+): ControlPlaneTraceV21 | undefined {
+  const state = context.controlPlaneV21;
+  if (!state) return undefined;
+  refreshControlPlaneV21(context);
+  const required = state.graph.nodes.filter((n) => n.required);
+  const readiness = evaluateProposalReadiness(context);
+  return {
+    requestCompileStatus: state.compileStatus,
+    ...(state.compileError ? { requestCompileError: state.compileError } : {}),
+    requiredOutcomes: [...state.requestIR.outcomes.required],
+    preferredOutcomes: [...state.requestIR.outcomes.preferred],
+    allowedOutcomes: [...(state.requestIR.outcomes.allowed ?? [])],
+    excludedOutcomes: [...state.requestIR.outcomes.excluded],
+    unresolvedOutcomes: [...(state.requestIR.outcomes.unresolved ?? [])],
+    preferredShortfalls: [...(state.requestIR.outcomes.unresolvedPreferred ?? [])],
+    mentionOutcomes: (state.requestIR.outcomes.mentions ?? []).map((mention) => ({ ...mention })),
+    ...(state.semanticValidation ? { semanticValidation: state.semanticValidation } : {}),
+    exclusive: state.requestIR.outcomes.exclusive,
+    formulaCardinality: state.requestIR.outputPolicy.formulaCardinality.mode,
+    knowledgeSourcePolicy: state.requestIR.generationPolicy.knowledgeSource,
+    planningIssues: state.graph.issues.map((issue) => ({ type: issue.type, message: issue.message })),
+    requiredObligationCount: required.length,
+    satisfiedObligationCount: required.filter((n) => n.status === 'SATISFIED').length,
+    openObligations: openObligationsV21(state).map((n) => n.id),
+    blockedObligations: blockedObligationsV21(state).map((n) => n.id),
+    notDeliverableObligations: required.filter((n) => n.status === 'NOT_DELIVERABLE').map((n) => n.id),
+    graphComplete: unmetObligationsV21(state).length === 0,
+    unmetObligations: unmetObligationsV21(state).map((n) => n.id),
+    obligations: state.graph.nodes.map((n) => ({
+      id: n.id,
+      type: n.target.type,
+      ...(typeof n.target.qualifiers.outcome === 'string' ? { outcome: n.target.qualifiers.outcome } : {}),
+      ...(n.provider ? { provider: `${n.provider.capabilityId}/${n.provider.ruleId}` } : {}),
+      source: n.source,
+      status: n.status,
+      required: n.required,
+      rootOutcomes: [...n.rootOutcomes],
+      dependsOn: [...n.dependsOn],
+      ...(n.blocker ? { blocker: n.blocker.type } : {}),
+    })),
+    outcomeCoverage: outcomeCoverage(state).map((o) => ({ outcome: o.outcome, status: o.status })),
+    appliedBlockers: state.appliedBlockers.map((b) => ({
+      obligationId: b.obligationId,
+      type: b.blocker.type,
+      question: b.blocker.question,
+    })),
+    steps,
+    readiness: {
+      ready: readiness.ready,
+      blockerCodes: readiness.blockers.map((b) => b.code),
+      missingArtifacts: [...readiness.missingArtifacts],
+    },
+  };
 }
 
 function closureAwareActiveToolIds(
@@ -438,6 +409,62 @@ const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence
 - Establish the patient-level pattern assessment before using formula evidence as the main basis for treatment selection.
 - Formula evidence must not be used to create the syndrome that the formula is intended to treat.`;
 
+/**
+ * Control Plane V2.1：把本次 run 的 required outcome 暴露给模型。
+ * 这是一个 durable artifact 必须显式声明 outcome 的闭环前提（多治疗形式并存时不可含糊）。
+ *
+ * 「哪些 outcome 需要交付」由图本身给出（required 且未 terminal 的 treatment-delivery 义务），
+ * 不由 Core 认识任何具体治疗形式 —— 新增 modality 只改 manifest，这里不需要改。
+ */
+function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return '';
+  const required = state.requestIR.outcomes.required;
+  if (required.length === 0) return '';
+  const pending = [...new Set(state.graph.nodes
+    .filter((node) => node.required
+      && node.status === 'OPEN'
+      && node.target.type === 'artifact:treatment-delivery'
+      && typeof node.target.qualifiers.outcome === 'string')
+    .map((node) => node.target.qualifiers.outcome as string))].sort();
+  const lines = ['', '## Active Request Outcomes', ...required.map((o) => `- ${o}`)];
+  if (pending.length > 0) {
+    lines.push(
+      '',
+      `Treatment-form deliveries still unrecorded: ${pending.join(', ')}`,
+      'Record each one with workspace.record_deliberation → treatmentPlan.treatmentDeliveries[] '
+      + '(form / disposition / statement / sourceEvidenceRefs / outcome). `outcome` must be copied exactly '
+      + 'from the list above; one delivery closes only its own outcome obligation. '
+      + 'Use treatmentPlan.treatmentFormDecision only when exactly one delivery exists.',
+      'A delivery must implement the very treatment form its `outcome` names: `form` and `statement` must '
+      + 'describe that same form. Never label a delivery with an outcome it does not implement, and never let '
+      + 'a neighbouring or auxiliary technique stand in for the form the outcome names. When the named form is '
+      + 'not deliverable from the retrieved evidence (or is currently unsuitable), say so through `disposition` '
+      + 'and missing_information and leave that outcome undelivered instead of substituting another form.',
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * V2.1.1：把「可执行但尚未执行的下一步」显式告诉模型。
+ * 这些 hint 全部由 durable state + obligation graph 派生，不含任何业务 modality 知识；
+ * 它们不改变 closure 语义，只避免模型在无法推进的动作上空转。
+ */
+function pendingObligationHints(context: RuntimeContext): string {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return '';
+  const hints: string[] = [];
+  if (formulaFrontierPending(context.workspace)) {
+    hints.push(
+      'Formula evidence has been hydrated but the deliberation frontier is empty, so the formula-evidence '
+      + 'obligation cannot close. Call workspace.focus_candidates with the candidates you actually consider, '
+      + 'then continue with selection.',
+    );
+  }
+  return hints.length > 0 ? `\n\n## Pending Obligation Hints\n${hints.map((h) => `- ${h}`).join('\n')}\n` : '';
+}
+
 export function dynamicInstructions(base: string, context: RuntimeContext, ledger?: ToolCallLedger, retrievalFeedback?: RecentRetrievalFeedback, decisionState?: DecisionState): string {
   const skills = renderActiveSkills(context.skills);
   const view = buildClinicalWorkingView(
@@ -446,7 +473,7 @@ export function dynamicInstructions(base: string, context: RuntimeContext, ledge
   );
   const workingView = renderClinicalWorkingView(view);
   const patternPrinciple = config.experiment.diagnosticPatternSet ? `\n\n${DIAGNOSTIC_PATTERN_PRINCIPLE}` : '';
-  return `${base}\n\n${ACTION_PRINCIPLE}${patternPrinciple}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
+  return `${base}\n\n${ACTION_PRINCIPLE}${patternPrinciple}${controlPlaneOutcomeGuidance(context)}${pendingObligationHints(context)}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
 }
 
 /** 度量「目标驱动工作上下文」相对「全量投影」的收缩程度（估算）。 */
@@ -578,7 +605,9 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
     mode === 'harness' ? 'Harness active skill ids:' : 'Classic pre-routed skill ids:', skillIds || '（无）',
     '',
     mode === 'harness'
-      ? '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
+      ? context.controlPlaneV21?.compileStatus === 'COMPILED'
+        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。围绕当前 runnable obligation 执行，完成后调用 proposal.submit。'
+        : '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
       : 'Classic A/B：Capability 已由 legacy resolver 预装配；不要调用 Harness capability controls。',
     mode === 'harness'
       ? 'RAG 是 reasoning loop 中的工具：允许 search → inspect source → re-search → compare。但仅在预计会改变当前临床判断时才再次检索；已有证据足以支撑可辩护 Proposal 时直接提交。'
@@ -786,6 +815,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     let cachedDecisionState: DecisionState | undefined;
     let stepOffset = 0;
     let recovery: RecoveryState | null = null;
+    // V2.1.1 Actuation telemetry：每步的 runnable obligation 与 legal effect surface（仅观测）。
+    const controlPlaneSteps: ControlPlaneTraceV21['steps'] = [];
 
     const buildLoopAgent = (maxSteps: number, rec: RecoveryState | null) => new ToolLoopAgent({
       model: llmModel,
@@ -801,6 +832,13 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         const activeTools = rec
           ? recoveryActiveToolIds(context, bindings, mode, rec.kind === 'completion' ? rec.missing : [])
           : closureAwareActiveToolIds(context, bindings, mode);
+        if (context.controlPlaneV21?.compileStatus === 'COMPILED') {
+          controlPlaneSteps.push({
+            step: currentStep,
+            runnable: runnableObligations(context.controlPlaneV21).map((n) => n.id),
+            surface: activeTools.map(fromApiToolName),
+          });
+        }
         const baseInstructions = dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback(), cachedDecisionState);
         let instructions = baseInstructions;
         if (rec) {
@@ -860,6 +898,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
             const submitCode = (submitOutput as Record<string, unknown>).code;
             recordCorrection(typeof submitCode === 'string' ? submitCode : 'UNRESOLVED_HYPOTHESES');
             if (submitCode === 'CLINICAL_DECISION_INCOMPLETE') falseCompletionAttemptCount += 1;
+            // Phase 5：合成已可执行但仍无法完成 → 由 Runtime 施加 NEED_EVIDENCE，重新打开定向检索。
+            maybeApplyEvidenceNeedBlocker(context);
           } else {
             submittedProposal = toolCall.input;
           }
@@ -1229,9 +1269,17 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       proposalSubmitted = false;
       commitReliability.finalProposalCommittedCount = 1;
       const missing = finalContract?.missingArtifacts ?? [];
+      // V2.1.1：fail-closed 必须可解释。typed blocker（unsupported / ambiguous / cycle / NEED_EVIDENCE）
+      // 是「为什么闭世界下无法交付」的真源，不能让用户只看到 EXECUTION_INCOMPLETE。
+      const typedBlockers = (context.controlPlaneV21?.graph.nodes ?? [])
+        .filter((node) => node.required && (node.status === 'BLOCKED' || node.blocker !== undefined))
+        .map((node) => node.blocker?.question ?? `${node.target.type} is not deliverable`);
+      const blockerNote = typedBlockers.length > 0
+        ? `; blocked: ${[...new Set(typedBlockers)].join(' | ')}`
+        : '';
       proposal = {
         mode: 'conversation',
-        message: `EXECUTION_INCOMPLETE: missing artifacts [${missing.join(', ')}]`,
+        message: `EXECUTION_INCOMPLETE: missing artifacts [${missing.join(', ')}]${blockerNote}`,
       };
     }
 
@@ -1248,6 +1296,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       toolCallLedger: ledger.entries(),
       promptComponents: computePromptComponents(context, ledger, tracker.feedback()),
       commitReliability,
+      controlPlane: controlPlaneTraceV21(context, controlPlaneSteps),
     };
 
     const contextMetrics = computeContextMetrics(context, ledger, tracker.feedback());

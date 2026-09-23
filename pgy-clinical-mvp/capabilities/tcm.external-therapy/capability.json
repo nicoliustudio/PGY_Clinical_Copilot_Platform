@@ -5,7 +5,13 @@
   "enabled": true,
   "description": "针刺、艾灸、穴位、耳穴等中医外治方式的语义发现能力",
   "semanticDescription": "适用于输入中明确要求或计划使用针刺、艾灸、穴位、耳穴等中医外治方式的临床任务。基于开放语义判断，不限具体措辞。",
-  "provides": ["external_therapy"],
+  "provides": [
+    "external_therapy",
+    "modality:external-therapy",
+    "modality:acupuncture",
+    "modality:moxibustion",
+    "modality:auricular"
+  ],
   "positiveExamples": [
     "希望配合针灸治疗",
     "这次想加针刺方案",
@@ -15,7 +21,31 @@
     "针灸科怎么走",
     "以前做过针灸，现在只想开中药"
   ],
-  "knowledgeScopes": ["tcm.external-therapy"],
+  "knowledgeScopes": [
+    "tcm.external-therapy"
+  ],
+  "semanticOntology": {
+    "terms": [
+      {
+        "term": "modality:acupuncture",
+        "aliases": ["针灸", "针刺", "体针", "针法"],
+        "subtypes": ["温针灸", "电针", "火针", "梅花针"]
+      },
+      {
+        "term": "modality:moxibustion",
+        "aliases": ["艾灸", "灸法", "温灸", "隔物灸"]
+      },
+      {
+        "term": "modality:auricular",
+        "aliases": ["耳针", "耳穴", "耳穴压豆"]
+      },
+      {
+        "term": "modality:external-therapy",
+        "aliases": ["外治法", "中医外治"],
+        "subtypes": ["拔罐", "走罐", "闪罐", "刮痧", "推拿", "穴位贴敷", "刺络放血"]
+      }
+    ]
+  },
   "skillIds": [],
   "toolIds": [],
   "treatmentSpecific": true,
@@ -23,8 +53,12 @@
     {
       "id": "treatment-asset-evidence",
       "evidenceType": "treatment-asset",
-      "discoveryToolIds": ["knowledge.search_cards"],
-      "hydrationToolIds": ["knowledge.get_asset"]
+      "discoveryToolIds": [
+        "knowledge.search_cards"
+      ],
+      "hydrationToolIds": [
+        "knowledge.get_asset"
+      ]
     }
   ],
   "deliveryObligations": [
@@ -32,5 +66,70 @@
       "id": "treatment-form-delivery",
       "requiredArtifact": "treatmentFormDecision"
     }
-  ]
+  ],
+  "controlPlaneV21": {
+    "rules": [
+      {
+        "id": "treatment-evidence",
+        "produces": {
+          "type": "artifact:treatment-evidence",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability"
+        },
+        "effects": [
+          {
+            "op": "retrieve",
+            "target": {
+              "type": "artifact:treatment-evidence",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "treatment-delivery",
+        "forOutcomes": [
+          "modality:external-therapy",
+          "modality:acupuncture",
+          "modality:moxibustion",
+          "modality:auricular"
+        ],
+        "produces": {
+          "type": "artifact:treatment-delivery",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability",
+          "producerRuleId": "$rule"
+        },
+        "requires": [
+          {
+            "type": "artifact:clinical-core"
+          },
+          {
+            "type": "artifact:treatment-evidence",
+            "qualifiers": {
+              "outcome": "$outcome"
+            },
+            "producerCapabilityId": "$capability"
+          }
+        ],
+        "effects": [
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:treatment-delivery",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
 }

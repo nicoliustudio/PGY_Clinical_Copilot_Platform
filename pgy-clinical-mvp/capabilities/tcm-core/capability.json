@@ -5,10 +5,157 @@
   "enabled": true,
   "description": "General TCM clinical reasoning capability.",
   "semanticDescription": "Use when the semantic understanding indicates a general TCM clinical task.",
-  "provides": ["general_tcm_clinical"],
+  "provides": [
+    "general_tcm_clinical",
+    "modality:herbal-formula",
+    "artifact:clinical-core",
+    "outcome:clinical-assessment"
+  ],
   "positiveExamples": [],
   "negativeExamples": [],
-  "knowledgeScopes": ["general"],
-  "skillIds": ["tcm-clinical-cognition"],
-  "toolIds": ["knowledge.search", "formula.search_candidates", "formula.get_evidence", "formula.validate"]
+  "knowledgeScopes": [
+    "general"
+  ],
+  "semanticOntology": {
+    "terms": [
+      {
+        "term": "modality:herbal-formula",
+        "aliases": ["汤药", "汤剂", "中药", "中药方", "方剂", "开方", "处方", "饮片"]
+      },
+      {
+        "term": "outcome:clinical-assessment",
+        "aliases": ["辨证", "辨证论治", "证型判断", "病机分析", "治法", "治则", "治疗原则", "治疗大法"]
+      }
+    ]
+  },
+  "skillIds": [
+    "tcm-clinical-cognition"
+  ],
+  "toolIds": [
+    "knowledge.search",
+    "formula.search_candidates",
+    "formula.get_evidence",
+    "formula.validate"
+  ],
+  "controlPlaneV21": {
+    "rules": [
+      {
+        "id": "diagnostic-evidence",
+        "produces": {
+          "type": "artifact:diagnostic-evidence"
+        },
+        "effects": [
+          {
+            "op": "retrieve",
+            "target": {
+              "type": "artifact:diagnostic-evidence"
+            }
+          }
+        ]
+      },
+      {
+        "id": "clinical-core",
+        "forOutcomes": [
+          "outcome:clinical-assessment"
+        ],
+        "produces": {
+          "type": "artifact:clinical-core"
+        },
+        "requires": [
+          {
+            "type": "artifact:diagnostic-evidence"
+          }
+        ],
+        "effects": [
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:clinical-core"
+            }
+          }
+        ]
+      },
+      {
+        "id": "formula-evidence",
+        "produces": {
+          "type": "artifact:formula-evidence",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability"
+        },
+        "requires": [
+          {
+            "type": "artifact:clinical-core"
+          }
+        ],
+        "effects": [
+          {
+            "op": "retrieve",
+            "target": {
+              "type": "artifact:formula-evidence",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          },
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:formula-evidence",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          },
+          {
+            "op": "validate",
+            "target": {
+              "type": "artifact:formula-evidence",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "formula-delivery",
+        "forOutcomes": [
+          "modality:herbal-formula"
+        ],
+        "produces": {
+          "type": "artifact:formula-selection",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability",
+          "producerRuleId": "$rule"
+        },
+        "requires": [
+          {
+            "type": "artifact:clinical-core"
+          },
+          {
+            "type": "artifact:formula-evidence",
+            "qualifiers": {
+              "outcome": "$outcome"
+            },
+            "producerCapabilityId": "$capability"
+          }
+        ],
+        "effects": [
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:formula-selection",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
 }

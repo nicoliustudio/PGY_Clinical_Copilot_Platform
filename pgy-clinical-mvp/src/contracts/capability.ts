@@ -25,13 +25,21 @@ export interface CapabilityDescriptor {
   toolIds: string[];
   /** H14：该能力是否为治疗形式能力（由 manifest 数据标注）。Core 不做业务判断。 */
   treatmentSpecific?: boolean;
-  /** H15.5.3：该能力是否要求产出治疗形式决策（如膏方）。由 manifest 数据标注，Core 不识别业务词。 */
-  requiresTreatmentFormDecision?: boolean;
   /**
-   * 治疗形式决策尚未形成时，为该能力保留的「证据获取工具」。
-   * 这是 capability contract，不是 Core 对业务词/前缀的判断；未来新增治疗形式能力只改 manifest。
+   * V2.1.2：声明的语义本体（manifest 数据）。
+   * Core 只做**确定性 identity 匹配**（字面/声明别名/声明家族关系），不做模糊、近义或 embedding 推断。
+   *
+   * - `aliases`：与该 term 等价的用户说法（声明式，不是猜测）。
+   * - `subtypes`：属于该 term 家族、但**未**被任何 capability 作为独立 term 提供的更具体形式。
+   *   这些形式只能被判为 FAMILY —— 家族关系不构成 exact satisfaction。
    */
-  treatmentFormEvidenceToolIds?: string[];
+  semanticOntology?: {
+    terms: Array<{
+      term: string;
+      aliases?: string[];
+      subtypes?: string[];
+    }>;
+  };
   /**
    * H15.7：通用治疗证据义务（metadata 驱动，非业务枚举）。
    * 声明「激活即产生 evidence obligation」，以及 discovery/hydration 工具契约。
@@ -40,6 +48,39 @@ export interface CapabilityDescriptor {
   evidenceObligations?: CapabilityEvidenceObligation[];
   /** H15.9 / Phase 3.5：治疗交付义务（激活后必须形成相应 durable artifact）。 */
   deliveryObligations?: CapabilityDeliveryObligation[];
+
+  /**
+   * Control Plane V2.1: parameterized production rules. Business expansion changes manifest
+   * data, while the generic planner performs unification/backward chaining.
+   */
+  controlPlaneV21?: {
+    rules: Array<{
+      id: string;
+      forOutcomes?: string[];
+      produces: {
+        type: string;
+        qualifiers?: Record<string, string | number | boolean>;
+        producerCapabilityId?: string;
+        producerRuleId?: string;
+      };
+      requires?: Array<{
+        type: string;
+        qualifiers?: Record<string, string | number | boolean>;
+        producerCapabilityId?: string;
+        producerRuleId?: string;
+      }>;
+      effects: Array<{
+        op: 'retrieve' | 'commit' | 'validate' | 'inspect';
+        target?: {
+          type: string;
+          qualifiers?: Record<string, string | number | boolean>;
+          producerCapabilityId?: string;
+          producerRuleId?: string;
+        };
+        params?: Record<string, string | number | boolean>;
+      }>;
+    }>;
+  };
 }
 
 /** H15.7：一条治疗证据义务（纯 metadata，Core 不认识业务能力）。 */
@@ -68,12 +109,13 @@ export interface ResolvedCapability {
   id: string;
   confidence: number;
   reason: string;
+  /**
+   * Control Plane V2.1：从 manifest 透传的 outcome 集合（semantic surface）。
+   * 用于把 durable delivery artifact 单值归属到唯一 obligation（不依赖 capability id 判断）。
+   */
+  provides?: string[];
   /** H14：从 CapabilityDescriptor 透传，供治疗检索观测使用。 */
   treatmentSpecific?: boolean;
-  /** H15.5.3：从 CapabilityDescriptor 透传，供 completion contract 合并使用。 */
-  requiresTreatmentFormDecision?: boolean;
-  /** 从 CapabilityDescriptor 透传，供 closure/recovery 的 generic action surface 使用。 */
-  treatmentFormEvidenceToolIds?: string[];
   /** H15.7：该能力激活后纳入检索的知识 scope（用于证据 receipt → closure 投影）。 */
   knowledgeScopes?: string[];
   /** H15.7：从 CapabilityDescriptor 透传的治疗证据义务（激活即产生 obligation）。 */

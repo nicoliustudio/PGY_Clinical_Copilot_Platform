@@ -31,20 +31,92 @@ export function parseDeliveryArtifactKey(artifact: string): { capabilityId: stri
   return { capabilityId: rest.slice(0, idx), obligationId: rest.slice(idx + 1) };
 }
 
-/** 当前已激活且声明交付义务的 capability → readiness 必须验证的 artifact keys（obligation 粒度）。 */
-export function deriveRequiredDeliveryArtifacts(capabilities: ResolvedCapability[]): string[] {
-  const keys: string[] = [];
+/** Return all durable treatment-delivery payloads, with legacy single-value compatibility. */
+export function treatmentDeliveryArtifacts(workspace: ClinicalWorkspace) {
+  const plan = workspace.clinicalDecisionSpine.treatmentPlan;
+  if (!plan) return [];
+  if ((plan.treatmentDeliveries?.length ?? 0) > 0) return plan.treatmentDeliveries ?? [];
+  return plan.treatmentFormDecision ? [plan.treatmentFormDecision] : [];
+}
+
+/**
+ * Backward-compatible single outcome accessor. New closure logic consumes all deliveries.
+ */
+export function declaredArtifactOutcome(workspace: ClinicalWorkspace, artifact: string): string | undefined {
+  if (artifact !== 'treatmentFormDecision') return undefined;
+  const outcomes = treatmentDeliveryArtifacts(workspace)
+    .map((x) => x.outcome?.trim())
+    .filter((x): x is string => Boolean(x));
+  return outcomes.length === 1 ? outcomes[0] : undefined;
+}
+
+export interface AttributedDelivery {
+  capabilityId: string;
+  obligationId: string;
+  artifactRef: string;
+  outcome?: string;
+}
+
+/**
+ * V2.1.1 multi-value attribution.
+ *
+ * treatmentFormDecision is a legacy artifact key, but its durable payload is now a collection.
+ * Every payload is attributed independently by semantic outcome. One delivery can close exactly
+ * one provider/obligation; two deliveries can close two modalities in the same run.
+ *
+ * Historical single-capability runs without an outcome remain supported only when ownership is
+ * unambiguous. Multi-capability runs without explicit outcome fail closed.
+ */
+export function attributeDeliveryObligations(
+  capabilities: ResolvedCapability[],
+  workspace: ClinicalWorkspace,
+): AttributedDelivery[] {
+  const groups = new Map<string, AttributedDelivery[]>();
   for (const c of capabilities) {
     for (const ob of c.deliveryObligations ?? []) {
-      keys.push(deliveryArtifactKey(c.id, ob.id));
+      if (!isArtifactSatisfied(workspace, ob.requiredArtifact)) continue;
+      const bucket = groups.get(ob.requiredArtifact) ?? [];
+      bucket.push({ capabilityId: c.id, obligationId: ob.id, artifactRef: ob.requiredArtifact });
+      groups.set(ob.requiredArtifact, bucket);
     }
   }
-  return keys;
+
+  const out: AttributedDelivery[] = [];
+  const seen = new Set<string>();
+  const push = (value: AttributedDelivery) => {
+    const key = `${value.capabilityId}::${value.obligationId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(value);
+  };
+
+  for (const [artifactRef, candidates] of groups) {
+    if (artifactRef !== 'treatmentFormDecision') {
+      // Generic artifact types retain the historical unambiguous-only rule.
+      if (candidates.length === 1) push(candidates[0]);
+      continue;
+    }
+
+    const deliveries = treatmentDeliveryArtifacts(workspace);
+    if (deliveries.length === 0) continue;
+    for (const delivery of deliveries) {
+      const outcome = delivery.outcome?.trim();
+      if (outcome) {
+        const owners = candidates.filter((candidate) =>
+          capabilities.find((c) => c.id === candidate.capabilityId)?.provides?.includes(outcome) === true);
+        if (owners.length === 1) push({ ...owners[0], outcome });
+        continue;
+      }
+      // Legacy compatibility: only one possible owner may consume an untyped single delivery.
+      if (candidates.length === 1 && deliveries.length === 1) push(candidates[0]);
+    }
+  }
+  return out;
 }
 
 /**
  * 由 durable artifact satisfaction + 证据 closure 投影 delivery closure（纯函数，terminal 状态）。
- * - requiredArtifact 已满足 → DELIVERED（真实 durable state，非模型文本）。
+ * - 归属成功 → DELIVERED（真实 durable state，非模型文本；且只归属唯一义务）。
  * - 依赖的证据义务全部 SEARCHED_NONE → NOT_DELIVERABLE（合法终态）。
  * - 否则不产生 closure（readiness 视为未满足，缺失 delivery artifact）。
  */
@@ -54,9 +126,11 @@ export function deriveCapabilityDeliveryClosures(
   evidenceClosures: CapabilityEvidenceClosure[],
 ): CapabilityDeliveryClosure[] {
   const out: CapabilityDeliveryClosure[] = [];
+  const attributed = attributeDeliveryObligations(capabilities, workspace);
   for (const c of capabilities) {
     for (const ob of c.deliveryObligations ?? []) {
-      if (isArtifactSatisfied(workspace, ob.requiredArtifact)) {
+      const owned = attributed.find((a) => a.capabilityId === c.id && a.obligationId === ob.id);
+      if (owned) {
         out.push({ capabilityId: c.id, obligationId: ob.id, status: 'DELIVERED', artifactRef: ob.requiredArtifact });
         continue;
       }

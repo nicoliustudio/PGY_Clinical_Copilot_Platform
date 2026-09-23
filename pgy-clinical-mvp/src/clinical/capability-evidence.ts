@@ -32,18 +32,9 @@ export function parseEvidenceArtifactKey(artifact: string): { capabilityId: stri
   return { capabilityId: rest.slice(0, idx), obligationId: rest.slice(idx + 1) };
 }
 
-/** 当前已激活且声明了证据义务的 capability → readiness 必须验证的 artifact keys（obligation 粒度）。 */
-export function deriveRequiredEvidenceArtifacts(capabilities: ResolvedCapability[]): string[] {
-  const keys: string[] = [];
-  for (const c of capabilities) {
-    for (const ob of c.evidenceObligations ?? []) {
-      keys.push(evidenceArtifactKey(c.id, ob.id));
-    }
-  }
-  return keys;
-}
-
-/** Runtime 拥有的 discovery receipt（确定性；discovery 工具执行后记录，按 scope + toolId 归组）。 */
+/**
+ * Runtime 拥有的 discovery receipt（确定性；discovery 工具执行后记录，按 scope + toolId 归组）。
+ */
 export function recordSearchReceipt(
   workspace: ClinicalWorkspace,
   scopes: string[],
@@ -143,4 +134,68 @@ export function deriveCapabilityEvidenceClosures(
 export function isEvidenceClosureTerminal(closure: CapabilityEvidenceClosure | undefined): boolean {
   return closure !== undefined
     && (closure.status === 'EVIDENCE_ACQUIRED' || closure.status === 'SEARCHED_NONE' || closure.status === 'NOT_APPLICABLE');
+}
+
+/**
+ * V2.1.1：证据义务的**检索推进状态**（纯函数，metadata 驱动）。
+ *
+ * discovery 与 hydration 是同一条义务的两个执行阶段，而不是两种业务阶段枚举：
+ * - 未 discovery → 只有 discovery 工具能改变状态；
+ * - 已 discovery 且存在未水合资产 → 只有 hydration 工具能改变状态；
+ * - 已 discovery 且全部水合（或 discovery 返回 0）→ 两者都不能再改变状态（义务已 terminal）。
+ *
+ * 调用方（action surface / 检索 scope 选择）据此关闭「不可能再推进」的工具，
+ * 从而消除 search→search / hydrate→hydrate 的无状态循环，且不需要任何 modality 特判。
+ */
+export interface EvidenceRetrievalProgress {
+  capabilityId: string;
+  obligationId: string;
+  discoveryExecuted: boolean;
+  discovered: string[];
+  hydrated: string[];
+  /** 该义务仍需要 discovery 才能前进。 */
+  requiresDiscovery: boolean;
+  /** 该义务已有已发现但未水合的资产，只有 hydration 能前进。 */
+  requiresHydration: boolean;
+}
+
+export function evidenceRetrievalProgress(
+  capabilities: ResolvedCapability[],
+  receipts: Record<string, CapabilityEvidenceReceipt> | undefined,
+  capabilityIds: Iterable<string>,
+): EvidenceRetrievalProgress[] {
+  const wanted = new Set(capabilityIds);
+  const out: EvidenceRetrievalProgress[] = [];
+  for (const c of capabilities) {
+    if (!wanted.has(c.id)) continue;
+    for (const obligation of c.evidenceObligations ?? []) {
+      let discoveryExecuted = false;
+      const discovered = new Set<string>();
+      const hydrated = new Set<string>();
+      for (const scope of c.knowledgeScopes ?? []) {
+        const r = receipts?.[scope];
+        if (!r) continue;
+        for (const toolId of obligation.discoveryToolIds ?? []) {
+          const ids = r.discoveryByTool[toolId];
+          if (ids === undefined) continue;
+          discoveryExecuted = true;
+          for (const id of ids) discovered.add(id);
+        }
+        for (const toolId of obligation.hydrationToolIds ?? []) {
+          for (const id of r.hydrationByTool[toolId] ?? []) hydrated.add(id);
+        }
+      }
+      const unhydrated = [...discovered].filter((id) => !hydrated.has(id));
+      out.push({
+        capabilityId: c.id,
+        obligationId: obligation.id,
+        discoveryExecuted,
+        discovered: [...discovered],
+        hydrated: [...hydrated],
+        requiresDiscovery: !discoveryExecuted,
+        requiresHydration: discoveryExecuted && unhydrated.length > 0,
+      });
+    }
+  }
+  return out.sort((a, b) => `${a.capabilityId}:${a.obligationId}`.localeCompare(`${b.capabilityId}:${b.obligationId}`));
 }

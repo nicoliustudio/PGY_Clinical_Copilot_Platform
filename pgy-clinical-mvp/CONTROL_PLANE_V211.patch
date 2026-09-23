@@ -1,0 +1,1100 @@
+diff --git a/CHANGED_FILES_V211.txt b/CHANGED_FILES_V211.txt
+new file mode 100644
+index 0000000..e69de29
+diff --git a/CONTROL_PLANE_V211_CHANGELOG.md b/CONTROL_PLANE_V211_CHANGELOG.md
+new file mode 100644
+index 0000000..b044ba4
+--- /dev/null
++++ b/CONTROL_PLANE_V211_CHANGELOG.md
+@@ -0,0 +1,76 @@
++# PGY Control Plane V2.1.1 — Actuation Closure Changelog
++
++日期：2026-09-22
++
++本版不重写 V2.1 Generic Resolver / backward-chaining planner，集中修复真实 E2E 暴露的 **graph → execution → durable state → result** 断层。
++
++## 已实现
++
++### 1. 多治疗形式 durable delivery
++
++- `TreatmentPlan` 新增 `treatmentDeliveries?: TreatmentFormDecision[]`。
++- 保留 `treatmentFormDecision` 作为兼容别名，避免一次性打碎旧调用方。
++- Workspace 写入按 `outcome`（fallback: form）合并，后写入的 modality 不再覆盖先前 modality。
++- delivery closure 按每个 payload 的 semantic outcome 独立归属；一个 delivery 最多关闭一个 obligation，多 delivery 可关闭多个 modality。
++
++### 2. H12 与 V2.1 clinical-core 同一真源
++
++- `checkClinicalCoreCompletion()` 把 unresolved formal hypothesis disposition 纳入 clinical-core truth。
++- 因此存在未处置 alternative 时，`artifact:clinical-core` 不再提前 SATISFIED。
++- `workspace.consider_hypotheses` 进入 V2.1 commit effect surface；clinical-core 完成后不允许再无条件创建 hypothesis 把旧 H12 重新打开。
++
++### 3. Durable mutation 进入 Effect Surface
++
++- `workspace.record_deliberation` 声明 clinical-core / formula-selection / treatment-delivery commit effects。
++- tool execute 前再次按实际 payload 检查当前 admissible commit target，避免“多用途超级写工具”借一个 runnable effect 偷写未来 artifact。
++
++### 4. Provider 确定性激活
++
++- Request IR + graph 已选定的 provider 由 RuntimePreparer 自动 activate。
++- compiled V2.1 action surface 关闭 `capability.discover` / `capability.activate`，消除 resolver 已知道 provider 后模型再次编排 provider 的重复循环。
++
++### 5. treatment evidence discovery / hydration 收敛
++
++- 多 treatment capability 时，一次只围绕一个稳定 runnable treatment-evidence obligation 检索。
++- `knowledge.search_cards` receipt 只记入当前 obligation 的 scopes，避免 global top-K 把其他 capability 错记为 SEARCHED_NONE。
++- discovery 没产生 asset 时不开放 `knowledge.get_asset`；一旦发现待 hydrate asset，就关闭重复 `knowledge.search_cards`。
++- `knowledge.get_asset` 同样限制到当前 treatment-evidence obligation scopes。
++
++### 6. formula discovery / hydration 收敛
++
++- 没有 formula candidate：开放 discovery、关闭 hydrate/validate。
++- 已产生 formula candidate：关闭重复 candidate discovery，推进到 evidence hydration/validation。
++
++### 7. 未知显式 modality fail-closed
++
++- Request IR 新增 `outcomes.unresolved`。
++- compiler 明确禁止把 registry 中不存在的显式治疗形式映射成“最近”的已有 modality。
++- Planner 将 unresolved request 变成 typed `UNSUPPORTED_OUTCOME` blocker。
++
++### 8. Deterministic user result 补齐多结果
++
++- `ClinicalResult` 新增 `treatment_deliveries` 与 `formula_set`。
++- 两者由 durable Workspace / sourceFormulaSet 确定性投影，不让模型最终再自由总结而 silent drop。
++- `AT_LEAST N` 若 deterministic formula set 数量不足，结果必须显式写 cardinality shortfall。
++
++### 9. Source ZIP 自包含修复
++
++原 V2.1 Source ZIP 的 `scripts/control-plane-v2-check.mjs` / `control-plane-v21-check.mjs` 引用了未打包的 `reference/` 目录。本版改为运行仓库内 canonical tests，不再依赖缺失目录。
++
++## 新增/更新的回归不变量
++
++`tests/control-plane-v21-integration.test.ts` 增加覆盖：
++
++- provider 自动激活，discover/activate 不再暴露；
++- treatment discovery → hydration 单向推进；
++- 针灸 + 膏方两个 durable deliveries 独立 closure；
++- formula candidate 出现后关闭重复 discovery；
++- H12 unresolved alternative 阻止 clinical-core / graph 提前 complete；
++- unknown explicit modality 产生 typed unsupported。
++
++## 刻意没有伪装成“已彻底完成”的两点
++
++1. **MODEL_ALLOWED**：本版修复了结果层的诚实表达，但尚未把 model-authored generation 建模为独立通用 provider/effect/obligation。下一步若做，应做 generic generation provider，不能写 herbal-formula 特判。
++2. **Formula cardinality**：本版把 `formula_set` 与 shortfall 做成 deterministic postcondition；尚未把 `AT_LEAST N` 变成 graph-level cardinality obligation。真实 E2E 必须验证是否需要继续提升到 graph postcondition。
++
++因此本版定位是 **V2.1.1 Actuation Closure**，不是宣称所有长期技术债已经清零。
+diff --git a/TRAE_EXECUTION_V211.md b/TRAE_EXECUTION_V211.md
+new file mode 100644
+index 0000000..8e427c5
+--- /dev/null
++++ b/TRAE_EXECUTION_V211.md
+@@ -0,0 +1,52 @@
++# PGY Control Plane V2.1.1 — Trae 执行指令
++
++基于本目录源码继续工作。**不要重新设计 Planner，不要增加病例/针灸/膏方/拔罐等业务 if/else。** 本版目标是把 V2.1 已正确的 Obligation Graph 真正接到执行层。
++
++## 你只需要做三件事
++
++### 1. 先完整验证
++
++```bash
++npm ci
++npm run typecheck
++npm test
++npm run arch:test
++npm run control:v2:check
++npm run control:v21:check
++npm run control:v211:check
++```
++
++> 本源码包已修复原导出包中 `control:v2:check` / `control:v21:check` 仍引用未打包 `reference/` 目录的问题。
++
++任何失败先修实现，不得通过降低 Safety/Authority、放宽 closure、增加 maxSteps 或加病例特判来过测。
++
++### 2. 用原来的 5 个真实场景重新做同批 E2E
++
++必须逐项核对：
++
++1. **只针灸**：provider 由 V2.1 自动激活；不应再出现 capability.discover / capability.activate 循环；search_cards 后若已有资产必须进入 get_asset，不能继续重复 discovery。
++2. **针灸 + 膏方**：Workspace 中必须同时存在两个 `treatmentDeliveries[]` 项，分别绑定 `modality:acupuncture` / `modality:gaofang`；两个 delivery obligation 必须独立 DELIVERED。
++3. **多个方**：发现 formula candidate 后不能继续重复 `formula.search_candidates`；必须推进到 hydrate/selection。最终结果用 `formula_set` 投影；若 `AT_LEAST N` 实际不足 N，必须显式报告 cardinality shortfall，禁止假装满足。
++4. **KB 不足 + MODEL_ALLOWED**：不要把“允许模型拟方”误映射成膏方。若没有 normative delivery，要明确区分 KB 交付与 model-authored advisory；本版尚未把 model-generation 做成独立 graph provider，若要继续完善，只能以通用 generation provider/effect 方式实现，不能加方剂特判。
++5. **全新 modality**：若 registry 没有该 modality，Request IR 必须写入 `outcomes.unresolved` 并产生 typed `UNSUPPORTED_OUTCOME`；不得吸附到最近已有 modality。若要验证“manifest-only 扩展”，先真实新增对应 manifest/provider 再跑 E2E。
++
++同时验证一个关键不变量：**只要存在未处置的 formal alternative hypothesis，`artifact:clinical-core` 就必须保持 OPEN；不得再出现 `graphComplete=true` 但 H12 readiness=false。**
++
++### 3. 只处理真实环境差异，完成后给出证据
++
++完成后输出：
++
++- 全量测试结果；
++- 5 场景原始 E2E JSON 路径；
++- 每个场景的 Request IR、runnable obligation 序列、tool 序列、outcomeCoverage、readiness；
++- 是否仍出现 capability discover/activate 重复；
++- 是否仍出现 search→search / candidate-search→candidate-search 无状态推进；
++- 是否仍出现 graphComplete 与 H12/readiness 不一致；
++- `treatmentDeliveries[]` 和 `formula_set` 的最终用户结果截图/JSON；
++- 剩余技术债。
++
++## 不可破坏的原则
++
++`用户表达 → Request IR → Generic Resolver → Obligation DAG → Runnable Obligation → Legal Effect Surface → Durable Artifact / Typed Blocker → Closure → Deterministic Result`
++
++Runtime 决定“现在必须完成哪个义务、哪些动作能改变它”；模型只决定“如何完成当前合法义务”。
+diff --git a/VALIDATION_V211.md b/VALIDATION_V211.md
+new file mode 100644
+index 0000000..065029f
+--- /dev/null
++++ b/VALIDATION_V211.md
+@@ -0,0 +1,32 @@
++# PGY Control Plane V2.1.1 — Validation Notes
++
++日期：2026-09-22
++
++## 本环境实际完成的验证
++
++- 对整个工程 **228 个 TS/TSX 文件**使用 TypeScript parser 做语法扫描：PASS（0 parse diagnostics）。
++- 对修改版与原 V2.1 Source 做 TypeScript diagnostics 对比：在当前环境缺少第三方依赖类型的前提下，修复本次新增的本地类型错误后，**没有出现相对于 baseline 新增的非依赖类 diagnostics**。
++- `scripts/control-plane-v2-check.mjs` 与 `scripts/control-plane-v21-check.mjs` 使用 `node --check`：PASS。
++- 对 dependency-pure 的核心修改模块（workspace / capability-delivery / V2.1 planner）做独立严格 TypeScript 编译：PASS。
++- 运行独立 closure smoke：H12 alternative 未处置时 clinical-core 不完成；处置后完成；两个 typed treatment deliveries 可独立产生两个 DELIVERED closure：PASS。
++- 运行 unknown-modality blocker smoke：`outcomes.unresolved=["拔罐"]` 产生 `UNSUPPORTED_OUTCOME`：PASS。
++- 手工/静态核对 planner 未加入 acupuncture / gaofang / formula 等新的业务分支；V2.1 generic planner 保持不被本轮 actuation 修复侵入。
++
++## 本环境无法完成的验证
++
++上传的 Source ZIP 不含 `node_modules`。尝试 `npm ci` 时，当前运行环境无法解析/访问 npm registry（`EAI_AGAIN`）；因此不能诚实声称以下命令已在本环境重新 PASS：
++
++```bash
++npm run typecheck
++npm test
++npm run arch:test
++npm run control:v2:check
++npm run control:v21:check
++npm run control:v211:check
++```
++
++此外原 Source ZIP 中两个 control check 脚本引用了未打包的 `reference/` 目录，本版已经修复为仓库内自包含测试入口。
++
++## Trae / 真实工程环境必须执行
++
++按 `TRAE_EXECUTION_V211.md` 先执行全量命令，再跑原 5 个真实 E2E。特别不能只看 graphComplete；必须同时看最终 runtime status、outcomeCoverage、readiness、tool sequence 和 deterministic result。
+diff --git a/package.json b/package.json
+index 1088afb..a8e5d96 100644
+--- a/package.json
++++ b/package.json
+@@ -29,7 +29,9 @@
+     "control:v2:check": "node scripts/control-plane-v2-check.mjs",
+     "test:control:v2": "node --import tsx --test tests/control-plane-v2.test.ts",
+     "control:v21:check": "node scripts/control-plane-v21-check.mjs",
+-    "test:control:v21": "node --import tsx --test tests/control-plane-v21.test.ts"
++    "test:control:v21": "node --import tsx --test tests/control-plane-v21.test.ts",
++    "control:v211:check": "node --import tsx --test tests/control-plane-v21-integration.test.ts",
++    "test:control:v211": "node --import tsx --test tests/control-plane-v21-integration.test.ts"
+   },
+   "dependencies": {
+     "@ai-sdk/openai-compatible": "^3.0.49",
+diff --git a/scripts/control-plane-v2-check.mjs b/scripts/control-plane-v2-check.mjs
+index 643261e..4969702 100644
+--- a/scripts/control-plane-v2-check.mjs
++++ b/scripts/control-plane-v2-check.mjs
+@@ -1 +1,10 @@
+-import '../reference/control-plane-v2/selftest.mjs';
++import { spawnSync } from 'node:child_process';
++
++// Source exports no longer ship the historical reference/ tree. Keep this command self-contained
++// by running the repository's canonical V2 invariant test directly.
++const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', 'tests/control-plane-v2.test.ts'], {
++  stdio: 'inherit',
++  cwd: process.cwd(),
++});
++if (result.error) throw result.error;
++process.exit(result.status ?? 1);
+diff --git a/scripts/control-plane-v21-check.mjs b/scripts/control-plane-v21-check.mjs
+index 36feabf..c737b6a 100644
+--- a/scripts/control-plane-v21-check.mjs
++++ b/scripts/control-plane-v21-check.mjs
+@@ -1 +1,10 @@
+-import '../reference/control-plane-v21/selftest.mjs';
++import { spawnSync } from 'node:child_process';
++
++// Source exports no longer ship the historical reference/ tree. Run the canonical V2.1 core
++// invariant test from this repository instead of importing a missing file.
++const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', 'tests/control-plane-v21.test.ts'], {
++  stdio: 'inherit',
++  cwd: process.cwd(),
++});
++if (result.error) throw result.error;
++process.exit(result.status ?? 1);
+diff --git a/src/adapters/ai-sdk/agent-runtime.ts b/src/adapters/ai-sdk/agent-runtime.ts
+index 42ae79d..c56437e 100644
+--- a/src/adapters/ai-sdk/agent-runtime.ts
++++ b/src/adapters/ai-sdk/agent-runtime.ts
+@@ -373,6 +373,44 @@ export function projectControlPlaneV21Surface(context: RuntimeContext, internalT
+     context.tools.find((t) => t.id === id)?.effectPatternsV21 as EffectTerm[] | undefined;
+   const { closed } = v21ToolSurface(state, internalToolIds, patternsFor);
+   const closedSet = new Set(closed);
++  // V2.1.1: provider selection is already deterministic in the graph and RuntimePreparer activates
++  // those providers. Keeping discover/activate exposed would reintroduce a second orchestration loop.
++  closedSet.add('capability.discover');
++  closedSet.add('capability.activate');
++
++  // V2.1.1 evidence lifecycle refinement: discovery and hydration are different execution states
++  // even though they serve the same generic obligation. Once discovery returned concrete assets,
++  // repeated discovery cannot advance state; only hydration can. This removes search→search loops
++  // without inventing a modality-specific phase enum.
++  const currentTreatmentEvidence = runnableObligations(state)
++    .filter((node) => node.target.type === 'artifact:treatment-evidence' && node.target.producerCapabilityId)
++    .sort((a, b) => `${a.target.producerCapabilityId}:${a.id}`.localeCompare(`${b.target.producerCapabilityId}:${b.id}`))[0];
++  if (currentTreatmentEvidence?.target.producerCapabilityId) {
++    const capability = context.capabilities.find((c) => c.id === currentTreatmentEvidence.target.producerCapabilityId);
++    const receipts = capability?.knowledgeScopes?.flatMap((scope) => {
++      const receipt = context.workspace.capabilityEvidenceReceipts?.[scope];
++      return receipt ? [receipt] : [];
++    }) ?? [];
++    const discovered = new Set(receipts.flatMap((r) => r.discoveryByTool['knowledge.search_cards'] ?? []));
++    const hydrated = new Set(receipts.flatMap((r) => r.hydrationByTool['knowledge.get_asset'] ?? []));
++    if (discovered.size === 0) closedSet.add('knowledge.get_asset');
++    if ([...discovered].some((id) => !hydrated.has(id))) closedSet.add('knowledge.search_cards');
++  }
++
++  // Formula evidence follows the same progress rule: discovery is useful only until concrete
++  // candidates exist. Once they do, the only state-advancing retrieval is candidate hydration.
++  const currentFormulaEvidence = runnableObligations(state)
++    .find((node) => node.target.type === 'artifact:formula-evidence');
++  if (currentFormulaEvidence) {
++    const formulaCandidates = context.workspace.candidates.filter((candidate) => candidate.kind === 'formula');
++    if (formulaCandidates.length === 0) {
++      closedSet.add('formula.get_evidence');
++      closedSet.add('formula.validate');
++    } else {
++      closedSet.add('formula.search_candidates');
++      closedSet.add('formula.search_normative');
++    }
++  }
+   return internalToolIds.filter((id) => !closedSet.has(id));
+ }
+ 
+@@ -739,7 +777,9 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
+     mode === 'harness' ? 'Harness active skill ids:' : 'Classic pre-routed skill ids:', skillIds || '（无）',
+     '',
+     mode === 'harness'
+-      ? '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
++      ? context.controlPlaneV21?.compileStatus === 'COMPILED'
++        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。围绕当前 runnable obligation 执行，完成后调用 proposal.submit。'
++        : '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
+       : 'Classic A/B：Capability 已由 legacy resolver 预装配；不要调用 Harness capability controls。',
+     mode === 'harness'
+       ? 'RAG 是 reasoning loop 中的工具：允许 search → inspect source → re-search → compare。但仅在预计会改变当前临床判断时才再次检索；已有证据足以支撑可辩护 Proposal 时直接提交。'
+diff --git a/src/adapters/ai-sdk/tool-bindings.ts b/src/adapters/ai-sdk/tool-bindings.ts
+index 9e35580..f264a52 100644
+--- a/src/adapters/ai-sdk/tool-bindings.ts
++++ b/src/adapters/ai-sdk/tool-bindings.ts
+@@ -15,6 +15,7 @@ import { addRetrievalDiagnostics } from '../../trace.js';
+ import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
+ import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
+ import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
++import { admissibleEffects, refreshControlPlaneV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
+ import type { PatternAssessment } from '../../contracts/workspace.js';
+ 
+ export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
+@@ -32,6 +33,85 @@ function assertKnownHypothesisRef(context: RuntimeContext, hypothesisRef: string
+   }
+ }
+ 
++
++function v21AdmissibleCommitTypes(context: RuntimeContext): Set<string> | undefined {
++  if (!context.controlPlaneV21 || context.controlPlaneV21.compileStatus !== 'COMPILED') return undefined;
++  refreshControlPlaneV21(context);
++  return new Set(admissibleEffects(context.controlPlaneV21)
++    .filter((effect) => effect.op === 'commit' && effect.target)
++    .map((effect) => effect.target!.type));
++}
++
++
++/**
++ * V2.1.1 treatment retrieval is obligation-scoped, not a global top-K across every active
++ * capability. When several treatment evidence obligations are runnable, pick one stable provider
++ * at a time; after it becomes terminal the next call naturally advances to the next obligation.
++ */
++function v21TreatmentEvidenceScopes(context: RuntimeContext): string[] | undefined {
++  const state = context.controlPlaneV21;
++  if (!state || state.compileStatus !== 'COMPILED') return undefined;
++  refreshControlPlaneV21(context);
++  const current = runnableObligations(state)
++    .filter((node) => node.target.type === 'artifact:treatment-evidence' && node.target.producerCapabilityId)
++    .sort((a, b) => `${a.target.producerCapabilityId}:${a.id}`.localeCompare(`${b.target.producerCapabilityId}:${b.id}`))[0];
++  if (!current?.target.producerCapabilityId) return undefined;
++  const capability = context.capabilities.find((c) => c.id === current.target.producerCapabilityId);
++  return capability?.knowledgeScopes?.length ? [...capability.knowledgeScopes] : undefined;
++}
++
++function sameTreatmentPlanCore(context: RuntimeContext, input: Record<string, unknown>): boolean {
++  const existing = context.workspace.clinicalDecisionSpine.treatmentPlan;
++  if (!existing) return false;
++  const stringArray = (x: unknown) => Array.isArray(x) ? x.filter((v): v is string => typeof v === 'string') : [];
++  const normalizedIncoming = {
++    primaryPrinciple: typeof input.primaryPrinciple === 'string' ? input.primaryPrinciple : '',
++    adjunctPrinciples: stringArray(input.adjunctPrinciples),
++    treatmentTarget: typeof input.treatmentTarget === 'string' ? input.treatmentTarget : '',
++    priority: typeof input.priority === 'string' ? input.priority : undefined,
++    rationale: typeof input.rationale === 'string' ? input.rationale : undefined,
++    evidenceRefs: stringArray(input.evidenceRefs),
++  };
++  const normalizedExisting = {
++    primaryPrinciple: existing.primaryPrinciple,
++    adjunctPrinciples: existing.adjunctPrinciples ?? [],
++    treatmentTarget: existing.treatmentTarget,
++    priority: existing.priority,
++    rationale: existing.rationale,
++    evidenceRefs: existing.evidenceRefs ?? [],
++  };
++  return JSON.stringify(normalizedIncoming) === JSON.stringify(normalizedExisting);
++}
++
++function assertV21DeliberationLegality(
++  context: RuntimeContext,
++  input: {
++    diseaseAssessment?: unknown;
++    treatmentPlan?: Record<string, unknown>;
++    formulaSelection?: unknown;
++    patternAssessment?: unknown;
++    hypothesisUpdates?: unknown[];
++  },
++): void {
++  const allowed = v21AdmissibleCommitTypes(context);
++  if (!allowed) return;
++  const hasDelivery = Boolean(input.treatmentPlan && (
++    Array.isArray(input.treatmentPlan.treatmentDeliveries)
++    || (input.treatmentPlan.treatmentFormDecision && typeof input.treatmentPlan.treatmentFormDecision === 'object')
++  ));
++  const changesTreatmentCore = Boolean(input.treatmentPlan) && !sameTreatmentPlanCore(context, input.treatmentPlan!);
++  const changesCore = Boolean(input.diseaseAssessment || input.patternAssessment || (input.hypothesisUpdates?.length ?? 0) > 0 || changesTreatmentCore);
++  if (changesCore && !allowed.has('artifact:clinical-core')) {
++    throw new Error('V2.1 illegal mutation: clinical-core is not currently runnable');
++  }
++  if (input.formulaSelection && !allowed.has('artifact:formula-selection')) {
++    throw new Error('V2.1 illegal mutation: formula-selection is not currently runnable');
++  }
++  if (hasDelivery && !allowed.has('artifact:treatment-delivery')) {
++    throw new Error('V2.1 illegal mutation: treatment-delivery is not currently runnable');
++  }
++}
++
+ /** H12：search 发起时的 DecisionState 快照（Debug/Eval 数据）。 */
+ function buildRetrievalContext(context: RuntimeContext) {
+   const hyps = context.workspace.hypothesisState.hypotheses;
+@@ -150,12 +230,23 @@ const treatmentPlanSchema = z.object({
+   priority: z.string().optional(),
+   rationale: z.string().optional(),
+   evidenceRefs: z.array(z.string()).optional(),
++  treatmentDeliveries: z.array(z.object({
++    form: z.string(),
++    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
++    statement: z.string(),
++    sourceEvidenceRefs: z.array(z.string()),
++    /** V2.1.1: exact Request Outcome delivered by this item. */
++    outcome: z.string(),
++    advisoryComposition: z.array(z.string()).optional(),
++    preparation: z.string().optional(),
++    usage: z.string().optional(),
++  })).optional(),
++  /** @deprecated compatibility input for a single treatment delivery. */
+   treatmentFormDecision: z.object({
+     form: z.string(),
+     disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
+     statement: z.string(),
+     sourceEvidenceRefs: z.array(z.string()),
+-    /** Control Plane V2.1：本次交付的 Request Outcome（逐字取自 Active Request Outcomes）。 */
+     outcome: z.string().optional(),
+     advisoryComposition: z.array(z.string()).optional(),
+     preparation: z.string().optional(),
+@@ -257,16 +348,18 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
+         : context.understanding.facts
+             .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
+             .map((f) => f.value);
+-      const { cards, telemetry } = searchRuntimeCards(query, context.knowledgeScopes, {
++      const searchScopes = v21TreatmentEvidenceScopes(context) ?? context.knowledgeScopes;
++      const { cards, telemetry } = searchRuntimeCards(query, searchScopes, {
+         diseaseContext: caseDiseaseContext,
+         topK,
+       });
+-      // H15.7：确定性记录 discovery receipt（Runtime 拥有，模型无写入通道）。
+-      recordSearchReceipt(context.workspace, context.knowledgeScopes, cards);
++      // V2.1.1: receipt is scoped to the obligation actually searched. This prevents a mixed
++      // multi-capability top-K from falsely marking another capability as SEARCHED_NONE.
++      recordSearchReceipt(context.workspace, searchScopes, cards);
+       addRetrievalDiagnostics(context.runId, {
+         tool: 'knowledge.search_cards',
+         query,
+-        scopes: context.knowledgeScopes,
++        scopes: searchScopes,
+         topK: topK ?? config.kb.runtimeCardLimit,
+         dense: [],
+         reranked: [],
+@@ -282,7 +375,8 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
+     description: '按 asset_id 精确获取一条 Runtime Catalog 完整资产详情。仅用于读取 knowledge.search_cards 返回的、且属于当前激活 scope 的卡片。',
+     inputSchema: z.object({ assetId: z.string() }),
+     execute: async ({ assetId }) => {
+-      const asset = getRuntimeAsset(assetId, context.knowledgeScopes);
++      const assetScopes = v21TreatmentEvidenceScopes(context) ?? context.knowledgeScopes;
++      const asset = getRuntimeAsset(assetId, assetScopes);
+       // H15.7：确定性记录 hydration receipt（Runtime 拥有，模型无写入通道）。
+       if (asset) {
+         const scope = getRuntimeAssetScope(assetId);
+@@ -291,12 +385,12 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
+       addRetrievalDiagnostics(context.runId, {
+         tool: 'knowledge.get_asset',
+         query: assetId,
+-        scopes: context.knowledgeScopes,
++        scopes: assetScopes,
+         topK: 1,
+         dense: [],
+         reranked: [],
+         runtimeCatalog: {
+-          activeScopes: context.knowledgeScopes,
++          activeScopes: assetScopes,
+           catalogTotalCount: 0,
+           candidateCount: 0,
+           cardsReturnedCount: 0,
+@@ -548,6 +642,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
+       patternAssessment: patternAssessmentSchema.optional(),
+     }),
+     execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment }) => {
++      assertV21DeliberationLegality(context, {
++        diseaseAssessment,
++        treatmentPlan: treatmentPlan as Record<string, unknown> | undefined,
++        formulaSelection,
++        patternAssessment,
++        hypothesisUpdates,
++      });
+       for (const ref of focusedCandidates ?? []) assertKnownCandidateRef(context, ref);
+       for (const a of assessments ?? []) {
+         const errors = validateCandidateAssessmentRefs(context.workspace, {
+@@ -596,7 +697,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
+         basisRefs: z.array(z.string()).optional(),
+       })),
+     }),
+-    execute: async (input) => input,
++    execute: async (input) => {
++      const allowed = v21AdmissibleCommitTypes(context);
++      if (allowed && !allowed.has('artifact:clinical-core')) {
++        throw new Error('V2.1 illegal mutation: hypothesis creation is closed after clinical-core completion');
++      }
++      return input;
++    },
+   }),
+   'proposal.submit': (context) => tool({
+     description: '当临床决策已充分时调用，提交最终 Proposal 并立即停止。只提交你的选择（mode + disease/syndrome/treatment + 可选 candidate_ref/uncertainty）；formula 的 sourceId/formulaId/composition 与 safety 由 Runtime 自动填充，不要重复生成。',
+diff --git a/src/clinical/capability-delivery.ts b/src/clinical/capability-delivery.ts
+index b0abb02..85f145a 100644
+--- a/src/clinical/capability-delivery.ts
++++ b/src/clinical/capability-delivery.ts
+@@ -42,32 +42,41 @@ export function deriveRequiredDeliveryArtifacts(capabilities: ResolvedCapability
+   return keys;
+ }
+ 
++/** Return all durable treatment-delivery payloads, with legacy single-value compatibility. */
++export function treatmentDeliveryArtifacts(workspace: ClinicalWorkspace) {
++  const plan = workspace.clinicalDecisionSpine.treatmentPlan;
++  if (!plan) return [];
++  if ((plan.treatmentDeliveries?.length ?? 0) > 0) return plan.treatmentDeliveries ?? [];
++  return plan.treatmentFormDecision ? [plan.treatmentFormDecision] : [];
++}
++
+ /**
+- * 交付 artifact 自身携带的语义 outcome（如果该 artifact 类型支持）。
+- * 这是「一个通用 artifact 不得同时关闭多个义务」的判定依据。
++ * Backward-compatible single outcome accessor. New closure logic consumes all deliveries.
+  */
+ export function declaredArtifactOutcome(workspace: ClinicalWorkspace, artifact: string): string | undefined {
+-  if (artifact === 'treatmentFormDecision') {
+-    const outcome = workspace.clinicalDecisionSpine.treatmentPlan?.treatmentFormDecision?.outcome;
+-    return typeof outcome === 'string' && outcome.trim() !== '' ? outcome.trim() : undefined;
+-  }
+-  return undefined;
++  if (artifact !== 'treatmentFormDecision') return undefined;
++  const outcomes = treatmentDeliveryArtifacts(workspace)
++    .map((x) => x.outcome?.trim())
++    .filter((x): x is string => Boolean(x));
++  return outcomes.length === 1 ? outcomes[0] : undefined;
+ }
+ 
+ export interface AttributedDelivery {
+   capabilityId: string;
+   obligationId: string;
+   artifactRef: string;
++  outcome?: string;
+ }
+ 
+ /**
+- * 单值归属：把 durable artifact 归属到**唯一**一个 delivery obligation。
++ * V2.1.1 multi-value attribution.
+  *
+- * - 同一 artifactRef 只有一个候选义务 → 直接归属（单治疗形式的历史路径）。
+- * - 同一 artifactRef 有多个候选义务 → 必须由 artifact 自带的语义 outcome 决定归属；
+- *   无法唯一确定时 **fail-closed**（不归属任何义务），迫使模型显式声明 outcome，
+- *   而不是让一个通用 artifact 同时把多个治疗形式判为「已交付」。
+- * - 不同 artifactRef 的义务互不影响，各自独立判定。
++ * treatmentFormDecision is a legacy artifact key, but its durable payload is now a collection.
++ * Every payload is attributed independently by semantic outcome. One delivery can close exactly
++ * one provider/obligation; two deliveries can close two modalities in the same run.
++ *
++ * Historical single-capability runs without an outcome remain supported only when ownership is
++ * unambiguous. Multi-capability runs without explicit outcome fail closed.
+  */
+ export function attributeDeliveryObligations(
+   capabilities: ResolvedCapability[],
+@@ -77,24 +86,41 @@ export function attributeDeliveryObligations(
+   for (const c of capabilities) {
+     for (const ob of c.deliveryObligations ?? []) {
+       if (!isArtifactSatisfied(workspace, ob.requiredArtifact)) continue;
+-      const key = ob.requiredArtifact;
+-      const bucket = groups.get(key) ?? [];
++      const bucket = groups.get(ob.requiredArtifact) ?? [];
+       bucket.push({ capabilityId: c.id, obligationId: ob.id, artifactRef: ob.requiredArtifact });
+-      groups.set(key, bucket);
++      groups.set(ob.requiredArtifact, bucket);
+     }
+   }
+ 
+   const out: AttributedDelivery[] = [];
++  const seen = new Set<string>();
++  const push = (value: AttributedDelivery) => {
++    const key = `${value.capabilityId}::${value.obligationId}`;
++    if (seen.has(key)) return;
++    seen.add(key);
++    out.push(value);
++  };
++
+   for (const [artifactRef, candidates] of groups) {
+-    if (candidates.length === 1) {
+-      out.push(candidates[0]);
++    if (artifactRef !== 'treatmentFormDecision') {
++      // Generic artifact types retain the historical unambiguous-only rule.
++      if (candidates.length === 1) push(candidates[0]);
+       continue;
+     }
+-    const outcome = declaredArtifactOutcome(workspace, artifactRef);
+-    if (!outcome) continue;
+-    const owners = candidates.filter((candidate) =>
+-      capabilities.find((c) => c.id === candidate.capabilityId)?.provides?.includes(outcome) === true);
+-    if (owners.length === 1) out.push(owners[0]);
++
++    const deliveries = treatmentDeliveryArtifacts(workspace);
++    if (deliveries.length === 0) continue;
++    for (const delivery of deliveries) {
++      const outcome = delivery.outcome?.trim();
++      if (outcome) {
++        const owners = candidates.filter((candidate) =>
++          capabilities.find((c) => c.id === candidate.capabilityId)?.provides?.includes(outcome) === true);
++        if (owners.length === 1) push({ ...owners[0], outcome });
++        continue;
++      }
++      // Legacy compatibility: only one possible owner may consume an untyped single delivery.
++      if (candidates.length === 1 && deliveries.length === 1) push(candidates[0]);
++    }
+   }
+   return out;
+ }
+diff --git a/src/composition/platform-assets.ts b/src/composition/platform-assets.ts
+index 31ff08f..7e965d9 100644
+--- a/src/composition/platform-assets.ts
++++ b/src/composition/platform-assets.ts
+@@ -24,14 +24,18 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
+   { id: 'formula.get_evidence', description: '两阶段方剂检索第二阶段：展开完整方剂证据', risk: 'low', treatmentSpecific: true, effects: ['formula:hydrate'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
+   { id: 'formula.get_modification_evidence', description: '基础方已选后检索随证 ADD 加味证据（ADVISORY）', risk: 'low', treatmentSpecific: true, effects: ['formula:hydrate'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
+   { id: 'formula.validate', description: '验证 source/formula/composition 同源绑定', risk: 'low', effects: ['formula:validate'], effectPatternsV21: [{ op: 'validate', target: { type: 'artifact:formula-evidence' } }] },
+-  // 以下 workspace.* 是**认知动作**（认领假说 / 聚焦候选 / 记录评估与排除 / 批量提交判断），
+-  // 它们不产生独立 artifact，合法性由 readiness（obligation graph + H12 假说完整性）统一把关，
+-  // 因此不声明 V2.1 effect pattern（与 capability.* / proposal.submit 同类）。
++  // V2.1.1: durable clinical mutations also participate in the effect surface.
++  // Fine-grained payload legality is checked again inside workspace.record_deliberation, so a broad
++  // multi-artifact mutation tool cannot write a future artifact merely because one commit effect is runnable.
+   { id: 'workspace.focus_candidates', description: '选择进入 Deliberation Frontier 的候选', risk: 'low', effects: ['state:write-formula-selection'] },
+   { id: 'workspace.record_candidate_assessment', description: '记录 candidate × hypothesis 的候选评估', risk: 'low', effects: ['state:write-formula-selection'] },
+   { id: 'workspace.record_candidate_exclusion', description: '记录 candidate 被有意排除的原因', risk: 'low', effects: ['state:write-formula-selection'] },
+-  { id: 'workspace.record_deliberation', description: '批量提交 focus + assessment + exclusion', risk: 'low', effects: ['state:write-clinical-core', 'state:write-formula-selection', 'state:write-treatment-delivery'] },
+-  { id: 'workspace.consider_hypotheses', description: '显式认领 patient-level hypothesis（leading/alternative）', risk: 'low', effects: ['state:write-clinical-core'] },
++  { id: 'workspace.record_deliberation', description: '批量提交 focus + assessment + exclusion', risk: 'low', effects: ['state:write-clinical-core', 'state:write-formula-selection', 'state:write-treatment-delivery'], effectPatternsV21: [
++    { op: 'commit', target: { type: 'artifact:clinical-core' } },
++    { op: 'commit', target: { type: 'artifact:formula-selection' } },
++    { op: 'commit', target: { type: 'artifact:treatment-delivery' } },
++  ] },
++  { id: 'workspace.consider_hypotheses', description: '显式认领 patient-level hypothesis（leading/alternative）', risk: 'low', effects: ['state:write-clinical-core'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:clinical-core' } }] },
+   ...EXPERIMENTAL_TOOLS,
+   ...STANDARD_RUNTIME_TOOLS,
+ ];
+diff --git a/src/contracts/result.ts b/src/contracts/result.ts
+index 067608d..1030dfd 100644
+--- a/src/contracts/result.ts
++++ b/src/contracts/result.ts
+@@ -37,6 +37,25 @@ export const clinicalResultSchema = z.object({
+     visit_ref: z.string().optional(),
+     source_evidence_ref: z.string().optional(),
+   }),
++  /** V2.1.1 deterministic multi-formula projection; formula remains the primary compatibility field. */
++  formula_set: z.array(z.object({
++    formula_ref: z.string(),
++    formula_id: z.string(),
++    name: z.string(),
++    composition: z.string(),
++    relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
++  })).optional(),
++  /** V2.1.1 deterministic multi-modality deliveries from durable Workspace state. */
++  treatment_deliveries: z.array(z.object({
++    outcome: z.string().optional(),
++    form: z.string(),
++    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
++    statement: z.string(),
++    source_evidence_refs: z.array(z.string()),
++    advisory_composition: z.array(z.string()).optional(),
++    preparation: z.string().optional(),
++    usage: z.string().optional(),
++  })).optional(),
+   missing_information: z.array(z.string()),
+   safety: z.object({
+     status: z.enum(['PASS', 'BLOCK']),
+diff --git a/src/contracts/workspace.ts b/src/contracts/workspace.ts
+index 5b907b3..6af48ac 100644
+--- a/src/contracts/workspace.ts
++++ b/src/contracts/workspace.ts
+@@ -214,7 +214,15 @@ export interface TreatmentPlan {
+   priority?: string;
+   rationale?: string;
+   evidenceRefs: string[];
+-  /** H15.5.2: treatment-form advisory, kept separate from canonical BaseFormula. */
++  /**
++   * V2.1.1: multiple treatment-form deliveries may coexist in one run. Each item carries
++   * its semantic outcome so delivery closure can bind it to exactly one obligation.
++   */
++  treatmentDeliveries?: TreatmentFormDecision[];
++  /**
++   * @deprecated Backward-compatibility alias for historical single-delivery callers.
++   * New code should write/read treatmentDeliveries. Runtime mirrors the first delivery here.
++   */
+   treatmentFormDecision?: TreatmentFormDecision;
+   version: number;
+ }
+diff --git a/src/control-plane-v2/request-ir.ts b/src/control-plane-v2/request-ir.ts
+index bf5ab91..94ee310 100644
+--- a/src/control-plane-v2/request-ir.ts
++++ b/src/control-plane-v2/request-ir.ts
+@@ -16,6 +16,7 @@ export const clinicalRequestIRSchema = z.object({
+     required: z.array(z.string()),
+     preferred: z.array(z.string()),
+     excluded: z.array(z.string()),
++    unresolved: z.array(z.string()).optional().default([]),
+     exclusive: z.boolean(),
+   }),
+   outputPolicy: z.object({
+@@ -32,7 +33,7 @@ export function defaultClinicalRequestIR(goal = 'clinical-assessment'): Clinical
+   return {
+     version: 1,
+     goal,
+-    outcomes: { required: [], preferred: [], excluded: [], exclusive: false },
++    outcomes: { required: [], preferred: [], excluded: [], unresolved: [], exclusive: false },
+     outputPolicy: { formulaCardinality: { mode: 'PRIMARY_ONLY' } },
+     generationPolicy: { knowledgeSource: 'KB_PREFERRED' },
+     hardConstraints: [],
+@@ -49,12 +50,13 @@ export function normalizeClinicalRequestIR(ir: ClinicalRequestIR): ClinicalReque
+   const required = unique(ir.outcomes.required);
+   const preferred = unique(ir.outcomes.preferred).filter((x) => !required.includes(x));
+   const excluded = unique(ir.outcomes.excluded).filter((x) => !required.includes(x) && !preferred.includes(x));
++  const unresolved = unique(ir.outcomes.unresolved ?? []);
+   const formulaCardinality = ir.outputPolicy.formulaCardinality.mode === 'AT_LEAST'
+     ? { mode: 'AT_LEAST' as const, count: Math.max(1, Math.floor(ir.outputPolicy.formulaCardinality.count)) }
+     : ir.outputPolicy.formulaCardinality;
+   return {
+     ...ir,
+-    outcomes: { required, preferred, excluded, exclusive: ir.outcomes.exclusive },
++    outcomes: { required, preferred, excluded, unresolved, exclusive: ir.outcomes.exclusive },
+     outputPolicy: { formulaCardinality },
+     hardConstraints: unique(ir.hardConstraints),
+     preferences: unique(ir.preferences),
+@@ -77,12 +79,12 @@ export interface RequestCompilerInput {
+ const REQUEST_COMPILER_PROMPT = `你是 Clinical Request Compiler。你的任务不是诊断，不是给治疗方案，而是把用户自然语言编译成闭世界执行契约。
+ 
+ 原则：
+-1. 不创造业务 intent 枚举；只从系统给你的 availableSemanticTypes 中选择 outcome type（值必须逐字来自该列表）。
++1. 不创造业务 intent 枚举；required/preferred/excluded 只从 availableSemanticTypes 中选择 outcome type（值必须逐字来自该列表）。如果用户明确点名的治疗形式在 availableSemanticTypes 中没有精确对应项，禁止映射成“最接近”的已有 modality；把用户原始形式名称写进 outcomes.unresolved。
+ 2. required = 用户明确要求必须交付；preferred = 倾向但不阻塞；excluded = 明确不要。
+ 3. required 必须覆盖「用户要求实际交付的具体产物」，而不是「可能相关的知识」：
+    - 用户要求形成诊断/辨证/治法结论 → 包含代表临床评估结论的 outcome type；
+    - 用户要求开方 / 处方 / 汤药 / 中药 / 给个方 / 调整方 → 必须包含 availableSemanticTypes 中代表方剂交付的 outcome type；
+-   - 用户点名某种治疗形式（例如针灸、艾灸、膏方、中成药/制剂、外治等任何具体形式）→ 必须包含该形式对应的 outcome type；
++   - 用户点名某种治疗形式 → 只有 availableSemanticTypes 中存在精确语义对应项时才写入 required；否则写入 outcomes.unresolved，禁止吸附到更宽或相邻 modality；
+    - 用户只是提问、要求解释、要求科普、要求比较（不要求实际交付方案）→ required 可以为空。
+ 4. “只要/只做/不要其他/不要汤药”使用 exclusive=true 并把允许的治疗形式写进 required。
+    不要为了排除未来未知治疗形式而穷举 excluded；只在用户明确点名「不要 X」时写 excluded。
+@@ -100,6 +102,7 @@ const REQUEST_COMPILER_PROMPT = `你是 Clinical Request Compiler。你的任务
+     "required": ["<outcome type，逐字来自 availableSemanticTypes>"],
+     "preferred": [],
+     "excluded": [],
++    "unresolved": [],
+     "exclusive": false
+   },
+   "outputPolicy": {
+diff --git a/src/control-plane-v2/types.ts b/src/control-plane-v2/types.ts
+index 00c53c4..8090eb8 100644
+--- a/src/control-plane-v2/types.ts
++++ b/src/control-plane-v2/types.ts
+@@ -32,6 +32,12 @@ export interface ClinicalRequestIR {
+     preferred: SemanticType[];
+     /** Explicitly forbidden outcomes. */
+     excluded: SemanticType[];
++    /**
++     * User explicitly requested an outcome/modality that is not represented in the registry
++     * vocabulary. Never map it to a "nearest" known modality; planner turns it into a typed
++     * UNSUPPORTED outcome blocker. Optional for backward compatibility with V2.1 fixtures.
++     */
++    unresolved?: string[];
+     /** If true, delivery outcomes outside required/preferred are inadmissible. */
+     exclusive: boolean;
+   };
+diff --git a/src/control-plane-v21/planner.ts b/src/control-plane-v21/planner.ts
+index 9780f28..ae07243 100644
+--- a/src/control-plane-v21/planner.ts
++++ b/src/control-plane-v21/planner.ts
+@@ -175,6 +175,16 @@ export function buildObligationGraphV21(
+     return node.id;
+   };
+ 
++  // Unknown user-requested semantics are preserved as explicit typed blockers. This prevents
++  // the request compiler from silently coercing an unsupported modality to a nearby provider.
++  for (const unresolved of [...new Set(ir.outcomes.unresolved ?? [])]) {
++    const outcome = `unresolved:${unresolved}`;
++    const target = blockedOutcomeTarget(outcome);
++    const message = `requested outcome is not represented in the enabled semantic registry: ${unresolved}`;
++    issues.push({ type: 'UNSUPPORTED_OUTCOME', outcome, target, message });
++    addBlocked(target, { type: 'UNSUPPORTED_OUTCOME', question: message, details: { requested: unresolved } }, 'request', outcome);
++  }
++
+   const requestedOutcomes = [...new Set([...policy.baselineOutcomes, ...ir.outcomes.required])];
+   for (const outcome of requestedOutcomes) {
+     const resolution = resolveOutcomeProvider(outcome, capabilities);
+diff --git a/src/platform/agent/clinical-runtime.ts b/src/platform/agent/clinical-runtime.ts
+index cd21e9d..95ac819 100644
+--- a/src/platform/agent/clinical-runtime.ts
++++ b/src/platform/agent/clinical-runtime.ts
+@@ -18,6 +18,7 @@ import { outcomeCoverage, refreshControlPlaneV21 } from '../control-plane/contro
+ import { projectFormulaSet } from '../../control-plane-v2/result-projection.js';
+ import type { ProjectedFormula } from '../../control-plane-v2/result-projection.js';
+ import type { OutcomeProjectionV21 } from '../../control-plane-v21/result-projection.js';
++import { treatmentDeliveryArtifacts } from '../../clinical/capability-delivery.js';
+ 
+ export interface ClinicalRunResult extends RuntimeRunResult {
+   workspace: ClinicalWorkspace;
+@@ -255,15 +256,42 @@ export class ClinicalRuntime {
+       formulaSet,
+       selectedCandidateRef: context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef,
+     };
+-    if (proposal.mode !== 'clinical' || notDeliverable.length === 0) return { proposal, controlPlane };
++    if (proposal.mode !== 'clinical') return { proposal, controlPlane };
++
+     const explicit = notDeliverable.map((o) =>
+       `required outcome ${o.outcome} is NOT_DELIVERABLE: the knowledge base returned no qualified asset`
+       + (modelAllowed
+         ? '; a model-authored advisory may be provided but is not a normative delivery'
+         : '; model-authored substitution is not permitted by the request generation policy'),
+     );
++    const cardinality = state.requestIR.outputPolicy.formulaCardinality;
++    if (cardinality.mode === 'AT_LEAST' && formulaSet.length < cardinality.count) {
++      explicit.push(`formula cardinality shortfall: requested at least ${cardinality.count}, but only ${formulaSet.length} eligible source formulas were deterministically available`);
++    }
++    const treatmentDeliveries = treatmentDeliveryArtifacts(context.workspace).map((delivery) => ({
++      ...(delivery.outcome ? { outcome: delivery.outcome } : {}),
++      form: delivery.form,
++      disposition: delivery.disposition,
++      statement: delivery.statement,
++      source_evidence_refs: delivery.sourceEvidenceRefs,
++      ...(delivery.advisoryComposition?.length ? { advisory_composition: delivery.advisoryComposition } : {}),
++      ...(delivery.preparation ? { preparation: delivery.preparation } : {}),
++      ...(delivery.usage ? { usage: delivery.usage } : {}),
++    }));
++    const formulaProjection = formulaSet.map((formula) => ({
++      formula_ref: formula.formulaRef,
++      formula_id: formula.formulaId,
++      name: formula.name,
++      composition: formula.composition,
++      relation: formula.relation,
++    }));
+     return {
+-      proposal: { ...proposal, missing_information: [...new Set([...proposal.missing_information, ...explicit])] },
++      proposal: {
++        ...proposal,
++        ...(formulaProjection.length ? { formula_set: formulaProjection } : {}),
++        ...(treatmentDeliveries.length ? { treatment_deliveries: treatmentDeliveries } : {}),
++        missing_information: [...new Set([...proposal.missing_information, ...explicit])],
++      },
+       controlPlane,
+     };
+   }
+diff --git a/src/platform/runtime/runtime-preparer.ts b/src/platform/runtime/runtime-preparer.ts
+index b73181c..399e2dc 100644
+--- a/src/platform/runtime/runtime-preparer.ts
++++ b/src/platform/runtime/runtime-preparer.ts
+@@ -35,8 +35,9 @@ export interface RuntimePreparerDependencies {
+ }
+ 
+ /**
+- * H1 Harness bootstrap: seed semantic working memory and baseline platform assets only.
+- * Business capabilities are NOT pre-routed. The agent discovers/activates them in-loop.
++ * H1 Harness bootstrap. Under Control Plane V2.1.1, provider capabilities selected by the
++ * closed-world obligation graph are deterministically activated by the Harness; the model no
++ * longer spends reasoning steps rediscovering providers the resolver already selected.
+  */
+ export class RuntimePreparer implements RuntimePreparationPort {
+   constructor(private readonly deps: RuntimePreparerDependencies) {}
+@@ -124,9 +125,10 @@ export class RuntimePreparer implements RuntimePreparationPort {
+         compileError = error instanceof Error ? error.message : String(error);
+       }
+       const appliedBlockers: AppliedBlockerV21[] = [];
++      const graph = deriveGraphV21(requestIR, capabilityDescriptors, workspace, appliedBlockers, this.deps.controlPlane.policy);
+       context.controlPlaneV21 = {
+         requestIR,
+-        graph: deriveGraphV21(requestIR, capabilityDescriptors, workspace, appliedBlockers, this.deps.controlPlane.policy),
++        graph,
+         durableArtifacts: [],
+         compileStatus,
+         ...(compileError ? { compileError } : {}),
+@@ -134,6 +136,14 @@ export class RuntimePreparer implements RuntimePreparationPort {
+         capabilityDescriptors,
+         policy: this.deps.controlPlane.policy,
+       };
++      if (compileStatus === 'COMPILED') {
++        const providerIds = [...new Set(graph.nodes
++          .map((node) => node.provider?.capabilityId)
++          .filter((id): id is string => typeof id === 'string' && id.length > 0))];
++        for (const id of providerIds) {
++          context.harness.activateCapability(id, 'control-plane-v21:resolved-provider');
++        }
++      }
+     }
+     return context;
+   }
+diff --git a/src/platform/workspace/clinical-workspace.ts b/src/platform/workspace/clinical-workspace.ts
+index 3f68d74..cc9051c 100644
+--- a/src/platform/workspace/clinical-workspace.ts
++++ b/src/platform/workspace/clinical-workspace.ts
+@@ -10,6 +10,7 @@ import type {
+   PromotionCoverage,
+   PromotionWorkItem,
+   RootBranchAssessment,
++  TreatmentFormDecision,
+   TreatmentFormDisposition,
+   TreatmentRetrievalContext,
+   WorkspaceBatchResult,
+@@ -551,8 +552,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
+     const primaryPrinciple = asString(payload.primaryPrinciple);
+     const treatmentTarget = asString(payload.treatmentTarget);
+     if (!primaryPrinciple || !treatmentTarget) return false;
+-    const treatmentFormDecision = (() => {
+-      const raw = payload.treatmentFormDecision;
++    const parseTreatmentDelivery = (raw: unknown): TreatmentFormDecision | undefined => {
+       if (!raw || typeof raw !== 'object') return undefined;
+       const x = raw as Record<string, unknown>;
+       const form = asString(x.form);
+@@ -560,7 +560,6 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
+       const statement = asString(x.statement);
+       if (!form || !statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
+       return {
+-        // Control Plane V2.1：durable artifact 自带语义 outcome，用于单值归属到唯一交付义务。
+         outcome: asString(x.outcome),
+         form,
+         disposition: disposition as TreatmentFormDisposition,
+@@ -570,7 +569,26 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
+         preparation: asString(x.preparation),
+         usage: asString(x.usage),
+       };
+-    })();
++    };
++    const incoming = Array.isArray(payload.treatmentDeliveries)
++      ? payload.treatmentDeliveries.map(parseTreatmentDelivery).filter((x): x is TreatmentFormDecision => x !== undefined)
++      : [];
++    const legacy = parseTreatmentDelivery(payload.treatmentFormDecision);
++    if (legacy) incoming.push(legacy);
++
++    // V2.1.1: merge by semantic outcome (fallback: form) so a later delivery does not overwrite
++    // an earlier modality delivery. This is the durable representation for multi-treatment runs.
++    const existingDeliveries = this.workspace.clinicalDecisionSpine.treatmentPlan?.treatmentDeliveries
++      ?? (this.workspace.clinicalDecisionSpine.treatmentPlan?.treatmentFormDecision
++        ? [this.workspace.clinicalDecisionSpine.treatmentPlan.treatmentFormDecision]
++        : []);
++    const deliveryMap = new Map<string, TreatmentFormDecision>();
++    for (const item of [...existingDeliveries, ...incoming]) {
++      const key = item.outcome?.trim() || `form:${item.form.trim()}`;
++      deliveryMap.set(key, item);
++    }
++    const treatmentDeliveries = [...deliveryMap.values()];
++    const treatmentFormDecision = treatmentDeliveries[0];
+     const next = {
+       primaryPrinciple,
+       adjunctPrinciples: asStringArray(payload.adjunctPrinciples),
+@@ -578,6 +596,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
+       priority: asString(payload.priority),
+       rationale: asString(payload.rationale),
+       evidenceRefs: asStringArray(payload.evidenceRefs),
++      treatmentDeliveries,
+       treatmentFormDecision,
+     };
+     const existing = this.workspace.clinicalDecisionSpine.treatmentPlan;
+@@ -588,6 +607,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
+       priority: existing.priority,
+       rationale: existing.rationale,
+       evidenceRefs: existing.evidenceRefs,
++      treatmentDeliveries: existing.treatmentDeliveries,
+       treatmentFormDecision: existing.treatmentFormDecision,
+     }, next)) return false;
+     this.workspace.clinicalDecisionSpine.treatmentPlan = { ...next, version: this.events.length + 1 };
+@@ -966,7 +986,7 @@ export function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: stri
+     }
+     case 'formulaReview': return spine.formulaReview !== undefined;
+     case 'formalHypotheses': return spine.patternHypothesisRefs.length > 0;
+-    case 'treatmentFormDecision': return spine.treatmentPlan?.treatmentFormDecision !== undefined;
++    case 'treatmentFormDecision': return (spine.treatmentPlan?.treatmentDeliveries?.length ?? 0) > 0 || spine.treatmentPlan?.treatmentFormDecision !== undefined;
+     default: return false;
+   }
+ }
+@@ -1019,6 +1039,9 @@ export function checkClinicalCoreCompletion(workspace: ClinicalWorkspace): Clini
+   if (!spine.diseaseAssessment) missing.push('diseaseAssessment');
+   if (spine.patternHypothesisRefs.length === 0) missing.push('formalHypotheses');
+   if (!spine.patternAssessmentRef) missing.push('patternAssessment');
++  // V2.1.1: H12 disposition is part of the clinical-core truth, not a second completion universe.
++  // This prevents graphComplete=true while proposal readiness still rejects unresolved alternatives.
++  if (findUnresolvedFormalHypotheses(workspace).length > 0) missing.push('hypothesisDisposition');
+   return { ok: missing.length === 0, missing };
+ }
+ 
+diff --git a/tests/control-plane-v21-integration.test.ts b/tests/control-plane-v21-integration.test.ts
+index 89bedb3..6610673 100644
+--- a/tests/control-plane-v21-integration.test.ts
++++ b/tests/control-plane-v21-integration.test.ts
+@@ -149,7 +149,7 @@ test('只针灸：初始 action surface 只有诊断/针灸取证工具，方剂
+   assert(internals.includes('knowledge.search'));
+   assert(internals.includes('knowledge.get_source'));
+   assert(internals.includes('knowledge.search_cards'));
+-  assert(internals.includes('knowledge.get_asset'));
++  assert(!internals.includes('knowledge.get_asset'), 'hydration should stay closed until discovery produced an asset');
+   assert(!internals.includes('formula.search_candidates'));
+   assert(!internals.includes('formula.get_evidence'));
+   assert(!internals.includes('formula.validate'));
+@@ -164,6 +164,33 @@ test('针灸+膏方：共享同一个 clinical-core，且交付义务互相独
+   assert.deepEqual(graph.issues, []);
+ });
+ 
++test('V2.1.1 provider 由 graph 确定性激活，capability discover/activate 不再进入执行面', async () => {
++  const context = await prepareContext(request(['modality:acupuncture', 'modality:gaofang']));
++  assert(context.capabilities.some((c) => c.id === 'tcm.core'));
++  assert(context.capabilities.some((c) => c.id === 'tcm.external-therapy'));
++  assert(context.capabilities.some((c) => c.id === 'gaofang'));
++  const surface = projectControlPlaneV21Surface(context, [...ALL_INTERNAL_TOOLS, 'capability.discover', 'capability.activate']);
++  assert(!surface.includes('capability.discover'));
++  assert(!surface.includes('capability.activate'));
++});
++
++test('V2.1.1 discovery→hydration 是单向状态推进：发现资产后关闭重复 search_cards', async () => {
++  const context = await prepareContext(request(['modality:acupuncture'], { exclusive: true }));
++  let surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
++  assert(surface.includes('knowledge.search_cards'));
++  assert(!surface.includes('knowledge.get_asset'));
++  context.workspace.capabilityEvidenceReceipts = {
++    'tcm.external-therapy': {
++      scope: 'tcm.external-therapy',
++      discoveryByTool: { 'knowledge.search_cards': ['AC-049'] },
++      hydrationByTool: { 'knowledge.get_asset': [] },
++    },
++  };
++  surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
++  assert(!surface.includes('knowledge.search_cards'));
++  assert(surface.includes('knowledge.get_asset'));
++});
++
+ test('精确 closure：针灸交付完成不会关闭膏方交付', async () => {
+   const context = await prepareContext(request(['modality:acupuncture', 'modality:gaofang']));
+   satisfyClinicalCore(context);
+@@ -196,6 +223,34 @@ test('精确 closure：针灸交付完成不会关闭膏方交付', async () =>
+   assert(unmet.every((n) => n.target.qualifiers.outcome !== 'modality:acupuncture'));
+ });
+ 
++test('V2.1.1 多治疗 delivery 可同时关闭针灸与膏方两个独立义务', async () => {
++  const context = await prepareContext(request(['modality:acupuncture', 'modality:gaofang']));
++  satisfyClinicalCore(context);
++  satisfyDiagnosticEvidence(context);
++  context.workspace.capabilityEvidenceReceipts = {
++    'tcm.external-therapy': {
++      scope: 'tcm.external-therapy',
++      discoveryByTool: { 'knowledge.search_cards': ['AC-049'] },
++      hydrationByTool: { 'knowledge.get_asset': ['AC-049'] },
++    },
++    gaofang: {
++      scope: 'gaofang',
++      discoveryByTool: { 'knowledge.search_cards': ['GF-013'] },
++      hydrationByTool: { 'knowledge.get_asset': ['GF-013'] },
++    },
++  };
++  context.workspace.clinicalDecisionSpine.treatmentPlan = {
++    primaryPrinciple: 'p', treatmentTarget: 't', evidenceRefs: [], version: 1,
++    treatmentDeliveries: [
++      { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 'a', sourceEvidenceRefs: ['AC-049'] },
++      { outcome: 'modality:gaofang', form: 'gaofang', disposition: 'CURRENTLY_SUITABLE', statement: 'g', sourceEvidenceRefs: ['GF-013'] },
++    ],
++  };
++  refreshControlPlaneV21(context);
++  assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'SATISFIED');
++  assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:gaofang')!.status, 'SATISFIED');
++});
++
+ test('交付 artifact 不含 outcome 时 fail-closed：一个通用 artifact 不得同时关闭多个交付义务', async () => {
+   const context = await prepareContext(request(['modality:acupuncture', 'modality:gaofang']));
+   satisfyClinicalCore(context);
+@@ -361,6 +416,19 @@ test('typed planning blocker 阻断提交：未安装 provider 的 outcome 不
+   assert(readiness.blockers.some((b) => b.message.startsWith('control plane blocked')));
+ });
+ 
++test('V2.1.1 formula discovery 产生候选后关闭重复 search_candidates，推进到 hydrate', async () => {
++  const context = await prepareContext(request(['modality:herbal-formula']));
++  satisfyClinicalCore(context);
++  satisfyDiagnosticEvidence(context);
++  let surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
++  assert(surface.includes('formula.search_candidates'));
++  assert(!surface.includes('formula.get_evidence'));
++  context.workspace.candidates.push({ id: 'C1', kind: 'formula', formulaId: 'F1', sourceId: 'P1:x' });
++  surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
++  assert(!surface.includes('formula.search_candidates'));
++  assert(surface.includes('formula.get_evidence'));
++});
++
+ test('formula-evidence 不会因任意证据出现而提前关闭', async () => {
+   const context = await prepareContext(request(['modality:herbal-formula']));
+   satisfyClinicalCore(context);
+@@ -380,6 +448,29 @@ test('formula-evidence 不会因任意证据出现而提前关闭', async () =>
+   assert.equal(nodeOf(context, 'artifact:formula-selection', 'modality:herbal-formula')!.status, 'OPEN');
+ });
+ 
++test('V2.1.1 H12 disposition 纳入 clinical-core truth：未决 alternative 时 graph 不得 complete', async () => {
++  const context = await prepareContext(request([]));
++  satisfyClinicalCore(context);
++  satisfyDiagnosticEvidence(context);
++  context.workspace.hypothesisState.hypotheses.push({
++    id: 'h1', label: 'alt', supportingEvidenceRefs: [], contradictingEvidenceRefs: [], missingEvidence: [],
++    status: 'alternative', origin: 'agent_reasoning',
++  });
++  refreshControlPlaneV21(context);
++  assert.equal(nodeOf(context, 'artifact:clinical-core')!.status, 'OPEN');
++  context.workspace.hypothesisState.hypotheses[0].status = 'rejected';
++  refreshControlPlaneV21(context);
++  assert.equal(nodeOf(context, 'artifact:clinical-core')!.status, 'SATISFIED');
++});
++
++test('V2.1.1 未知显式 modality 保留为 typed unsupported，不得吸附到最近 provider', async () => {
++  const ir = request([]);
++  ir.outcomes.unresolved = ['拔罐'];
++  const context = await prepareContext(ir);
++  assert(context.controlPlaneV21!.graph.issues.some((issue) => issue.type === 'UNSUPPORTED_OUTCOME' && issue.message.includes('拔罐')));
++  assert(context.controlPlaneV21!.graph.nodes.some((node) => node.status === 'BLOCKED' && node.target.qualifiers.outcome === 'unresolved:拔罐'));
++});
++
+ // ---------------------------------------------------------------------------
+ // Phase 7：readiness 与 runtime scheduler 使用同一份未满足义务
+ // ---------------------------------------------------------------------------

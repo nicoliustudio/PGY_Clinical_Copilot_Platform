@@ -174,6 +174,12 @@ Before finishing, declare the completion obligation via `workspace.record_delibe
 
 Choose artifacts from the requested outcome, not a fixed pipeline. A "differentiate pattern only" request must not force formula selection or review; a request that requires formula treatment must include formula selection and review; an acupuncture request must not force a base formula. If you declare an artifact but do not produce it, submission returns `CLINICAL_DECISION_INCOMPLETE`.
 
+## Treatment Form Fidelity
+
+A treatment-form delivery declares the requested form it closes (`outcome`) and the form it implements (`form`). These must be the same form: `form` and `statement` must implement the outcome they declare.
+
+An auxiliary or adjacent technique never stands in for a specifically requested form. Do not record one technique as the delivery of a different requested form, and do not let an adjunct decision pass as the delivery of the primary requested form. If the requested form cannot be supported by the retrieved evidence, is contraindicated or unavailable at this stage, say so explicitly through `disposition` and the missing information, and leave that outcome undelivered instead of substituting a neighbouring technique.
+
 <!-- H14:START -->
 ## Treatment Decision Causality
 

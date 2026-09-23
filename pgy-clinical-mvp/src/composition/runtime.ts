@@ -28,6 +28,7 @@ import {
   CLASSIC_BASELINE_TOOL_IDS,
   PLATFORM_TOOLS,
 } from './platform-assets.js';
+import { CONTROL_PLANE_V21_POLICY } from './control-plane-v21-policy.js';
 
 export type ClinicalRuntimeMode = 'harness' | 'classic';
 
@@ -55,6 +56,8 @@ export async function createClinicalRuntime(
         baselineToolIds: BASELINE_TOOL_IDS,
         baselineSkillIds: BASELINE_SKILL_IDS,
         baselineKnowledgeScopes: BASELINE_KNOWLEDGE_SCOPES,
+        // Phase 2/6：Request IR 编译 + 参数化生产规则调度（V2.1 是 harness 的唯一调度主权）。
+        controlPlane: { compiler: aiSdkFastModelPort, policy: CONTROL_PLANE_V21_POLICY },
       })
     : new ClassicRuntimePreparer({
         understanding,

@@ -10,6 +10,7 @@ import type {
   PromotionCoverage,
   PromotionWorkItem,
   RootBranchAssessment,
+  TreatmentFormDecision,
   TreatmentFormDisposition,
   TreatmentRetrievalContext,
   WorkspaceBatchResult,
@@ -551,8 +552,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const primaryPrinciple = asString(payload.primaryPrinciple);
     const treatmentTarget = asString(payload.treatmentTarget);
     if (!primaryPrinciple || !treatmentTarget) return false;
-    const treatmentFormDecision = (() => {
-      const raw = payload.treatmentFormDecision;
+    const parseTreatmentDelivery = (raw: unknown): TreatmentFormDecision | undefined => {
       if (!raw || typeof raw !== 'object') return undefined;
       const x = raw as Record<string, unknown>;
       const form = asString(x.form);
@@ -560,6 +560,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       const statement = asString(x.statement);
       if (!form || !statement || !['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE'].includes(disposition ?? '')) return undefined;
       return {
+        outcome: asString(x.outcome),
         form,
         disposition: disposition as TreatmentFormDisposition,
         statement,
@@ -568,7 +569,26 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         preparation: asString(x.preparation),
         usage: asString(x.usage),
       };
-    })();
+    };
+    const incoming = Array.isArray(payload.treatmentDeliveries)
+      ? payload.treatmentDeliveries.map(parseTreatmentDelivery).filter((x): x is TreatmentFormDecision => x !== undefined)
+      : [];
+    const legacy = parseTreatmentDelivery(payload.treatmentFormDecision);
+    if (legacy) incoming.push(legacy);
+
+    // V2.1.1: merge by semantic outcome (fallback: form) so a later delivery does not overwrite
+    // an earlier modality delivery. This is the durable representation for multi-treatment runs.
+    const existingDeliveries = this.workspace.clinicalDecisionSpine.treatmentPlan?.treatmentDeliveries
+      ?? (this.workspace.clinicalDecisionSpine.treatmentPlan?.treatmentFormDecision
+        ? [this.workspace.clinicalDecisionSpine.treatmentPlan.treatmentFormDecision]
+        : []);
+    const deliveryMap = new Map<string, TreatmentFormDecision>();
+    for (const item of [...existingDeliveries, ...incoming]) {
+      const key = item.outcome?.trim() || `form:${item.form.trim()}`;
+      deliveryMap.set(key, item);
+    }
+    const treatmentDeliveries = [...deliveryMap.values()];
+    const treatmentFormDecision = treatmentDeliveries[0];
     const next = {
       primaryPrinciple,
       adjunctPrinciples: asStringArray(payload.adjunctPrinciples),
@@ -576,6 +596,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       priority: asString(payload.priority),
       rationale: asString(payload.rationale),
       evidenceRefs: asStringArray(payload.evidenceRefs),
+      treatmentDeliveries,
       treatmentFormDecision,
     };
     const existing = this.workspace.clinicalDecisionSpine.treatmentPlan;
@@ -586,6 +607,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       priority: existing.priority,
       rationale: existing.rationale,
       evidenceRefs: existing.evidenceRefs,
+      treatmentDeliveries: existing.treatmentDeliveries,
       treatmentFormDecision: existing.treatmentFormDecision,
     }, next)) return false;
     this.workspace.clinicalDecisionSpine.treatmentPlan = { ...next, version: this.events.length + 1 };
@@ -964,7 +986,7 @@ export function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: stri
     }
     case 'formulaReview': return spine.formulaReview !== undefined;
     case 'formalHypotheses': return spine.patternHypothesisRefs.length > 0;
-    case 'treatmentFormDecision': return spine.treatmentPlan?.treatmentFormDecision !== undefined;
+    case 'treatmentFormDecision': return (spine.treatmentPlan?.treatmentDeliveries?.length ?? 0) > 0 || spine.treatmentPlan?.treatmentFormDecision !== undefined;
     default: return false;
   }
 }
@@ -977,17 +999,15 @@ export function checkClinicalCompletion(workspace: ClinicalWorkspace): ClinicalC
 }
 
 /**
- * H15.5.3：Completion Contract 合并 —— planner 预判 + 激活能力输出义务 + Agent 显式义务。
- * 取并集（最小一致）：三者都满足才算 complete。Agent 不得通过「完全不声明」逃避。
- * treatmentFormDecision 是平台级产物（能力 opt-in），不识别具体业务词。
+ * H15.5.3：Completion Contract 合并 —— planner 预判 + Agent 显式义务。
+ * 取并集（最小一致）：两者都满足才算 complete。Agent 不得通过「完全不声明」逃避。
+ * 能力级输出义务不再在这里推导：V2.1 obligation graph 是唯一真源。
  */
 export function computeRequiredArtifacts(
   provisional: string[] | undefined,
-  requiresTreatmentFormDecision: boolean,
   obligationRequired: string[] | undefined,
 ): string[] {
   const required = new Set<string>(provisional ?? []);
-  if (requiresTreatmentFormDecision) required.add('treatmentFormDecision');
   if (obligationRequired) for (const a of obligationRequired) required.add(a);
   return [...required];
 }
@@ -1017,6 +1037,9 @@ export function checkClinicalCoreCompletion(workspace: ClinicalWorkspace): Clini
   if (!spine.diseaseAssessment) missing.push('diseaseAssessment');
   if (spine.patternHypothesisRefs.length === 0) missing.push('formalHypotheses');
   if (!spine.patternAssessmentRef) missing.push('patternAssessment');
+  // V2.1.1: H12 disposition is part of the clinical-core truth, not a second completion universe.
+  // This prevents graphComplete=true while proposal readiness still rejects unresolved alternatives.
+  if (findUnresolvedFormalHypotheses(workspace).length > 0) missing.push('hypothesisDisposition');
   return { ok: missing.length === 0, missing };
 }
 

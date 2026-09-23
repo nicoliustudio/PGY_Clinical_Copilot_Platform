@@ -5,7 +5,12 @@
   "enabled": true,
   "description": "长期膏滋调补 / 以膏代煎的临床能力",
   "semanticDescription": "适用于明确或较明确的膏滋剂型、制膏、以膏代煎、膏滋调补等治疗形式需求（如：开一料膏方、做成膏服、不想天天煎药想用膏滋、冬令膏方调补）。单纯长期调养身体而没有剂型/制备/膏滋意图，不足以激活本能力。基于开放语义判断，不限具体措辞。",
-  "provides": ["gaofang", "long_term_tcm_regulation", "paste_form_treatment_planning"],
+  "provides": [
+    "gaofang",
+    "long_term_tcm_regulation",
+    "paste_form_treatment_planning",
+    "modality:gaofang"
+  ],
   "positiveExamples": [
     "想开一料膏方慢慢调理",
     "冬天想系统调补一下，不想天天煎药",
@@ -17,18 +22,104 @@
     "皮肤上涂药膏",
     "想长期调理身体，没有特别指定剂型"
   ],
-  "knowledgeScopes": ["gaofang"],
-  "skillIds": ["gaofang-reasoning"],
-  "toolIds": ["knowledge.search", "formula.search_normative", "formula.validate"],
+  "knowledgeScopes": [
+    "gaofang"
+  ],
+  "semanticOntology": {
+    "terms": [
+      {
+        "term": "modality:gaofang",
+        "aliases": ["膏方", "膏滋", "膏剂", "以膏代煎", "膏方调补", "冬令膏方"]
+      }
+    ]
+  },
+  "skillIds": [
+    "gaofang-reasoning"
+  ],
+  "toolIds": [
+    "knowledge.search",
+    "formula.search_normative",
+    "formula.validate"
+  ],
   "treatmentSpecific": true,
-  "requiresTreatmentFormDecision": true,
-  "treatmentFormEvidenceToolIds": ["knowledge.search_cards", "knowledge.get_asset"],
   "evidenceObligations": [
     {
       "id": "treatment-asset-evidence",
       "evidenceType": "treatment-asset",
-      "discoveryToolIds": ["knowledge.search_cards"],
-      "hydrationToolIds": ["knowledge.get_asset"]
+      "discoveryToolIds": [
+        "knowledge.search_cards"
+      ],
+      "hydrationToolIds": [
+        "knowledge.get_asset"
+      ]
     }
-  ]
+  ],
+  "deliveryObligations": [
+    {
+      "id": "treatment-form-delivery",
+      "requiredArtifact": "treatmentFormDecision"
+    }
+  ],
+  "controlPlaneV21": {
+    "rules": [
+      {
+        "id": "treatment-evidence",
+        "produces": {
+          "type": "artifact:treatment-evidence",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability"
+        },
+        "effects": [
+          {
+            "op": "retrieve",
+            "target": {
+              "type": "artifact:treatment-evidence",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "treatment-delivery",
+        "forOutcomes": [
+          "modality:gaofang"
+        ],
+        "produces": {
+          "type": "artifact:treatment-delivery",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability",
+          "producerRuleId": "$rule"
+        },
+        "requires": [
+          {
+            "type": "artifact:clinical-core"
+          },
+          {
+            "type": "artifact:treatment-evidence",
+            "qualifiers": {
+              "outcome": "$outcome"
+            },
+            "producerCapabilityId": "$capability"
+          }
+        ],
+        "effects": [
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:treatment-delivery",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
 }

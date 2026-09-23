@@ -190,6 +190,12 @@ export interface DiseaseAssessment {
 export type TreatmentFormDisposition = 'CURRENTLY_SUITABLE' | 'TREAT_FIRST_THEN_FORM' | 'CURRENTLY_NOT_SUITABLE';
 
 export interface TreatmentFormDecision {
+  /**
+   * Control Plane V2.1：本次治疗形式交付所对应的 Request Outcome（形如 `modality:<form>`）。
+   * 同一次 run 存在多个治疗形式交付义务时，必须显式声明，用于把 durable artifact
+   * 精确归属到唯一 obligation（禁止一个通用 artifact 同时关闭多个交付义务）。
+   */
+  outcome?: string;
   /** 治疗形式（开放文本，如「膏方」），由语义理解产出，不枚举业务词。 */
   form: string;
   disposition: TreatmentFormDisposition;
@@ -208,7 +214,15 @@ export interface TreatmentPlan {
   priority?: string;
   rationale?: string;
   evidenceRefs: string[];
-  /** H15.5.2: treatment-form advisory, kept separate from canonical BaseFormula. */
+  /**
+   * V2.1.1: multiple treatment-form deliveries may coexist in one run. Each item carries
+   * its semantic outcome so delivery closure can bind it to exactly one obligation.
+   */
+  treatmentDeliveries?: TreatmentFormDecision[];
+  /**
+   * @deprecated Backward-compatibility alias for historical single-delivery callers.
+   * New code should write/read treatmentDeliveries. Runtime mirrors the first delivery here.
+   */
   treatmentFormDecision?: TreatmentFormDecision;
   version: number;
 }

@@ -8,13 +8,15 @@ import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
 import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
-import { recordSearchReceipt, recordHydrationReceipt } from '../../clinical/capability-evidence.js';
+import { recordSearchReceipt, recordHydrationReceipt, evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
+import type { EvidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
 import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
+import { admissibleEffects, refreshControlPlaneV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
@@ -29,6 +31,131 @@ function assertKnownCandidateRef(context: RuntimeContext, candidateRef: string):
 function assertKnownHypothesisRef(context: RuntimeContext, hypothesisRef: string): void {
   if (!context.workspace.hypothesisState.hypotheses.some((h) => h.id === hypothesisRef)) {
     throw new Error(`unknown hypothesisRef: ${hypothesisRef}`);
+  }
+}
+
+
+function v21AdmissibleCommitTypes(context: RuntimeContext): Set<string> | undefined {
+  if (!context.controlPlaneV21 || context.controlPlaneV21.compileStatus !== 'COMPILED') return undefined;
+  refreshControlPlaneV21(context);
+  return new Set(admissibleEffects(context.controlPlaneV21)
+    .filter((effect) => effect.op === 'commit' && effect.target)
+    .map((effect) => effect.target!.type));
+}
+
+
+/**
+ * V2.1.1 treatment retrieval is obligation-scoped, not a global top-K across every active
+ * capability. A receipt is only written for the scope actually searched, so one capability's
+ * discovery cannot mark another capability SEARCHED_NONE.
+ *
+ * Discovery and hydration select different scopes: search_cards must target a capability that
+ * still has nothing discovered, while get_asset must target a capability that has un-hydrated
+ * assets. Selecting by "first runnable obligation" would pick a scope whose stage cannot be
+ * advanced by the calling tool, stalling the graph.
+ */
+function v21TreatmentEvidenceProgress(context: RuntimeContext): EvidenceRetrievalProgress[] {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return [];
+  refreshControlPlaneV21(context);
+  const capabilityIds = runnableObligations(state)
+    .filter((node) => node.target.type === 'artifact:treatment-evidence' && node.target.producerCapabilityId)
+    .map((node) => node.target.producerCapabilityId as string);
+  if (capabilityIds.length === 0) return [];
+  return evidenceRetrievalProgress(context.capabilities, context.workspace.capabilityEvidenceReceipts, capabilityIds);
+}
+
+function v21TreatmentDiscoveryScopes(context: RuntimeContext): string[] | undefined {
+  const capabilityIds = v21TreatmentEvidenceProgress(context)
+    .filter((p) => p.requiresDiscovery)
+    .map((p) => p.capabilityId);
+  return scopesOfCapabilities(context, capabilityIds);
+}
+
+function v21TreatmentHydrationScopes(context: RuntimeContext): string[] | undefined {
+  const capabilityIds = v21TreatmentEvidenceProgress(context)
+    .filter((p) => p.requiresHydration)
+    .map((p) => p.capabilityId);
+  return scopesOfCapabilities(context, capabilityIds);
+}
+
+function scopesOfCapabilities(context: RuntimeContext, capabilityIds: string[]): string[] | undefined {
+  const scopes = new Set<string>();
+  for (const id of capabilityIds) {
+    const capability = context.capabilities.find((c) => c.id === id);
+    for (const scope of capability?.knowledgeScopes ?? []) scopes.add(scope);
+  }
+  return scopes.size > 0 ? [...scopes] : undefined;
+}
+
+/** V2.1.1：当前是否存在 runnable 的定向 evidence-gap 义务（即 runtime 已施加 NEED_EVIDENCE）。 */
+function v21EvidenceGapRunnable(context: RuntimeContext): boolean {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return false;
+  refreshControlPlaneV21(context);
+  return runnableObligations(state).some((node) => node.target.type === 'artifact:evidence-gap');
+}
+
+/**
+ * V2.1.1：交付 artifact 声明的 outcome 必须逐字属于本次 Request IR 的 outcome 契约。
+ *
+ * 归属逻辑按语义 outcome 精确匹配 provider（不做近似吸附），因此一个写错前缀的 outcome
+ * （例如 `outcome:modality:acupuncture`）会被 fail-closed 归属；结果是「最终结果里出现了该交付」
+ * 同时「图里该义务是 NOT_DELIVERABLE」，两个真源互相矛盾。这里在写入点直接拒绝，让模型可自纠。
+ */
+function assertDeclaredDeliveryOutcomes(context: RuntimeContext, treatmentPlan?: Record<string, unknown>): void {
+  const state = context.controlPlaneV21;
+  if (!state || state.compileStatus !== 'COMPILED') return;
+  const contract = [...state.requestIR.outcomes.required, ...state.requestIR.outcomes.preferred];
+  if (contract.length === 0 || !treatmentPlan) return;
+  const declared: unknown[] = [];
+  const deliveries = treatmentPlan.treatmentDeliveries;
+  if (Array.isArray(deliveries)) {
+    for (const delivery of deliveries) declared.push((delivery as Record<string, unknown> | null)?.outcome);
+  }
+  const single = treatmentPlan.treatmentFormDecision;
+  if (single && typeof single === 'object') declared.push((single as Record<string, unknown>).outcome);
+  for (const value of declared) {
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string' || !contract.includes(value)) {
+      throw new Error(
+        `unknown treatment delivery outcome: ${String(value)}; active request outcomes are: ${contract.join(', ')}`,
+      );
+    }
+  }
+}
+
+/**
+ * V2.1 durable mutation legality。
+ *
+ * 只冻结「一旦定型就不该再改的认知」：clinical-core 的构成 artifact（diseaseAssessment /
+ * patternAssessment / formal hypotheses）。treatmentPlan 不是 clinical-core truth 的组成部分
+ * （见 checkClinicalCoreCompletion），它承载的 delivery 由 obligation graph 决定何时可闭合
+ * （artifact-before-phase：prerequisite 未 terminal 时已写入的 delivery 不得关闭义务）。
+ *
+ * 因此这里不再把「treatmentPlan 变化」当作 core mutation，也不再按「调用前」的可执行集合
+ * 整体拒绝含 delivery 的原子写。真实 E2E 已复现旧规则的两处死锁：
+ * 1) 同一次调用补齐 core 并写 delivery 被整体拒绝；
+ * 2) clinical-core 已 terminal 后写 treatmentPlan + delivery 被拒（而 manifest 又要求 delivery
+ *    必须在 core terminal 之后才可闭合）→ 交付义务永远无法写入。
+ */
+function assertV21DeliberationLegality(
+  context: RuntimeContext,
+  input: {
+    diseaseAssessment?: unknown;
+    formulaSelection?: unknown;
+    patternAssessment?: unknown;
+    hypothesisUpdates?: unknown[];
+  },
+): void {
+  const allowed = v21AdmissibleCommitTypes(context);
+  if (!allowed) return;
+  const changesCore = Boolean(input.diseaseAssessment || input.patternAssessment || (input.hypothesisUpdates?.length ?? 0) > 0);
+  if (changesCore && !allowed.has('artifact:clinical-core')) {
+    throw new Error('V2.1 illegal mutation: clinical-core is not currently runnable');
+  }
+  if (input.formulaSelection && !allowed.has('artifact:formula-selection')) {
+    throw new Error('V2.1 illegal mutation: formula-selection is not currently runnable');
   }
 }
 
@@ -150,11 +277,24 @@ const treatmentPlanSchema = z.object({
   priority: z.string().optional(),
   rationale: z.string().optional(),
   evidenceRefs: z.array(z.string()).optional(),
+  treatmentDeliveries: z.array(z.object({
+    form: z.string(),
+    disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
+    statement: z.string(),
+    sourceEvidenceRefs: z.array(z.string()),
+    /** V2.1.1: exact Request Outcome delivered by this item. */
+    outcome: z.string(),
+    advisoryComposition: z.array(z.string()).optional(),
+    preparation: z.string().optional(),
+    usage: z.string().optional(),
+  })).optional(),
+  /** @deprecated compatibility input for a single treatment delivery. */
   treatmentFormDecision: z.object({
     form: z.string(),
     disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
     statement: z.string(),
     sourceEvidenceRefs: z.array(z.string()),
+    outcome: z.string().optional(),
     advisoryComposition: z.array(z.string()).optional(),
     preparation: z.string().optional(),
     usage: z.string().optional(),
@@ -223,8 +363,11 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     }),
     execute: async ({ query, topK, role, fallbackReason }) => {
       // H15.5.1：确定性临床收敛边界 —— closure 时压缩 broad knowledge.search，不再泛检索。
+      // V2.1.1：但 runtime 已施加 typed NEED_EVIDENCE（存在 runnable evidence-gap 义务）时，
+      // 定向检索是 V2.1 明确授权的义务，legacy closure 收敛不得把它变成 no-op ——
+      // 否则「检索不产生新证据 → blocker 永不释放」会与 commit 面收口叠加成死锁。
       const closure = computeClinicalClosure(context.workspace);
-      if (closure.required) {
+      if (closure.required && !v21EvidenceGapRunnable(context)) {
         return {
           closureRequired: true,
           message:
@@ -255,16 +398,18 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         : context.understanding.facts
             .filter((f) => f.kind === 'past_diagnosis' && typeof f.value === 'string' && f.value.trim())
             .map((f) => f.value);
-      const { cards, telemetry } = searchRuntimeCards(query, context.knowledgeScopes, {
+      const searchScopes = v21TreatmentDiscoveryScopes(context) ?? context.knowledgeScopes;
+      const { cards, telemetry } = searchRuntimeCards(query, searchScopes, {
         diseaseContext: caseDiseaseContext,
         topK,
       });
-      // H15.7：确定性记录 discovery receipt（Runtime 拥有，模型无写入通道）。
-      recordSearchReceipt(context.workspace, context.knowledgeScopes, cards);
+      // V2.1.1: receipt is scoped to the obligation actually searched. This prevents a mixed
+      // multi-capability top-K from falsely marking another capability as SEARCHED_NONE.
+      recordSearchReceipt(context.workspace, searchScopes, cards);
       addRetrievalDiagnostics(context.runId, {
         tool: 'knowledge.search_cards',
         query,
-        scopes: context.knowledgeScopes,
+        scopes: searchScopes,
         topK: topK ?? config.kb.runtimeCardLimit,
         dense: [],
         reranked: [],
@@ -280,7 +425,8 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     description: '按 asset_id 精确获取一条 Runtime Catalog 完整资产详情。仅用于读取 knowledge.search_cards 返回的、且属于当前激活 scope 的卡片。',
     inputSchema: z.object({ assetId: z.string() }),
     execute: async ({ assetId }) => {
-      const asset = getRuntimeAsset(assetId, context.knowledgeScopes);
+      const assetScopes = v21TreatmentHydrationScopes(context) ?? context.knowledgeScopes;
+      const asset = getRuntimeAsset(assetId, assetScopes);
       // H15.7：确定性记录 hydration receipt（Runtime 拥有，模型无写入通道）。
       if (asset) {
         const scope = getRuntimeAssetScope(assetId);
@@ -289,12 +435,12 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       addRetrievalDiagnostics(context.runId, {
         tool: 'knowledge.get_asset',
         query: assetId,
-        scopes: context.knowledgeScopes,
+        scopes: assetScopes,
         topK: 1,
         dense: [],
         reranked: [],
         runtimeCatalog: {
-          activeScopes: context.knowledgeScopes,
+          activeScopes: assetScopes,
           catalogTotalCount: 0,
           candidateCount: 0,
           cardsReturnedCount: 0,
@@ -516,7 +662,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_deliberation': (context) => tool({
-    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
+    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标，若请求要求具体治疗形式交付则含 treatmentDeliveries[]，每项声明 form / disposition / statement / sourceEvidenceRefs / outcome）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
     inputSchema: z.object({
       focusedCandidates: z.array(z.string()).optional(),
       assessments: z.array(z.object({
@@ -546,6 +692,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       patternAssessment: patternAssessmentSchema.optional(),
     }),
     execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment }) => {
+      assertV21DeliberationLegality(context, {
+        diseaseAssessment,
+        formulaSelection,
+        patternAssessment,
+        hypothesisUpdates,
+      });
+      assertDeclaredDeliveryOutcomes(context, treatmentPlan as Record<string, unknown> | undefined);
       for (const ref of focusedCandidates ?? []) assertKnownCandidateRef(context, ref);
       for (const a of assessments ?? []) {
         const errors = validateCandidateAssessmentRefs(context.workspace, {
@@ -594,7 +747,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         basisRefs: z.array(z.string()).optional(),
       })),
     }),
-    execute: async (input) => input,
+    execute: async (input) => {
+      const allowed = v21AdmissibleCommitTypes(context);
+      if (allowed && !allowed.has('artifact:clinical-core')) {
+        throw new Error('V2.1 illegal mutation: hypothesis creation is closed after clinical-core completion');
+      }
+      return input;
+    },
   }),
   'proposal.submit': (context) => tool({
     description: '当临床决策已充分时调用，提交最终 Proposal 并立即停止。只提交你的选择（mode + disease/syndrome/treatment + 可选 candidate_ref/uncertainty）；formula 的 sourceId/formulaId/composition 与 safety 由 Runtime 自动填充，不要重复生成。',

@@ -14,6 +14,11 @@ import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { computeModificationEvidenceClosure } from '../../clinical/modification-evidence.js';
 import { loadIndex } from '../../knowledge/build.js';
 import { setFormulaIdentityTrace, type FormulaIdentityTrace } from '../../trace.js';
+import { outcomeCoverage, refreshControlPlaneV21 } from '../control-plane/control-plane-v21-session.js';
+import { projectFormulaSet } from '../../control-plane-v2/result-projection.js';
+import type { ProjectedFormula } from '../../control-plane-v2/result-projection.js';
+import type { OutcomeProjectionV21 } from '../../control-plane-v21/result-projection.js';
+import { treatmentDeliveryArtifacts } from '../../clinical/capability-delivery.js';
 
 export interface ClinicalRunResult extends RuntimeRunResult {
   workspace: ClinicalWorkspace;
@@ -28,6 +33,12 @@ export interface ClinicalRunResult extends RuntimeRunResult {
   agentLoop?: AgentLoopTrace;
   strategy: ClinicalStrategy;
   contextMetrics?: ContextMetrics;
+  /** Phase 8：确定性结果装配（outcome 覆盖 + 方剂集合投影），不由模型重新总结。 */
+  controlPlane?: {
+    outcomeCoverage: OutcomeProjectionV21[];
+    formulaSet: ProjectedFormula[];
+    selectedCandidateRef?: string;
+  };
 }
 
 /**
@@ -188,8 +199,9 @@ export class ClinicalRuntime {
     }
 
     const workspaceEvents = context.workspaceStore.trace();
+    const assembled = this.assembleDeterministicResult(context, authority.proposal);
     return {
-      authority,
+      authority: assembled.proposal === authority.proposal ? authority : { ...authority, proposal: assembled.proposal },
       usage: output.usage,
       snapshot: {
         modelProfileId: context.model.id,
@@ -213,6 +225,74 @@ export class ClinicalRuntime {
       agentLoop: output.agentLoop,
       strategy: context.strategy,
       contextMetrics: output.contextMetrics,
+      ...(assembled.controlPlane ? { controlPlane: assembled.controlPlane } : {}),
+    };
+  }
+
+  /**
+   * Phase 8 —— Deterministic Result Assembler。
+   *
+   * 最终聊天结果不由模型重新「回忆」该输出什么：
+   * - 所有用户要求的 outcome 的交付状态来自 obligation graph + bound artifacts；
+   * - 合法终止但不可交付（知识库无可用资产）的 outcome **必须**在结果中显式出现，而不是静默消失；
+   * - 方剂集合由 cardinality policy 确定性投影（同源多方不会被 silent drop）。
+   */
+  private assembleDeterministicResult(
+    context: RuntimeContext,
+    proposal: AgentResult,
+  ): { proposal: AgentResult; controlPlane?: ClinicalRunResult['controlPlane'] } {
+    const state = context.controlPlaneV21;
+    if (!state || state.compileStatus !== 'COMPILED') return { proposal };
+    refreshControlPlaneV21(context);
+    const coverage = outcomeCoverage(state);
+    const notDeliverable = coverage.filter((o) => o.status === 'NOT_DELIVERABLE');
+    const modelAllowed = state.requestIR.generationPolicy.knowledgeSource === 'MODEL_ALLOWED';
+    const formulaSet = projectFormulaSet(
+      context.workspace.sourceFormulaSet,
+      state.requestIR.outputPolicy.formulaCardinality,
+    );
+    const controlPlane = {
+      outcomeCoverage: coverage,
+      formulaSet,
+      selectedCandidateRef: context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef,
+    };
+    if (proposal.mode !== 'clinical') return { proposal, controlPlane };
+
+    const explicit = notDeliverable.map((o) =>
+      `required outcome ${o.outcome} is NOT_DELIVERABLE: the knowledge base returned no qualified asset`
+      + (modelAllowed
+        ? '; a model-authored advisory may be provided but is not a normative delivery'
+        : '; model-authored substitution is not permitted by the request generation policy'),
+    );
+    const cardinality = state.requestIR.outputPolicy.formulaCardinality;
+    if (cardinality.mode === 'AT_LEAST' && formulaSet.length < cardinality.count) {
+      explicit.push(`formula cardinality shortfall: requested at least ${cardinality.count}, but only ${formulaSet.length} eligible source formulas were deterministically available`);
+    }
+    const treatmentDeliveries = treatmentDeliveryArtifacts(context.workspace).map((delivery) => ({
+      ...(delivery.outcome ? { outcome: delivery.outcome } : {}),
+      form: delivery.form,
+      disposition: delivery.disposition,
+      statement: delivery.statement,
+      source_evidence_refs: delivery.sourceEvidenceRefs,
+      ...(delivery.advisoryComposition?.length ? { advisory_composition: delivery.advisoryComposition } : {}),
+      ...(delivery.preparation ? { preparation: delivery.preparation } : {}),
+      ...(delivery.usage ? { usage: delivery.usage } : {}),
+    }));
+    const formulaProjection = formulaSet.map((formula) => ({
+      formula_ref: formula.formulaRef,
+      formula_id: formula.formulaId,
+      name: formula.name,
+      composition: formula.composition,
+      relation: formula.relation,
+    }));
+    return {
+      proposal: {
+        ...proposal,
+        ...(formulaProjection.length ? { formula_set: formulaProjection } : {}),
+        ...(treatmentDeliveries.length ? { treatment_deliveries: treatmentDeliveries } : {}),
+        missing_information: [...new Set([...proposal.missing_information, ...explicit])],
+      },
+      controlPlane,
     };
   }
 }

@@ -45,6 +45,77 @@ export interface AgentLoopTrace {
   promptComponents?: PromptComponents;
   /** H11 Proposal Commit Reliability（区分主动 submit 与 runtime forced finalization）。 */
   commitReliability?: CommitReliabilityMetrics;
+  /** Control Plane V2.1 运行期遥测（Request IR / obligation graph / shadow 分歧 / typed blocker）。 */
+  controlPlane?: ControlPlaneTraceV21;
+}
+
+/**
+ * Control Plane V2.1 遥测。
+ * 只描述「控制语义」的平台状态，不含病/证/方，也不含 hidden CoT。
+ */
+export interface ControlPlaneTraceV21 {
+  /** COMPILED：Request IR 建立成功，V2.1 拥有调度主权；FAILED：仅观测。 */
+  requestCompileStatus: 'COMPILED' | 'FAILED';
+  requestCompileError?: string;
+  requiredOutcomes: string[];
+  preferredOutcomes: string[];
+  /** V2.1.3：允许但不要求（“可以考虑”）；永不创建 obligation。 */
+  allowedOutcomes: string[];
+  excludedOutcomes: string[];
+  /** V2.1.1：用户显式点名但 registry 无 provider 的治疗形式（必须 fail-closed，不得吸附到相近 modality）。 */
+  unresolvedOutcomes: string[];
+  /** V2.1.3：PREFERRED 且不可表示 → 非阻断 shortfall（显式报告，不阻断主任务）。 */
+  preferredShortfalls: string[];
+  /** V2.1.2/V2.1.3：用户点名的治疗形式 + 承诺等级（Deterministic Semantic Validator 的输入）。 */
+  mentionOutcomes: { name: string; commitment: string }[];
+  /** V2.1.2：Deterministic Semantic Validator 的 mention → relation 解析（审计用）。 */
+  semanticValidation?: {
+    resolutions: { mention: string; relation: string; term?: string }[];
+    rejected: { term: string; mention: string; relation: string }[];
+    preferredShortfalls: string[];
+  };
+  exclusive: boolean;
+  formulaCardinality: string;
+  knowledgeSourcePolicy: string;
+  /** 结构性 planning issues（unsupported / ambiguous / cycle）。 */
+  planningIssues: { type: string; message: string }[];
+  requiredObligationCount: number;
+  satisfiedObligationCount: number;
+  openObligations: string[];
+  blockedObligations: string[];
+  notDeliverableObligations: string[];
+  graphComplete: boolean;
+  /** 未被满足的 required obligation（readiness 的同一缺失集）。 */
+  unmetObligations: string[];
+  /** 义务明细（provider/rule 身份 + 依赖 + root outcomes），供 Phase 3 逐步 trace。 */
+  obligations: {
+    id: string;
+    type: string;
+    outcome?: string;
+    provider?: string;
+    source: string;
+    status: string;
+    required: boolean;
+    rootOutcomes: string[];
+    dependsOn: string[];
+    blocker?: string;
+  }[];
+  /** outcome 级覆盖投影（确定性；最终结果装配输入）。 */
+  outcomeCoverage: { outcome: string; status: string }[];
+  /** Typed blocker（runtime-owned）；唯一允许重新打开定向检索的通道。 */
+  appliedBlockers: { obligationId: string; type: string; question: string }[];
+  /** 每一步的 runnable obligation 与当时的 legal effect surface（用于核对「无状态推进」）。 */
+  steps: {
+    step: number;
+    runnable: string[];
+    surface: string[];
+  }[];
+  /** 运行结束时的 readiness（与 runtime 同一真源）。 */
+  readiness: {
+    ready: boolean;
+    blockerCodes: string[];
+    missingArtifacts: string[];
+  };
 }
 
 /**

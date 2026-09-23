@@ -25,7 +25,12 @@
     "eval:debug:harness": "tsx src/eval/run.ts debug harness",
     "eval:debug:classic": "tsx src/eval/run.ts debug classic",
     "eval:holdout:harness": "tsx src/eval/run.ts holdout harness",
-    "eval:holdout:classic": "tsx src/eval/run.ts holdout classic"
+    "eval:holdout:classic": "tsx src/eval/run.ts holdout classic",
+    "control:v21:check": "node scripts/control-plane-v21-check.mjs",
+    "test:control:v21": "node --import tsx --test tests/control-plane-v21.test.ts",
+    "control:v211:check": "node --import tsx --test tests/control-plane-v21-integration.test.ts",
+    "control:v212:check": "node scripts/control-plane-v212-check.mjs",
+    "test:control:v211": "node --import tsx --test tests/control-plane-v21-integration.test.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.49",
