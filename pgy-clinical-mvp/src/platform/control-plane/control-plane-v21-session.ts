@@ -154,6 +154,36 @@ export function outcomeCoverage(state: NonNullable<RuntimeContext['controlPlaneV
   return projectOutcomeCoverageV21(state.graph, state.durableArtifacts);
 }
 
+
+/**
+ * Contract resolution and satisfaction are intentionally distinct.
+ *
+ * `resolved` means the required contract has reached a terminal state: every required
+ * outcome's terminating obligation is non-OPEN. BLOCKED (unsupported / no provider /
+ * unsatisfiable) is terminal — no legal effect can further improve satisfaction — so it is
+ * `resolved` but NOT `satisfied`. OPEN means a legal effect could still advance the outcome.
+ */
+export function contractResolved(state: NonNullable<RuntimeContext['controlPlaneV21']>): boolean {
+  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  return [...required].every((outcome) => {
+    // Mirror terminalNodesFor: prefer a node whose target carries the outcome qualifier,
+    // else the shared unscoped root (e.g. clinical-core for the baseline assessment outcome).
+    const requestNodes = state.graph.nodes.filter((n) =>
+      n.rootOutcomes.includes(outcome) && (n.source === 'request' || n.source === 'insufficiency'));
+    const scoped = requestNodes.filter((n) => n.target.qualifiers?.outcome === outcome);
+    const roots = scoped.length > 0 ? scoped : requestNodes.filter((n) => n.target.qualifiers?.outcome === undefined);
+    if (roots.length === 0) return false;
+    return roots.every((n) => n.status !== 'OPEN');
+  });
+}
+
+/** A required user contract is satisfied only when every required/baseline outcome is DELIVERED. */
+export function contractSatisfied(state: NonNullable<RuntimeContext['controlPlaneV21']>): boolean {
+  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  const coverage = outcomeCoverage(state);
+  return [...required].every((outcome) => coverage.find((item) => item.outcome === outcome)?.status === 'DELIVERED');
+}
+
 /** 交付终态（NOT_DELIVERABLE）的 outcome 列表：必须在最终结果中显式表达，而不是静默消失。 */
 export function notDeliverableOutcomes(state: NonNullable<RuntimeContext['controlPlaneV21']>): string[] {
   return outcomeCoverage(state).filter((o) => o.status === 'NOT_DELIVERABLE').map((o) => o.outcome);

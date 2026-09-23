@@ -30,7 +30,9 @@
     "test:control:v21": "node --import tsx --test tests/control-plane-v21.test.ts",
     "control:v211:check": "node --import tsx --test tests/control-plane-v21-integration.test.ts",
     "control:v212:check": "node scripts/control-plane-v212-check.mjs",
-    "test:control:v211": "node --import tsx --test tests/control-plane-v21-integration.test.ts"
+    "test:control:v211": "node --import tsx --test tests/control-plane-v21-integration.test.ts",
+    "test:delivery-integrity": "node --import tsx --test tests/delivery-integrity.test.ts",
+    "delivery:check": "npm run test:delivery-integrity"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.49",

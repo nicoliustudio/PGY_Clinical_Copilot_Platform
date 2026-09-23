@@ -31,7 +31,7 @@ function p1Doc(overrides: Partial<KnowledgeDoc> = {}): KnowledgeDoc {
 }
 
 function formula(id: string, name: string, entityStatus = 'ACTIVE'): KnowledgeDoc['formulas'][number] {
-  return { id, name, composition: `组成-${id}`, sourceTier: 'P1_GYN_MANUAL', knowledgeRole: 'BASE_FORMULA', entityStatus };
+  return { id, name, composition: `组成-${id}`, sourceModifications: [], sourceTier: 'P1_GYN_MANUAL', knowledgeRole: 'BASE_FORMULA', entityStatus };
 }
 
 // ---------- A. Source Formula Set ----------

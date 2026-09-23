@@ -55,6 +55,30 @@ test('buildResultView：clinical 输出映射病/证/法/方', () => {
   assert.deepEqual(view.formula?.composition, ['生地黄']);
 });
 
+test('buildResultView：deterministic formula_set / treatment_deliveries 不得被 UI 丢弃', () => {
+  const view = buildResultView(clinicalResult({
+    formula_set: [
+      {
+        formula_ref: 'P1:a::f1', formula_id: 'f1', name: '先期汤', composition: '生地黄',
+        source_ref: 'P1:a', modification_rules: [], modification_status: 'KNOWN_EMPTY',
+        modification_text: '无加减', relation: 'PRIMARY_SELECTED',
+      },
+    ],
+    treatment_deliveries: [
+      {
+        outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE',
+        statement: 's', source_evidence_refs: ['AC-049'],
+        details: { points: ['合谷'], operation: '平补平泻', frequency: '每日1次', course: '10次' },
+      },
+    ],
+  }));
+  assert.equal(view.formula_set?.length, 1);
+  assert.equal(view.formula_set?.[0].formula_id, 'f1');
+  assert.equal(view.treatment_deliveries?.length, 1);
+  assert.equal(view.treatment_deliveries?.[0].outcome, 'modality:acupuncture');
+  assert.deepEqual(view.treatment_deliveries?.[0].details, { points: ['合谷'], operation: '平补平泻', frequency: '每日1次', course: '10次' });
+});
+
 test('buildResultView：urgent 输出映射 message + risks', () => {
   const view = buildResultView({ mode: 'urgent', message: '需立即就医', risks: [{ description: '出血', severity: 'high' }] } as AgentResult);
   assert.equal(view.mode, 'urgent');

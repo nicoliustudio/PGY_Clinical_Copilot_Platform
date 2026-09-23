@@ -29,7 +29,14 @@
     "terms": [
       {
         "term": "modality:gaofang",
-        "aliases": ["膏方", "膏滋", "膏剂", "以膏代煎", "膏方调补", "冬令膏方"]
+        "aliases": [
+          "膏方",
+          "膏滋",
+          "膏剂",
+          "以膏代煎",
+          "膏方调补",
+          "冬令膏方"
+        ]
       }
     ]
   },
@@ -57,7 +64,17 @@
   "deliveryObligations": [
     {
       "id": "treatment-form-delivery",
-      "requiredArtifact": "treatmentFormDecision"
+      "requiredArtifact": "treatmentFormDecision",
+      "requiredFields": [
+        "outcome",
+        "form",
+        "disposition",
+        "statement",
+        "sourceEvidenceRefs",
+        "advisoryComposition",
+        "preparation",
+        "usage"
+      ]
     }
   ],
   "controlPlaneV21": {

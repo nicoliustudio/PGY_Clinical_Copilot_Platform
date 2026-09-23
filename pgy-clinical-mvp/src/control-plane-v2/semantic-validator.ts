@@ -81,6 +81,19 @@ export function buildSemanticOntology(capabilities: CapabilityDescriptor[]): Sem
   return { provides, aliases, declaredSubtypes };
 }
 
+/**
+ * Deterministic surface normalization. A display-form string such as `膏方（以膏代煎）` must be
+ * reducible to its pure form name (`膏方`) so it can resolve through registry aliases. This is
+ * lexical normalization of the witness span, NOT alias enumeration and NOT semantic inference:
+ * only parenthetical glosses and whitespace are removed.
+ */
+function normalizeSurface(value: string): string {
+  return value
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
 export function resolveMention(ontology: SemanticOntologyV21, mention: string): MentionResolutionV21 {
   const key = mention.trim();
   if (key === '') return { mention: key, relation: 'UNKNOWN' };
@@ -99,6 +112,23 @@ export function resolveMention(ontology: SemanticOntologyV21, mention: string): 
   }
   const family = ontology.declaredSubtypes.get(key);
   if (family !== undefined) return { mention: key, relation: 'FAMILY', term: family };
+
+  // Deterministic normalization fallback: a display-form surface (with parenthetical gloss) still
+  // resolves to the same canonical identity as its pure form name.
+  const normalized = normalizeSurface(key);
+  if (normalized !== '' && normalized !== key) {
+    if (ontology.provides.has(normalized)) {
+      return { mention: key, relation: 'EXACT', term: normalized };
+    }
+    const normalizedAlias = ontology.aliases.get(normalized);
+    if (normalizedAlias !== undefined) {
+      return ontology.provides.has(normalizedAlias)
+        ? { mention: key, relation: 'ALIAS', term: normalizedAlias }
+        : { mention: key, relation: 'UNKNOWN' };
+    }
+    const normalizedFamily = ontology.declaredSubtypes.get(normalized);
+    if (normalizedFamily !== undefined) return { mention: key, relation: 'FAMILY', term: normalizedFamily };
+  }
   return { mention: key, relation: 'UNKNOWN' };
 }
 
@@ -147,8 +177,15 @@ export function validateRequestSemantics(
     if (baselineOutcomes.includes(term)) return true;
     if (!ontology.provides.has(term)) return true;
     if (proves(term)) return true;
+    // Only a FAMILY relation is a genuine "broader family standing in for a specific form" rejection.
+    // A registry term with no FAMILY mention pointing at it is itself a canonical identity; a
+    // display-form mention failing to prove it is a witness-normalization problem, not family
+    // substitution. A canonical identity must never be demoted to unresolved just because its
+    // surface witness did not exact-match — otherwise `modality:gaofang` gets wrongly reported as
+    // "not represented in registry" while it exists.
     const familyMention = resolutions.find((r) => r.term === term && r.relation === 'FAMILY');
-    rejected.push({ term, mention: familyMention?.mention ?? term, relation: familyMention ? 'FAMILY' : 'UNKNOWN' });
+    if (!familyMention) return true;
+    rejected.push({ term, mention: familyMention.mention, relation: 'FAMILY' });
     return false;
   });
 

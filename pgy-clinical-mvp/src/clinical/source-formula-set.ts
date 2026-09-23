@@ -53,6 +53,7 @@ export function hydrateSourceFormulaSet(
   const selectedExists = activeFormulas.some((f) => f.id === selectedFormulaId);
   if (!selectedExists) return null;
 
+  const sourceLevelModifications = parent.sourceModifications ?? [];
   const formulas: SourceFormulaEntry[] = activeFormulas.map((f) => {
     const formulaRef = `${sourceId}::${f.id}`;
     let relation: FormulaAdoptionState = 'SOURCE_ALTERNATIVE';
@@ -68,11 +69,24 @@ export function hydrateSourceFormulaSet(
         exclusionEvidenceRefs = exclusion.evidenceRefs;
       }
     }
+    const local = [...(f.sourceModifications ?? [])];
+    // A parent-level rule may be safely inherited only when the parent has exactly one ACTIVE formula.
+    // With multiple siblings, attribution is intentionally fail-closed: retain the rule at SourceFormulaSet level
+    // instead of silently copying it to every formula.
+    const sourceModifications = local.length > 0
+      ? local
+      : (activeFormulas.length === 1 ? [...sourceLevelModifications] : []);
+    const modificationStatus = sourceModifications.length > 0
+      ? 'PRESENT' as const
+      : (sourceLevelModifications.length > 0 ? 'UNATTRIBUTED_SOURCE_RULES' as const : 'KNOWN_EMPTY' as const);
     return {
       formulaRef,
       formulaId: f.id,
       formulaName: f.name,
       composition: f.composition,
+      sourceModifications,
+      modificationStatus,
+      usage: f.usage,
       relation,
       exclusionReason,
       exclusionEvidenceRefs,
@@ -86,6 +100,7 @@ export function hydrateSourceFormulaSet(
     syndrome: parent.syndrome,
     treatmentMethod: parent.treatment,
     completeness: 'COMPLETE',
+    sourceLevelModifications,
     formulas,
   };
 }

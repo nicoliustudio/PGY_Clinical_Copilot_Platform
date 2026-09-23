@@ -205,6 +205,8 @@ export interface TreatmentFormDecision {
   advisoryComposition?: string[];
   preparation?: string;
   usage?: string;
+  /** Capability-defined structured details (e.g. points/operation/frequency/course). Core treats keys generically. */
+  details?: Record<string, unknown>;
 }
 
 export interface TreatmentPlan {
@@ -261,12 +263,20 @@ export interface FormulaReview {
 export type FormulaAdoptionState = 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
 
 /** 同源原典方集合中的一个方。 */
+export type SourceModificationStatus = 'PRESENT' | 'KNOWN_EMPTY' | 'UNATTRIBUTED_SOURCE_RULES';
+
 export interface SourceFormulaEntry {
   /** 稳定公式引用 `${sourceId}::${formulaId}`。 */
   formulaRef: string;
   formulaId: string;
   formulaName: string;
   composition: string;
+  /** Source-preserved formula-local modification rules. Empty is meaningful and must not be reconstructed by the model. */
+  sourceModifications: string[];
+  /** Whether modification absence is known or source-level rules exist but cannot be safely attributed to this formula. */
+  modificationStatus: SourceModificationStatus;
+  /** Optional source-preserved usage text for this formula. */
+  usage?: string;
   /** 来源完整性与临床采纳的分离状态。 */
   relation: FormulaAdoptionState;
   exclusionReason?: string;
@@ -285,6 +295,8 @@ export interface SourceFormulaSet {
   syndrome: string;
   treatmentMethod: string;
   completeness: 'COMPLETE';
+  /** Parent/source-node rules retained even when attribution to one sibling formula would be unsafe. */
+  sourceLevelModifications: string[];
   formulas: SourceFormulaEntry[];
 }
 

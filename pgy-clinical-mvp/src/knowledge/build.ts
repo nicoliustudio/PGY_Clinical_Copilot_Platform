@@ -10,6 +10,7 @@ import type {
   KnowledgeIndex,
   NormativeFormula,
 } from './types.js';
+import { normalizeSourceModificationList } from './source-normalization.js';
 
 function loadJson<T>(p: string): T {
   return JSON.parse(readFileSync(p, 'utf8')) as T;
@@ -27,6 +28,7 @@ function loadJsonl(p: string): Record<string, unknown>[] {
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
+
 
 /** 从 release 的 manifest.json 解析发布版本；失败则回退目录名。 */
 export function resolveReleaseVersion(dir: string): string {
@@ -55,7 +57,13 @@ interface NormativeEntry {
     source_tier?: string;
     knowledge_role?: string;
     entity_status?: string;
+    inline_modification_text?: string;
+    inline_modifications?: unknown[];
+    usage?: string;
+    source_note?: string;
   }[];
+  modification?: string;
+  modification_rules?: unknown[];
 }
 
 interface CaseEntry {
@@ -142,16 +150,25 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
       id: str(f.id),
       name: str(f.name),
       composition: str(f.composition ?? f.raw_composition),
+      sourceModifications: normalizeSourceModificationList(f.inline_modification_text, f.inline_modifications),
+      usage: str(f.usage) || undefined,
+      sourceNote: str(f.source_note) || undefined,
       sourceTier: str(f.source_tier),
       knowledgeRole: str(f.knowledge_role),
       entityStatus: str(f.entity_status),
     }));
+    const sourceModifications = normalizeSourceModificationList(n.modification, n.modification_rules);
     const parts = [
       n.disease ? `病名：${n.disease}` : '',
       n.syndrome ? `证型：${n.syndrome}` : '',
       n.symptoms ? `症状：${n.symptoms}` : '',
       n.treatment ? `治法：${n.treatment}` : '',
-      ...formulas.map((f) => `方剂：${f.name}（${f.composition}）`),
+      ...formulas.flatMap((f) => [
+        `方剂：${f.name}（${f.composition}）`,
+        ...((f.sourceModifications ?? []).length > 0 ? [`方剂加减：${(f.sourceModifications ?? []).join('；')}`] : []),
+        ...(f.usage ? [`方剂用法：${f.usage}`] : []),
+      ]),
+      ...(sourceModifications.length > 0 ? [`来源节点加减：${sourceModifications.join('；')}`] : []),
     ].filter(Boolean);
     return baseDoc(layer, {
       id: `P1:${n.id}`,
@@ -165,6 +182,7 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
       sourceFile: str(n.source_file),
       sourceSchool: classifySourceSchool(str(n.source)),
       formulas,
+      sourceModifications,
       raw: n,
     });
   });
@@ -375,8 +393,8 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const cacheFile = path.join(config.kb.cacheDir, `index.${releaseVersion}.json`);
   if (!force && existsSync(cacheFile)) {
     const cached = loadJson<KnowledgeIndex>(cacheFile);
-    // 旧 schema（无 breakdown / releaseVersion）不再兼容，自动重建。
-    if (cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
+    // Durable knowledge shape changed: stale caches must never hide source-preserved product fields.
+    if (cached.schemaVersion === 2 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
       return cached;
     }
     console.log('[index] 检测到旧 schema 缓存，重建索引');
@@ -392,6 +410,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const vectors = await embed(docs.map((d) => d.text));
 
   const index: KnowledgeIndex = {
+    schemaVersion: 2,
     version: releaseVersion,
     releaseVersion,
     builtAt: new Date().toISOString(),

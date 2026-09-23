@@ -28,7 +28,15 @@
     "terms": [
       {
         "term": "modality:preparation",
-        "aliases": ["成药", "中成药", "现成膏剂", "制剂", "成方制剂", "不方便煎药", "免煎"]
+        "aliases": [
+          "成药",
+          "中成药",
+          "现成膏剂",
+          "制剂",
+          "成方制剂",
+          "不方便煎药",
+          "免煎"
+        ]
       }
     ]
   },
@@ -50,7 +58,16 @@
   "deliveryObligations": [
     {
       "id": "treatment-form-delivery",
-      "requiredArtifact": "treatmentFormDecision"
+      "requiredArtifact": "treatmentFormDecision",
+      "requiredFields": [
+        "outcome",
+        "form",
+        "disposition",
+        "statement",
+        "sourceEvidenceRefs",
+        "details",
+        "usage"
+      ]
     }
   ],
   "controlPlaneV21": {

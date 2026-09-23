@@ -14,11 +14,11 @@ import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { computeModificationEvidenceClosure } from '../../clinical/modification-evidence.js';
 import { loadIndex } from '../../knowledge/build.js';
 import { setFormulaIdentityTrace, type FormulaIdentityTrace } from '../../trace.js';
-import { outcomeCoverage, refreshControlPlaneV21 } from '../control-plane/control-plane-v21-session.js';
+import { contractResolved, contractSatisfied, outcomeCoverage, refreshControlPlaneV21 } from '../control-plane/control-plane-v21-session.js';
 import { projectFormulaSet } from '../../control-plane-v2/result-projection.js';
 import type { ProjectedFormula } from '../../control-plane-v2/result-projection.js';
 import type { OutcomeProjectionV21 } from '../../control-plane-v21/result-projection.js';
-import { treatmentDeliveryArtifacts } from '../../clinical/capability-delivery.js';
+import { treatmentDeliveryArtifacts, treatmentDeliveryCompleteness } from '../../clinical/capability-delivery.js';
 
 export interface ClinicalRunResult extends RuntimeRunResult {
   workspace: ClinicalWorkspace;
@@ -38,6 +38,8 @@ export interface ClinicalRunResult extends RuntimeRunResult {
     outcomeCoverage: OutcomeProjectionV21[];
     formulaSet: ProjectedFormula[];
     selectedCandidateRef?: string;
+    contractResolved: boolean;
+    contractSatisfied: boolean;
   };
 }
 
@@ -255,6 +257,8 @@ export class ClinicalRuntime {
       outcomeCoverage: coverage,
       formulaSet,
       selectedCandidateRef: context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef,
+      contractResolved: contractResolved(state),
+      contractSatisfied: contractSatisfied(state),
     };
     if (proposal.mode !== 'clinical') return { proposal, controlPlane };
 
@@ -268,21 +272,46 @@ export class ClinicalRuntime {
     if (cardinality.mode === 'AT_LEAST' && formulaSet.length < cardinality.count) {
       explicit.push(`formula cardinality shortfall: requested at least ${cardinality.count}, but only ${formulaSet.length} eligible source formulas were deterministically available`);
     }
-    const treatmentDeliveries = treatmentDeliveryArtifacts(context.workspace).map((delivery) => ({
-      ...(delivery.outcome ? { outcome: delivery.outcome } : {}),
-      form: delivery.form,
-      disposition: delivery.disposition,
-      statement: delivery.statement,
-      source_evidence_refs: delivery.sourceEvidenceRefs,
-      ...(delivery.advisoryComposition?.length ? { advisory_composition: delivery.advisoryComposition } : {}),
-      ...(delivery.preparation ? { preparation: delivery.preparation } : {}),
-      ...(delivery.usage ? { usage: delivery.usage } : {}),
-    }));
+    const treatmentDeliveries = treatmentDeliveryArtifacts(context.workspace).flatMap((delivery) => {
+      const completeness = treatmentDeliveryCompleteness(
+        context.capabilities,
+        delivery as unknown as Record<string, unknown>,
+      );
+      if (!completeness.complete) {
+        explicit.push(
+          `incomplete treatment delivery ${delivery.outcome ?? delivery.form}: missing ${completeness.missingFields.join(', ')}`,
+        );
+        return [];
+      }
+      return [{
+        ...(delivery.outcome ? { outcome: delivery.outcome } : {}),
+        form: delivery.form,
+        disposition: delivery.disposition,
+        statement: delivery.statement,
+        source_evidence_refs: delivery.sourceEvidenceRefs,
+        ...(delivery.advisoryComposition?.length ? { advisory_composition: delivery.advisoryComposition } : {}),
+        ...(delivery.preparation ? { preparation: delivery.preparation } : {}),
+        ...(delivery.usage ? { usage: delivery.usage } : {}),
+        ...(delivery.details ? { details: delivery.details } : {}),
+      }];
+    });
     const formulaProjection = formulaSet.map((formula) => ({
       formula_ref: formula.formulaRef,
       formula_id: formula.formulaId,
       name: formula.name,
       composition: formula.composition,
+      source_ref: formula.sourceRef,
+      modification_rules: formula.sourceModifications,
+      modification_status: formula.modificationStatus,
+      modification_text: formula.modificationStatus === 'PRESENT'
+        ? formula.sourceModifications.join('；')
+        : (formula.modificationStatus === 'KNOWN_EMPTY'
+          ? '无加减'
+          : '源节点存在加减规则，但无法安全归属到该方'),
+      ...(formula.modificationStatus === 'UNATTRIBUTED_SOURCE_RULES' && formula.sourceLevelModifications.length > 0
+        ? { source_level_modification_rules: formula.sourceLevelModifications }
+        : {}),
+      ...(formula.usage ? { usage: formula.usage } : {}),
       relation: formula.relation,
     }));
     return {

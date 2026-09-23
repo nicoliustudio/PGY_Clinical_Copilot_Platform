@@ -22,6 +22,8 @@ import { projectControlPlaneV21Surface, dynamicInstructions } from '../src/adapt
 import {
   refreshControlPlaneV21,
   structuralGraphV21,
+  contractResolved,
+  contractSatisfied,
 } from '../src/platform/control-plane/control-plane-v21-session.js';
 import type { ObligationNodeV21 } from '../src/control-plane-v21/types.js';
 import { validateRequestSemantics, resolveMention, buildSemanticOntology } from '../src/control-plane-v2/semantic-validator.js';
@@ -124,13 +126,16 @@ function setSourceFormulas(context: RuntimeContext, eligible: number, excluded =
     syndrome: 's',
     treatmentMethod: 'm',
     completeness: 'COMPLETE',
+    sourceLevelModifications: [],
     formulas: [
       ...Array.from({ length: eligible }, (_, i) => ({
         formulaRef: `F${i}`, formulaId: `F${i}`, formulaName: `方${i}`, composition: 'c',
+        sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const,
         relation: 'PRIMARY_SELECTED' as const, applicableModifications: [],
       })),
       ...Array.from({ length: excluded }, (_, i) => ({
         formulaRef: `X${i}`, formulaId: `X${i}`, formulaName: `排除方${i}`, composition: 'c',
+        sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const,
         relation: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [],
       })),
     ],
@@ -317,6 +322,19 @@ test('V2.1.3 invariant: REQUIRED + unsupported → BLOCKED，且不阻断其他 
   assert.notEqual(acupuncture!.status, 'BLOCKED');
 });
 
+test('V2.1.3 invariant: contractResolved 与 contractSatisfied 分离（required 无 provider）', async () => {
+  const context = await prepareContext(request(['modality:no-such-modality']));
+  satisfyClinicalCore(context);
+  context.workspace.evidenceState.evidenceItems.push({
+    id: 'E1', sourceRef: 'P1:std', sourceType: 'knowledge', relatedCandidates: [], supportingSignals: [], contradictingSignals: [],
+  });
+  refreshControlPlaneV21(context);
+  const state = context.controlPlaneV21!;
+  // 无 provider 的 required outcome 是 BLOCKED 终态：已到终态（resolved），但不满足合同（satisfied=false）。
+  assert.equal(contractResolved(state), true, 'unsupported required outcome 是终态 → resolved');
+  assert.equal(contractSatisfied(state), false, 'unsupported required outcome 不得伪装成 satisfied');
+});
+
 test('V2.1.3 invariant: ALLOWED + unsupported 不阻断 required outcome；PREFERRED 仅报告 shortfall', async () => {
   const context = await prepareContext(request(['modality:acupuncture'], {
     mentions: [
@@ -435,7 +453,7 @@ test('V2.1.3 invariant: pending treatment-delivery 时 instructions 注入形式
   // 未交付的 modality outcome 必须被列出，且必须显式约束「交付即所声明的形式」。
   assert(instructions.includes('modality:acupuncture'));
   assert(instructions.includes('must implement the very treatment form its `outcome` names'));
-  assert(instructions.includes('leave that outcome undelivered instead of substituting another form'));
+  assert(instructions.includes('stand in for the requested form'));
 });
 
 test('V2.1.3 invariant: tcm-clinical-cognition 声明治疗形式保真方法', async () => {
@@ -443,4 +461,25 @@ test('V2.1.3 invariant: tcm-clinical-cognition 声明治疗形式保真方法', 
   assert(skill !== undefined);
   assert(skill.instruction.includes('## Treatment Form Fidelity'));
   assert(skill.instruction.includes('never stands in for a specifically requested form'));
+});
+
+test('V2.1.3 invariant: semantic identity 稳定（display surface 归一化到 canonical id）', async () => {
+  const descriptors = await discoverCapabilityManifests();
+  const ontology = buildSemanticOntology(descriptors);
+  // 同一语义的不同 surface 形式必须 resolve 到同一个 canonical identity。
+  assert.equal(resolveMention(ontology, '膏方').term, 'modality:gaofang');
+  assert.equal(resolveMention(ontology, '以膏代煎').term, 'modality:gaofang');
+  assert.equal(resolveMention(ontology, '膏方（以膏代煎）').term, 'modality:gaofang');
+});
+
+test('V2.1.3 invariant: no-progress terminal —— blocked required + open=0 时 proposal.submit 移除', async () => {
+  const context = await prepareContext(request(['modality:no-such-modality']));
+  satisfyClinicalCore(context);
+  context.workspace.evidenceState.evidenceItems.push({
+    id: 'E1', sourceRef: 'P1:std', sourceType: 'knowledge', relatedCandidates: [], supportingSignals: [], contradictingSignals: [],
+  });
+  refreshControlPlaneV21(context);
+  // blocked required > 0 且 open = 0：无任何 legal effect 能改善 satisfaction。
+  const surface = projectControlPlaneV21Surface(context, ['proposal.submit']);
+  assert.deepEqual(surface, [], 'blocked required + open=0 时 proposal.submit 必须从 legal surface 消失');
 });

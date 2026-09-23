@@ -1,12 +1,14 @@
 import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
+import { loadIndex } from '../../knowledge/build.js';
 import { searchRuntimeCards, getRuntimeAsset, getRuntimeAssetScope } from '../../knowledge/runtime-catalog.js';
 import { getDiagnosticPatterns } from '../../knowledge/diagnostic-patterns.js';
 import { getDiseaseStandard, getSyndromeStandard, getDiseaseStandards } from '../../knowledge/standard-runtime.js';
 import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
+import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
 import { recordSearchReceipt, recordHydrationReceipt, evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import type { EvidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
@@ -287,6 +289,7 @@ const treatmentPlanSchema = z.object({
     advisoryComposition: z.array(z.string()).optional(),
     preparation: z.string().optional(),
     usage: z.string().optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
   })).optional(),
   /** @deprecated compatibility input for a single treatment delivery. */
   treatmentFormDecision: z.object({
@@ -298,6 +301,7 @@ const treatmentPlanSchema = z.object({
     advisoryComposition: z.array(z.string()).optional(),
     preparation: z.string().optional(),
     usage: z.string().optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
 });
 
@@ -716,7 +720,21 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
         if (errors.length > 0) throw new Error(errors.join('; '));
       }
-      if (formulaSelection?.selectedCandidateRef) assertKnownCandidateRef(context, formulaSelection.selectedCandidateRef);
+      if (formulaSelection?.selectedCandidateRef) {
+        assertKnownCandidateRef(context, formulaSelection.selectedCandidateRef);
+        // SOURCE_SIBLING_COMPLETENESS must exist before proposal readiness, not only after submit.
+        // Otherwise AT_LEAST/source-completeness obligations can never close inside the agent loop.
+        const selected = context.workspace.candidates.find((c) => c.id === formulaSelection.selectedCandidateRef);
+        if (selected?.sourceId?.startsWith('P1:')) {
+          try {
+            const index = await loadIndex();
+            const set = hydrateSourceFormulaSet(index.docs, formulaSelection.selectedCandidateRef);
+            if (set) context.workspace.sourceFormulaSet = set;
+          } catch {
+            // Fail closed: no synthetic siblings. Readiness/cardinality remains unsatisfied when the canonical store is unavailable.
+          }
+        }
+      }
       // H15.5 compact receipt：不回显完整 payload，只返回本次写入的 artifact 摘要 + 剩余未决项。
       const updatedArtifacts: string[] = [];
       if (diseaseAssessment) updatedArtifacts.push('diseaseAssessment');

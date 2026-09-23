@@ -248,7 +248,7 @@ test('精确 closure：针灸交付完成不会关闭膏方交付', async () => 
     primaryPrinciple: 'p',
     treatmentTarget: 't',
     evidenceRefs: [],
-    treatmentFormDecision: { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 's', sourceEvidenceRefs: ['AC-049'] },
+    treatmentFormDecision: { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 's', sourceEvidenceRefs: ['AC-049'], details: { points: ['合谷'], operation: '平补平泻', frequency: '每日1次', course: '10次' } },
     version: 1,
   };
   refreshControlPlaneV21(context);
@@ -280,8 +280,8 @@ test('V2.1.1 多治疗 delivery 可同时关闭针灸与膏方两个独立义务
   context.workspace.clinicalDecisionSpine.treatmentPlan = {
     primaryPrinciple: 'p', treatmentTarget: 't', evidenceRefs: [], version: 1,
     treatmentDeliveries: [
-      { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 'a', sourceEvidenceRefs: ['AC-049'] },
-      { outcome: 'modality:gaofang', form: 'gaofang', disposition: 'CURRENTLY_SUITABLE', statement: 'g', sourceEvidenceRefs: ['GF-013'] },
+      { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 'a', sourceEvidenceRefs: ['AC-049'], details: { points: ['合谷'], operation: '平补平泻', frequency: '每日1次', course: '10次' } },
+      { outcome: 'modality:gaofang', form: 'gaofang', disposition: 'CURRENTLY_SUITABLE', statement: 'g', sourceEvidenceRefs: ['GF-013'], advisoryComposition: ['阿胶', '鹿角胶'], preparation: '炼蜜收膏', usage: '每日一勺，温水冲服' },
     ],
   };
   refreshControlPlaneV21(context);
@@ -524,14 +524,15 @@ test('多个方：formulaCardinality 由确定性投影表达，同源方不会�
     syndrome: 's',
     treatmentMethod: 'm',
     completeness: 'COMPLETE' as const,
+    sourceLevelModifications: [],
     formulas: [
-      { formulaRef: 'a', formulaId: 'fa', formulaName: 'A', composition: 'x', relation: 'PRIMARY_SELECTED' as const, applicableModifications: [] },
-      { formulaRef: 'b', formulaId: 'fb', formulaName: 'B', composition: 'y', relation: 'SOURCE_ALTERNATIVE' as const, applicableModifications: [] },
-      { formulaRef: 'c', formulaId: 'fc', formulaName: 'C', composition: 'z', relation: 'SOURCE_ALTERNATIVE' as const, applicableModifications: [] },
-      { formulaRef: 'd', formulaId: 'fd', formulaName: 'D', composition: 'w', relation: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [] },
+      { formulaRef: 'a', formulaId: 'fa', formulaName: 'A', composition: 'x', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'PRIMARY_SELECTED' as const, applicableModifications: [] },
+      { formulaRef: 'b', formulaId: 'fb', formulaName: 'B', composition: 'y', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'SOURCE_ALTERNATIVE' as const, applicableModifications: [] },
+      { formulaRef: 'c', formulaId: 'fc', formulaName: 'C', composition: 'z', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'SOURCE_ALTERNATIVE' as const, applicableModifications: [] },
+      { formulaRef: 'd', formulaId: 'fd', formulaName: 'D', composition: 'w', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [] },
     ],
   };
-  assert.deepEqual(projectFormulaSet(set, { mode: 'PRIMARY_ONLY' }).map((f) => f.formulaRef), ['a']);
+  assert.deepEqual(projectFormulaSet(set, { mode: 'PRIMARY_ONLY' }).map((f) => f.formulaRef), ['a', 'b', 'c']);
   assert.deepEqual(projectFormulaSet(set, { mode: 'AT_LEAST', count: 3 }).map((f) => f.formulaRef), ['a', 'b', 'c']);
   assert.deepEqual(projectFormulaSet(set, { mode: 'ALL_ELIGIBLE' }).map((f) => f.formulaRef), ['a', 'b', 'c']);
 });
@@ -669,7 +670,7 @@ test('graph 完整后 readiness 不再报 control plane blocker，且 runtime �
     primaryPrinciple: 'p',
     treatmentTarget: 't',
     evidenceRefs: [],
-    treatmentFormDecision: { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 's', sourceEvidenceRefs: ['AC-049'] },
+    treatmentFormDecision: { outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE', statement: 's', sourceEvidenceRefs: ['AC-049'], details: { points: ['合谷'], operation: '平补平泻', frequency: '每日1次', course: '10次' } },
     version: 1,
   };
   refreshControlPlaneV21(context);

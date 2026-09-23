@@ -101,6 +101,10 @@ export interface CapabilityDeliveryObligation {
   id: string;
   /** 交付需满足的 durable artifact（如 treatmentFormDecision）。复用 isArtifactSatisfied 判定。 */
   requiredArtifact: string;
+  /** Product completeness: fields that must be present before this delivery can close. Dot paths are supported. */
+  requiredFields?: string[];
+  /** Optional outcome-specific field requirements. Keeps domain details in manifest data, not Core branches. */
+  requiredFieldsByOutcome?: Record<string, string[]>;
   /** 可选：交付依赖的证据义务 id（用于 SEARCHED_NONE → NOT_DELIVERABLE 的合法终态）。 */
   dependsOnEvidenceObligationIds?: string[];
 }

@@ -27,6 +27,12 @@ export interface NormativeFormula {
   id: string;
   name: string;
   composition: string;
+  /** Source-preserved formula-local modification rules. Empty means the source explicitly supplied none at formula level. */
+  sourceModifications?: string[];
+  /** Optional source usage text carried with the formula; never reconstructed by the model. */
+  usage?: string;
+  /** Optional formula-local source note. */
+  sourceNote?: string;
   /** 公式级 source_tier（源自源数据，provenance 字符串，非 doc.sourceTier）。 */
   sourceTier: string;
   /** 公式级 knowledge_role（源自源数据，provenance 字符串）。 */
@@ -56,6 +62,8 @@ export interface KnowledgeDoc {
   treatment: string;
   title: string;
   formulas: NormativeFormula[];
+  /** Parent/source-node modification text that could not safely be attributed to one formula. */
+  sourceModifications?: string[];
   /** 原资产 identity（不通过文本重新推断）。 */
   diseaseId?: string;
   syndromeId?: string;
@@ -89,6 +97,8 @@ export interface IndexBreakdown {
 }
 
 export interface KnowledgeIndex {
+  /** Runtime index schema. Bump when durable knowledge shape changes so stale .kb-cache cannot mask new fields. */
+  schemaVersion: 2;
   version: string;
   releaseVersion: string;
   builtAt: string;

@@ -43,6 +43,12 @@ export const clinicalResultSchema = z.object({
     formula_id: z.string(),
     name: z.string(),
     composition: z.string(),
+    source_ref: z.string(),
+    modification_rules: z.array(z.string()),
+    modification_status: z.enum(['PRESENT', 'KNOWN_EMPTY', 'UNATTRIBUTED_SOURCE_RULES']),
+    modification_text: z.string(),
+    source_level_modification_rules: z.array(z.string()).optional(),
+    usage: z.string().optional(),
     relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
   })).optional(),
   /** V2.1.1 deterministic multi-modality deliveries from durable Workspace state. */
@@ -55,6 +61,7 @@ export const clinicalResultSchema = z.object({
     advisory_composition: z.array(z.string()).optional(),
     preparation: z.string().optional(),
     usage: z.string().optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
   })).optional(),
   missing_information: z.array(z.string()),
   safety: z.object({

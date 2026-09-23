@@ -1,4 +1,4 @@
-import type { ResolvedCapability } from '../contracts/capability.js';
+import type { CapabilityDeliveryObligation, ResolvedCapability } from '../contracts/capability.js';
 import type {
   CapabilityDeliveryClosure,
   CapabilityEvidenceClosure,
@@ -18,6 +18,75 @@ import { isArtifactSatisfied } from '../platform/workspace/clinical-workspace.js
  */
 
 /** readiness 使用的 delivery artifact key（capabilityDelivery:<capabilityId>:<obligationId>）。 */
+
+
+function readPath(value: unknown, path: string): unknown {
+  let cur: unknown = value;
+  for (const part of path.split('.').filter(Boolean)) {
+    if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return cur;
+}
+
+function meaningful(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+/** Manifest-driven product completeness. Core never branches on modality names. */
+export function requiredDeliveryFields(
+  obligation: CapabilityDeliveryObligation,
+  outcome?: string,
+): string[] {
+  return [...new Set([
+    ...(obligation.requiredFields ?? []),
+    ...(outcome ? (obligation.requiredFieldsByOutcome?.[outcome] ?? []) : []),
+  ])];
+}
+
+export function missingRequiredDeliveryFields(
+  delivery: Record<string, unknown>,
+  obligation: CapabilityDeliveryObligation,
+  outcome?: string,
+): string[] {
+  return requiredDeliveryFields(obligation, outcome).filter((field) => !meaningful(readPath(delivery, field)));
+}
+
+export function deliverySatisfiesObligation(
+  delivery: Record<string, unknown>,
+  obligation: CapabilityDeliveryObligation,
+  outcome?: string,
+): boolean {
+  return missingRequiredDeliveryFields(delivery, obligation, outcome).length === 0;
+}
+
+export interface DeliveryCompleteness {
+  complete: boolean;
+  capabilityId?: string;
+  obligationId?: string;
+  missingFields: string[];
+}
+
+/** Resolve the unique semantic owner and evaluate its manifest-declared product schema. */
+export function treatmentDeliveryCompleteness(
+  capabilities: ResolvedCapability[],
+  delivery: Record<string, unknown>,
+): DeliveryCompleteness {
+  const outcome = typeof delivery.outcome === 'string' ? delivery.outcome.trim() : '';
+  const owners = capabilities.flatMap((capability) => {
+    if (outcome && !capability.provides?.includes(outcome)) return [];
+    return (capability.deliveryObligations ?? []).map((obligation) => ({ capability, obligation }));
+  });
+  if (owners.length !== 1) return { complete: false, missingFields: outcome ? ['semanticOwner'] : ['outcome'] };
+  const [{ capability, obligation }] = owners;
+  const missingFields = missingRequiredDeliveryFields(delivery, obligation, outcome || undefined);
+  return { complete: missingFields.length === 0, capabilityId: capability.id, obligationId: obligation.id, missingFields };
+}
+
 export function deliveryArtifactKey(capabilityId: string, obligationId: string): string {
   return `capabilityDelivery:${capabilityId}:${obligationId}`;
 }
@@ -102,13 +171,24 @@ export function attributeDeliveryObligations(
     for (const delivery of deliveries) {
       const outcome = delivery.outcome?.trim();
       if (outcome) {
-        const owners = candidates.filter((candidate) =>
-          capabilities.find((c) => c.id === candidate.capabilityId)?.provides?.includes(outcome) === true);
+        const owners = candidates.filter((candidate) => {
+          const capability = capabilities.find((c) => c.id === candidate.capabilityId);
+          if (capability?.provides?.includes(outcome) !== true) return false;
+          const obligation = capability.deliveryObligations?.find((ob) => ob.id === candidate.obligationId);
+          return obligation !== undefined
+            && deliverySatisfiesObligation(delivery as unknown as Record<string, unknown>, obligation, outcome);
+        });
         if (owners.length === 1) push({ ...owners[0], outcome });
         continue;
       }
-      // Legacy compatibility: only one possible owner may consume an untyped single delivery.
-      if (candidates.length === 1 && deliveries.length === 1) push(candidates[0]);
+      // Legacy compatibility: only one possible owner may consume an untyped single delivery,
+      // and even then its manifest-declared completeness requirements must be satisfied.
+      if (candidates.length === 1 && deliveries.length === 1) {
+        const candidate = candidates[0];
+        const capability = capabilities.find((c) => c.id === candidate.capabilityId);
+        const obligation = capability?.deliveryObligations?.find((ob) => ob.id === candidate.obligationId);
+        if (obligation && deliverySatisfiesObligation(delivery as unknown as Record<string, unknown>, obligation)) push(candidate);
+      }
     }
   }
   return out;

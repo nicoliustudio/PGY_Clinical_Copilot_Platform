@@ -568,6 +568,9 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         advisoryComposition: asStringArray(x.advisoryComposition),
         preparation: asString(x.preparation),
         usage: asString(x.usage),
+        details: x.details && typeof x.details === 'object' && !Array.isArray(x.details)
+          ? { ...(x.details as Record<string, unknown>) }
+          : undefined,
       };
     };
     const incoming = Array.isArray(payload.treatmentDeliveries)
@@ -962,7 +965,9 @@ export function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: stri
     return closure !== undefined
       && (closure.status === 'EVIDENCE_ACQUIRED' || closure.status === 'SEARCHED_NONE' || closure.status === 'NOT_APPLICABLE');
   }
-  // H15.9 / Phase 3.5：capability delivery obligation（obligation 粒度）的满足 = 存在 terminal delivery closure。
+  // Delivery satisfaction is stricter than terminal resolution: a REQUIRED treatment-form contract
+  // is satisfied only by DELIVERED. NOT_DELIVERABLE is a resolved failure and must remain visible
+  // to readiness instead of masquerading as successful product delivery.
   if (artifact.startsWith('capabilityDelivery:')) {
     const rest = artifact.slice('capabilityDelivery:'.length);
     const idx = rest.lastIndexOf(':');
@@ -971,8 +976,7 @@ export function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: stri
     const closure = (workspace.capabilityDeliveryClosures ?? []).find(
       (c) => c.capabilityId === capabilityId && (obligationId === undefined || c.obligationId === obligationId),
     );
-    return closure !== undefined
-      && (closure.status === 'DELIVERED' || closure.status === 'NOT_DELIVERABLE');
+    return closure?.status === 'DELIVERED';
   }
   const spine = workspace.clinicalDecisionSpine;
   switch (artifact) {

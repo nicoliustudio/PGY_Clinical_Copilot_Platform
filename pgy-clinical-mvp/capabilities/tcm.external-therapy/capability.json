@@ -28,21 +28,51 @@
     "terms": [
       {
         "term": "modality:acupuncture",
-        "aliases": ["针灸", "针刺", "体针", "针法"],
-        "subtypes": ["温针灸", "电针", "火针", "梅花针"]
+        "aliases": [
+          "针灸",
+          "针刺",
+          "体针",
+          "针法"
+        ],
+        "subtypes": [
+          "温针灸",
+          "电针",
+          "火针",
+          "梅花针"
+        ]
       },
       {
         "term": "modality:moxibustion",
-        "aliases": ["艾灸", "灸法", "温灸", "隔物灸"]
+        "aliases": [
+          "艾灸",
+          "灸法",
+          "温灸",
+          "隔物灸"
+        ]
       },
       {
         "term": "modality:auricular",
-        "aliases": ["耳针", "耳穴", "耳穴压豆"]
+        "aliases": [
+          "耳针",
+          "耳穴",
+          "耳穴压豆"
+        ]
       },
       {
         "term": "modality:external-therapy",
-        "aliases": ["外治法", "中医外治"],
-        "subtypes": ["拔罐", "走罐", "闪罐", "刮痧", "推拿", "穴位贴敷", "刺络放血"]
+        "aliases": [
+          "外治法",
+          "中医外治"
+        ],
+        "subtypes": [
+          "拔罐",
+          "走罐",
+          "闪罐",
+          "刮痧",
+          "推拿",
+          "穴位贴敷",
+          "刺络放血"
+        ]
       }
     ]
   },
@@ -64,7 +94,37 @@
   "deliveryObligations": [
     {
       "id": "treatment-form-delivery",
-      "requiredArtifact": "treatmentFormDecision"
+      "requiredArtifact": "treatmentFormDecision",
+      "requiredFields": [
+        "outcome",
+        "form",
+        "disposition",
+        "statement",
+        "sourceEvidenceRefs"
+      ],
+      "requiredFieldsByOutcome": {
+        "modality:acupuncture": [
+          "details.points",
+          "details.operation",
+          "details.frequency",
+          "details.course"
+        ],
+        "modality:moxibustion": [
+          "details.points",
+          "details.operation",
+          "details.frequency",
+          "details.course"
+        ],
+        "modality:auricular": [
+          "details.points",
+          "details.operation",
+          "details.frequency",
+          "details.course"
+        ],
+        "modality:external-therapy": [
+          "details"
+        ]
+      }
     }
   ],
   "controlPlaneV21": {

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { execSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -31,6 +32,19 @@ interface RunRecord {
   model: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   session?: any;
+}
+
+/** 导出时的代码基线：HEAD 短哈希 + 工作区未提交改动数（git 不可用时如实标注）。 */
+function codeBaseline(): string {
+  try {
+    const head = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+    const dirty = execSync('git status --porcelain', { encoding: 'utf8' })
+      .split('\n')
+      .filter((line) => line.trim().length > 0).length;
+    return `${head}${dirty > 0 ? `（工作区有 ${dirty} 项未提交改动）` : '（工作区干净）'}`;
+  } catch {
+    return '（无法读取 git 状态）';
+  }
 }
 
 async function login(): Promise<string> {
@@ -740,7 +754,11 @@ async function main(): Promise<void> {
 | 模型 | \`deepseek-chat\`（fast = deep） |
 | 知识库 release | \`2026.09.18-agent-ready-r1\`（医生端 /api/health 报告 docCount=4428） |
 | promptHash | \`${records[0]?.session?.trace?.snapshot?.promptHash ?? '-'}\`（${records.length} 例一致） |
+| 代码基线（导出时） | \`${codeBaseline()}\` |
 | 记录条数 | ${records.length} ｜ ${records.every((d) => d.status === 'done') ? '全部 `status=done`' : '存在非 done 记录'} |
+
+> 关于代码基线：记录由**已在运行的本地服务进程**产出（不是导出时重新推理）。若该进程启动之后工作区又发生过改动，
+> 运行实际加载的是**进程启动时**的代码，与导出时的 HEAD 可能不一致；跨版本对比研究时请以此为前提。
 
 ## 0.1 结果速览
 

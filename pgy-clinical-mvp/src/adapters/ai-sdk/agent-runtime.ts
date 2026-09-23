@@ -45,6 +45,7 @@ import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
 import { getFormulaHydrationStats, resetFormulaHydrationStats } from '../../clinical/formula.js';
+import { requiredDeliveryFields } from '../../clinical/capability-delivery.js';
 
 /**
  * H2.5D：promotion gap 只作为 Agent projection / diagnostics / trace，不再自动扩大 reasoning loop。
@@ -220,6 +221,16 @@ export function projectControlPlaneV21Surface(context: RuntimeContext, internalT
       closedSet.add('formula.search_normative');
     }
   }
+
+  // P0-3 No-progress terminal: when required obligations are BLOCKED and none remain OPEN, no
+  // legal effect can change satisfaction state. proposal.submit must leave the legal surface —
+  // otherwise the model re-submits the same not-ready proposal indefinitely (false completion loop).
+  const blockedRequired = state.graph.nodes.filter((n) => n.required && n.status === 'BLOCKED');
+  const openRequired = state.graph.nodes.filter((n) => n.required && n.status === 'OPEN');
+  if (blockedRequired.length > 0 && openRequired.length === 0) {
+    closedSet.add('proposal.submit');
+  }
+
   return internalToolIds.filter((id) => !closedSet.has(id));
 }
 
@@ -432,16 +443,20 @@ function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
     lines.push(
       '',
       `Treatment-form deliveries still unrecorded: ${pending.join(', ')}`,
-      'Record each one with workspace.record_deliberation → treatmentPlan.treatmentDeliveries[] '
-      + '(form / disposition / statement / sourceEvidenceRefs / outcome). `outcome` must be copied exactly '
+      'Record each one with workspace.record_deliberation → treatmentPlan.treatmentDeliveries[]. `outcome` must be copied exactly '
       + 'from the list above; one delivery closes only its own outcome obligation. '
       + 'Use treatmentPlan.treatmentFormDecision only when exactly one delivery exists.',
-      'A delivery must implement the very treatment form its `outcome` names: `form` and `statement` must '
-      + 'describe that same form. Never label a delivery with an outcome it does not implement, and never let '
-      + 'a neighbouring or auxiliary technique stand in for the form the outcome names. When the named form is '
-      + 'not deliverable from the retrieved evidence (or is currently unsuitable), say so through `disposition` '
-      + 'and missing_information and leave that outcome undelivered instead of substituting another form.',
+      'A delivery must implement the very treatment form its `outcome` names. Never let a neighbouring or auxiliary technique '
+      + 'stand in for the requested form. Product completeness is manifest-driven: a delivery remains OPEN until every required '
+      + 'field declared by its capability is present.',
     );
+    for (const outcome of pending) {
+      const capability = context.capabilities.find((c) => c.provides?.includes(outcome));
+      const obligation = capability?.deliveryObligations?.[0];
+      if (!obligation) continue;
+      const fields = requiredDeliveryFields(obligation, outcome);
+      if (fields.length > 0) lines.push(`- ${outcome} required delivery fields: ${fields.join(', ')}`);
+    }
   }
   return `${lines.join('\n')}\n`;
 }

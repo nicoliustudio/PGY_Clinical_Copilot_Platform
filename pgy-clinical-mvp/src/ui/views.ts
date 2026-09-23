@@ -1,4 +1,4 @@
-import type { AgentResult } from '../contracts/result.js';
+import type { AgentResult, ClinicalResult } from '../contracts/result.js';
 import type { AuthorityResult } from '../contracts/authority.js';
 import type {
   CandidateAssessment,
@@ -36,6 +36,10 @@ export interface ResultView {
     candidate_ref?: string;
     evidence_refs: string[];
   };
+  /** Deterministic multi-formula projection. UI renders, never re-selects. */
+  formula_set?: NonNullable<ClinicalResult['formula_set']>;
+  /** Deterministic multi-modality treatment deliveries. UI renders, never re-selects. */
+  treatment_deliveries?: NonNullable<ClinicalResult['treatment_deliveries']>;
   missing_information?: string[];
   safety?: { status: string };
   message?: string;
@@ -51,6 +55,8 @@ export function buildResultView(result: AgentResult): ResultView {
     view.syndrome = result.syndrome;
     view.treatment = result.treatment;
     view.formula = result.formula;
+    view.formula_set = result.formula_set;
+    view.treatment_deliveries = result.treatment_deliveries;
     view.missing_information = result.missing_information;
     view.safety = result.safety;
   } else if (result.mode === 'conversation') {

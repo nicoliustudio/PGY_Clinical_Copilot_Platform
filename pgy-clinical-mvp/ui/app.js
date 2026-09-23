@@ -403,16 +403,38 @@ function renderResult(r, authority) {
 function renderClinical(r, authority) {
   const authorityState = r.formula?.authority || '';
   const badge = authorityState ? `<span class="authority-badge ${esc(authorityState)}">${esc(authorityState)}</span>` : '';
-  const herbs = (r.formula?.composition || []).map((h) => `<span class="herb-pill">${esc(h)}</span>`).join('');
   const missing = (r.missing_information || []).map((m) => `<li>${esc(m)}</li>`).join('');
   const ev = (refs) => (refs || []).map((x) => `<span class="ev-refs">${esc(x)}</span>`).join('');
+
+  // formula_set 存在时是最终多方展示真源（同源 sibling 不静默丢弃）；legacy formula 仅作兼容回退。
+  let formulaLines = '';
+  if (Array.isArray(r.formula_set) && r.formula_set.length) {
+    formulaLines = r.formula_set.map((f) => {
+      const rel = f.relation === 'PRIMARY_SELECTED' ? '主选' : (f.relation === 'CLINICALLY_EXCLUDED' ? '已排除' : '同源备选');
+      const mod = f.modification_text ? f.modification_text : (f.modification_status === 'KNOWN_EMPTY' ? '无加减' : '');
+      return `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(f.name)}${f.source_ref ? ` <span class="ev-refs">${esc(f.source_ref)}</span>` : ''} <span class="muted">${esc(rel)}</span>${mod ? ` <span class="mod">${esc(mod)}</span>` : ''}<div class="herb-list">${esc(f.composition || '')}</div></span></div>`;
+    }).join('');
+  } else if (r.formula?.name || (r.formula?.composition || []).length) {
+    const herbs = (r.formula?.composition || []).map((h) => `<span class="herb-pill">${esc(h)}</span>`).join('');
+    formulaLines = `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(r.formula?.name)}${r.formula?.source_id ? ` <span class="ev-refs">${esc(r.formula.source_id)}</span>` : ''}<div class="herb-list">${herbs}</div></span></div>`;
+  }
+
+  let treatmentLines = '';
+  if (Array.isArray(r.treatment_deliveries) && r.treatment_deliveries.length) {
+    treatmentLines = r.treatment_deliveries.map((d) => {
+      const details = d.details ? Object.entries(d.details).map(([k, v]) => `<div class="muted">${esc(k)}：${esc(Array.isArray(v) ? v.join('、') : String(v))}</div>`).join('') : '';
+      return `<div class="clinical-line treatment"><span class="k">治疗</span><span class="v">${esc(d.form)}${d.outcome ? ` <span class="ev-refs">${esc(d.outcome)}</span>` : ''}<div class="muted">${esc(d.statement || '')}</div>${details}</span></div>`;
+    }).join('');
+  }
+
   return `
     <div class="assistant-block">
       <div class="answer-head"><h3>临床判断</h3>${badge}</div>
       <div class="clinical-line"><span class="k">病名</span><span class="v">${esc(r.disease?.name)}<span class="confidence">${(r.disease?.confidence ?? '').toFixed ? (r.disease.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.disease?.evidence_refs)}</span></div>
       <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}<span class="confidence">${r.syndrome?.confidence != null ? (r.syndrome.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.syndrome?.evidence_refs)}</span></div>
       <div class="clinical-line"><span class="k">治法</span><span class="v">${esc(r.treatment?.text)}${ev(r.treatment?.evidence_refs)}</span></div>
-      <div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(r.formula?.name)}${r.formula?.source_id ? ` <span class="ev-refs">${esc(r.formula.source_id)}</span>` : ''}<div class="herb-list">${herbs}</div></span></div>
+      ${formulaLines}
+      ${treatmentLines}
       ${missing ? `<div class="missing-info"><strong>尚缺信息</strong><ul>${missing}</ul></div>` : ''}
     </div>`;
 }
