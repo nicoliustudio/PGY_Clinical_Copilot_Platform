@@ -131,7 +131,7 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const auth = result.formula.authority;
+      const auth = result.formula?.authority ?? 'GENERATED_DRAFT';
       if (auth === 'NORMATIVE') normative++;
       else if (auth === 'GENERATED_DRAFT') generatedDraft++;
       else if (auth === 'BLOCKED') blocked++;
@@ -146,7 +146,7 @@ async function main(): Promise<void> {
         goldTotal++;
         dHit = matchDisease(result.disease.name, gold);
         sHit = matchSyndrome(result.syndrome.name, gold);
-        fHit = matchFormula(result.formula.source_id, gold);
+        fHit = matchFormula(result.formula?.source_id ?? '', gold);
         if (dHit) diseaseHit++;
         if (sHit) syndromeHit++;
         if (fHit) formulaHit++;
@@ -168,8 +168,8 @@ async function main(): Promise<void> {
         authority: auth,
         disease: result.disease.name,
         syndrome: result.syndrome.name,
-        formulaName: result.formula.name,
-        sourceId: result.formula.source_id,
+        formulaName: result.formula?.name ?? '',
+        sourceId: result.formula?.source_id ?? '',
         ms: Date.now() - started,
         toolCalls: trace.toolCalls.length,
         toolTrace: trace.toolCalls,
@@ -185,7 +185,7 @@ async function main(): Promise<void> {
       console.log(
         `[${c.key}] ${auth.padEnd(15)} ${layer.padEnd(24)} ` +
           `病=${result.disease.name || '-'} 证=${result.syndrome.name || '-'} ` +
-          `方=${result.formula.name || '-'} ` +
+          `方=${result.formula?.name || '-'} ` +
           (gold ? `hit=病${dHit ? 1 : 0}/证${sHit ? 1 : 0}/方${fHit ? 1 : 0}` : '无gold') +
           ` ${Date.now() - started}ms`,
       );

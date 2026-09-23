@@ -49,7 +49,7 @@ for (const c of dataset.cases.filter((x) => keys.includes(x.key))) {
 
   const isClinical = result.mode === 'clinical';
   const safetyBlock = isClinical && result.safety.status === 'BLOCK';
-  const formulaAuthorityError = isClinical && result.formula.authority === 'BLOCKED' && result.safety.status !== 'BLOCK';
+  const formulaAuthorityError = isClinical && result.formula?.authority === 'BLOCKED' && result.safety.status !== 'BLOCK';
 
   let selectedSeen = false;
   let overwrittenAfterSelection = false;

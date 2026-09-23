@@ -18,7 +18,7 @@ async function measurePlannerLatency(): Promise<number> {
       capabilityNeeds: [],
       uncertainties: [],
     },
-    safety: { status: 'PASS', reasons: [], blockNormativeCommit: false, reviewRequired: false, reviewReasons: [] },
+    safety: { status: 'PASS', reasons: [], reviewRequired: false, reviewReasons: [] },
     availableCapabilities: [],
   });
   return Date.now() - started;
@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     elapsedMs: elapsed,
     resultMode: result.mode,
     authorityReached: authority.status,
-    formulaAuthority: result.mode === 'clinical' ? result.formula.authority : undefined,
+    formulaAuthority: result.mode === 'clinical' ? result.formula?.authority : undefined,
     strategy: trace.clinicalStrategy
       ? { goal: trace.clinicalStrategy.goal, decisionQuestion: trace.clinicalStrategy.decisionQuestion }
       : null,

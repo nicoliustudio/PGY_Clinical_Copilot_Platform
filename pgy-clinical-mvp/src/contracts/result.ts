@@ -22,6 +22,10 @@ export const clinicalResultSchema = z.object({
     text: z.string(),
     evidence_refs: z.array(z.string()),
   }),
+  /**
+   * Legacy compatibility projection of a committed herbal product.
+   * Kernel Commit Boundary：无 committed herbal product 时不得制造空 formula 对象。
+   */
   formula: z.object({
     authority: z.enum(FORMULA_AUTHORITY_STATES),
     formula_id: z.string(),
@@ -36,7 +40,7 @@ export const clinicalResultSchema = z.object({
     source_case_ref: z.string().optional(),
     visit_ref: z.string().optional(),
     source_evidence_ref: z.string().optional(),
-  }),
+  }).optional(),
   /** V2.1.1 deterministic multi-formula projection; formula remains the primary compatibility field. */
   formula_set: z.array(z.object({
     formula_ref: z.string(),

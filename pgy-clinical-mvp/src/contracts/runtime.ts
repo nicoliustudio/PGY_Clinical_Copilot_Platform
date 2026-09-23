@@ -7,6 +7,7 @@ import type { ClinicalWorkspace, WorkspaceControlPort } from './workspace.js';
 import type { ClinicalStrategy } from './clinical-strategy.js';
 import type { ClinicalRequestIR } from '../control-plane-v2/types.js';
 import type { DurableArtifactEnvelopeV21, ObligationGraphV21, TypedBlockerV21, ControlPlanePolicyV21 } from '../control-plane-v21/types.js';
+import type { CommitLedger } from '../platform/commit/commit-ledger.js';
 
 /**
  * V2.1 runtime 拥有的 typed blocker（模型无写入通道）。
@@ -25,7 +26,6 @@ export type RequestCompileStatusV21 = 'COMPILED' | 'FAILED';
 export interface SafetyDecision {
   status: 'PASS' | 'CAUTION' | 'BLOCK';
   reasons: string[];
-  blockNormativeCommit: boolean;
   /** H15.4：确定性 clinician review requirement（非 Agent 决定，由 structured risk attributes 导出）。 */
   reviewRequired: boolean;
   reviewReasons: string[];
@@ -79,6 +79,8 @@ export interface RuntimeContext {
   harness: HarnessControlPort;
   workspace: ClinicalWorkspace;
   workspaceStore: WorkspaceControlPort;
+  /** Kernel Commit Boundary：本次 run 的唯一权威交付真相（Kernel-owned append-only ledger）。 */
+  commitLedger: CommitLedger;
   /** V2.1 shadow/cutover state. Uses the same Request IR with parameterized planning semantics. */
   controlPlaneV21?: {
     requestIR: ClinicalRequestIR;

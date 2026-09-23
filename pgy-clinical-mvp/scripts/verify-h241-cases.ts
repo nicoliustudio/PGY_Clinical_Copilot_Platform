@@ -20,13 +20,13 @@ for (const c of dataset.cases.filter((x) => keys.has(x.key))) {
   console.log('evidenceEvents:', JSON.stringify(trace.evidenceEvents.map((e) => e.type)));
   console.log('candidateComparison:', JSON.stringify(trace.candidateComparison));
   if (result.mode === 'clinical') {
-    console.log('candidate_ref:', result.formula.candidate_ref ?? null);
+    console.log('candidate_ref:', result.formula?.candidate_ref ?? null);
     console.log('hydration:', JSON.stringify({
-      authority: result.formula.authority,
-      formula_id: result.formula.formula_id,
-      source_id: result.formula.source_id,
-      composition: result.formula.composition,
-      name: result.formula.name,
+      authority: result.formula?.authority,
+      formula_id: result.formula?.formula_id,
+      source_id: result.formula?.source_id,
+      composition: result.formula?.composition,
+      name: result.formula?.name,
     }));
   } else {
     console.log('mode:', result.mode);

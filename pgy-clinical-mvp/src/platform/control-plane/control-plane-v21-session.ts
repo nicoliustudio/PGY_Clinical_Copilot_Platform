@@ -9,6 +9,7 @@ import { projectOutcomeCoverageV21, type OutcomeProjectionV21 } from '../../cont
 import type { ControlPlanePolicyV21 } from '../../control-plane-v21/types.js';
 import { deriveCapabilityEvidenceClosures } from '../../clinical/capability-evidence.js';
 import { deriveCapabilityDeliveryClosures } from '../../clinical/capability-delivery.js';
+import type { CommitLedger } from '../commit/commit-ledger.js';
 import {
   collectBoundArtifactsV21,
   evidenceVolume,
@@ -152,6 +153,44 @@ export function applyEvidenceNeedBlocker(
 /** 最终结果装配输入：outcome coverage（确定性，不由模型重新总结）。 */
 export function outcomeCoverage(state: NonNullable<RuntimeContext['controlPlaneV21']>): OutcomeProjectionV21[] {
   return projectOutcomeCoverageV21(state.graph, state.durableArtifacts);
+}
+
+/**
+ * P0 Cutover：outcome coverage 的唯一 DELIVERED 真相来自 Kernel CommitLedger。
+ * Workspace durableArtifacts / treatmentDeliveries / completion state 只能决定 NOT_DELIVERABLE/INCOMPLETE，
+ * 不得再直接产生 DELIVERED。No matching CommitRecord → never DELIVERED。
+ */
+export function ledgerOutcomeCoverage(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+  ledger: CommitLedger,
+): OutcomeProjectionV21[] {
+  return outcomeCoverage(state).map((item) => {
+    if (ledger.delivered(item.outcome).length > 0) return { ...item, status: 'DELIVERED' as const };
+    if (item.status === 'DELIVERED') return { ...item, status: 'INCOMPLETE' as const };
+    return item;
+  });
+}
+
+/** P0：completion（satisfied）唯一真相 = graph terminal + CommitLedger。 */
+export function ledgerContractSatisfied(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+  ledger: CommitLedger,
+): boolean {
+  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  const coverage = ledgerOutcomeCoverage(state, ledger);
+  return [...required].every((outcome) => coverage.find((item) => item.outcome === outcome)?.status === 'DELIVERED');
+}
+
+/** P0：resolved（terminal）唯一真相 = CommitLedger DELIVERED ∪ graph NOT_DELIVERABLE ∪ graph BLOCKED。 */
+export function ledgerContractResolved(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+  ledger: CommitLedger,
+): boolean {
+  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  return [...required].every((outcome) => {
+    if (ledger.delivered(outcome).length > 0) return true;
+    return state.graph.nodes.some((n) => n.rootOutcomes.includes(outcome) && (n.status === 'NOT_DELIVERABLE' || n.status === 'BLOCKED'));
+  });
 }
 
 

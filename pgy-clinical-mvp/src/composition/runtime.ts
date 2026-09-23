@@ -73,9 +73,11 @@ export async function createClinicalRuntime(
   const prompt = await loadPromptProfile(
     mode === 'harness' ? 'clinical-primary' : 'clinical-primary-classic',
   );
+  // Kernel Commit Boundary：formula source/product binding 校验已移至 CommitCoordinator（commit 阶段 fail-closed）。
+  // FormulaAuthorityStage 保留为只读/审计占位关卡，不再依据 proposal.formula.authority 放行。
   const authority = new AuthorityPipeline([
     new SafetyInvariantStage(),
-    new FormulaAuthorityStage(new DeterministicFormulaAuthority()),
+    new FormulaAuthorityStage(),
   ]);
 
   return new ClinicalRuntime(

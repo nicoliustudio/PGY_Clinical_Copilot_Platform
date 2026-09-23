@@ -98,7 +98,8 @@ test('已确认高风险由 Agent 之外的确定性阶段阻断 NORMATIVE', asy
   const { authority } = await runtime.run('一小时换五六片卫生巾，站起来眼前发黑');
   assert.equal(authority.status, 'BLOCKED');
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
-  assert.equal(authority.proposal.formula.authority, 'BLOCKED');
+  // Kernel Commit Boundary：safety BLOCK 不再把 formula 降级为 BLOCKED（正交）。
+  assert.equal(authority.proposal.formula?.authority, 'NORMATIVE');
   assert.equal(authority.proposal.safety.status, 'BLOCK');
   assert.ok(authority.decisions.some((d) => d.stage === 'safety.invariant'));
 });
@@ -114,30 +115,29 @@ test('NORMATIVE 必须经过 Formula Authority，Agent 无法绕过', async () =
   assert.ok(authority.decisions.some((d) => d.stage === 'formula.authority'));
 });
 
-test('组成被篡改时 Formula Authority 阻断 NORMATIVE', async () => {
+test('formula binding 校验已移至 Commit（proposal 层不再依据 authority 阻断）', async () => {
   const runtime = await buildTestRuntime({
     understand: () => baseUnderstanding('clinical'),
     propose: () => clinicalProposal(),
-    validateFormula: () => false,
   });
 
-  const { authority } = await runtime.run('常规病例');
-  assert.equal(authority.status, 'BLOCKED');
-  if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
-  assert.equal(authority.proposal.formula.authority, 'BLOCKED');
-  assert.equal(authority.proposal.safety.status, 'PASS');
+  const result = await runtime.run('常规病例');
+  assert.equal(result.authority.status, 'ALLOWED');
+  if (result.authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
+  assert.equal(result.authority.proposal.formula?.authority, 'NORMATIVE');
+  // 无 candidate_ref → 无 canonical formula commit（fail-closed，不伪造空方）；clinical-assessment 仍以 MODEL_DERIVED 提交。
+  assert.equal(result.commits.filter((c) => c.provenance.kind === 'CANONICAL_SOURCE').length, 0);
+  assert.equal(result.commits.some((c) => c.outcome === 'outcome:clinical-assessment'), true);
 });
 
-test('无真实 source 时 NORMATIVE 被阻断（fallback 也不能伪造权威）', async () => {
+test('无 candidate_ref 时 source 缺失不产生 committed formula（不伪造权威）', async () => {
   const runtime = await buildTestRuntime({
     understand: () => baseUnderstanding('clinical'),
-    // 即使 validateFormula 声称组成存在，source_id 缺失仍不得 NORMATIVE
     propose: () => clinicalProposal({ sourceId: '' }),
-    validateFormula: () => true,
   });
 
-  const { authority } = await runtime.run('常规病例');
-  assert.equal(authority.status, 'BLOCKED');
-  if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
-  assert.equal(authority.proposal.formula.authority, 'BLOCKED');
+  const result = await runtime.run('常规病例');
+  if (result.authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
+  // 无 candidate_ref → 无 canonical formula commit（不伪造权威）。
+  assert.equal(result.commits.filter((c) => c.provenance.kind === 'CANONICAL_SOURCE').length, 0);
 });

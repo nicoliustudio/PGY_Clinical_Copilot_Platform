@@ -8,6 +8,7 @@ import { HarnessSession } from '../../platform/runtime/harness-session.js';
 import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../../platform/workspace/clinical-workspace.js';
 import { ClassicSemanticNeedResolver } from './semantic-need-resolver.js';
 import { emptyClinicalStrategy } from '../../contracts/clinical-strategy.js';
+import { CommitLedger } from '../../platform/commit/commit-ledger.js';
 
 export interface ClassicRuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
@@ -53,6 +54,7 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
       harness: undefined as unknown as RuntimeContext['harness'],
       workspace,
       workspaceStore,
+      commitLedger: new CommitLedger(),
     } satisfies RuntimeContext;
     const harness = new HarnessSession(context, this.deps.capabilities, this.deps.skills, this.deps.tools);
     context.harness = harness;

@@ -54,7 +54,7 @@ export async function planStrategy(
     `用户输入：\n${ctx.input}`,
     `临床理解（facts / intents / risks / gaps / uncertainties）：\n${JSON.stringify(ctx.understanding, null, 2)}`,
     `患者快照：\n${JSON.stringify(snapshot, null, 2)}`,
-    `初始安全处置：${ctx.safety.status}${ctx.safety.blockNormativeCommit ? '（当前禁止提交规范方）' : ''}`,
+    `初始安全处置：${ctx.safety.status}`,
     `可用高层能力：\n${capabilities || '（无额外能力）'}`,
   ].join('\n\n');
 

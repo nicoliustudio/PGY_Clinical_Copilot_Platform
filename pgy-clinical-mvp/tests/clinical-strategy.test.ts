@@ -33,7 +33,7 @@ test('Planner 输出 schema-valid ClinicalStrategy', async () => {
     {
       input: '子宫肌瘤，经量过多如注夹血块',
       understanding: baseUnderstanding('clinical'),
-      safety: { status: 'CAUTION', reasons: [], blockNormativeCommit: false, reviewRequired: false, reviewReasons: [] },
+      safety: { status: 'CAUTION', reasons: [], reviewRequired: false, reviewReasons: [] },
       availableCapabilities: [],
     },
     fakeModel(expected),

@@ -46,21 +46,19 @@ test('H15.4 UNCERTAIN/medium → 不自动升级为 review', () => {
 
 // ---- SafetyPort 映射 ----
 
-test('H15.4 SafetyPort: urgent → BLOCK + blockNormativeCommit=true + reviewRequired=true', async () => {
+test('H15.4 SafetyPort: urgent → BLOCK + reviewRequired=true', async () => {
   const d = await new RiskHypothesisSafetyPort().evaluate(
     understanding([risk({ disposition: 'urgent', severity: 'high' })]),
   );
   assert.equal(d.status, 'BLOCK');
-  assert.equal(d.blockNormativeCommit, true);
   assert.equal(d.reviewRequired, true);
 });
 
-test('H15.4 SafetyPort: high 非 urgent → blockNormativeCommit=false + reviewRequired=true', async () => {
+test('H15.4 SafetyPort: high 非 urgent → reviewRequired=true', async () => {
   const d = await new RiskHypothesisSafetyPort().evaluate(
     understanding([risk({ disposition: 'routine', severity: 'high' })]),
   );
   assert.equal(d.status, 'PASS');
-  assert.equal(d.blockNormativeCommit, false);
   assert.equal(d.reviewRequired, true);
   assert.equal(d.reviewReasons.length, 1);
 });
@@ -70,7 +68,6 @@ test('H15.4 SafetyPort: routine/medium → 无 review 无 block', async () => {
     understanding([risk({ disposition: 'routine', severity: 'medium' })]),
   );
   assert.equal(d.status, 'PASS');
-  assert.equal(d.blockNormativeCommit, false);
   assert.equal(d.reviewRequired, false);
   assert.deepEqual(d.reviewReasons, []);
 });
@@ -102,7 +99,7 @@ test('H15.4 result flow: high-severity 非 urgent → reviewRequired=true 且不
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
   assert.equal(authority.proposal.safety.status, 'PASS');
   assert.equal(authority.proposal.safety.reviewRequired, true);
-  assert.equal(authority.proposal.formula.authority, 'GENERATED_DRAFT');
+  assert.equal(authority.proposal.formula?.authority, 'GENERATED_DRAFT');
 });
 
 test('H15.4 result flow: urgent → block 且保留 reviewRequired=true', async () => {
@@ -118,5 +115,6 @@ test('H15.4 result flow: urgent → block 且保留 reviewRequired=true', async 
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
   assert.equal(authority.proposal.safety.status, 'BLOCK');
   assert.equal(authority.proposal.safety.reviewRequired, true);
-  assert.equal(authority.proposal.formula.authority, 'BLOCKED');
+  // Kernel Commit Boundary：safety 与 formula authority 正交，safety BLOCK 不再把 formula 降级为 BLOCKED。
+  assert.equal(authority.proposal.formula?.authority, 'NORMATIVE');
 });

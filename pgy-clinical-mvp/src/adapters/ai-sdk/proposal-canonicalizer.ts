@@ -24,15 +24,9 @@ export async function canonicalizeProposalSubmit(
   }
 
   const ref = input.candidate_ref;
-  let formula: ClinicalResult['formula'] = {
-    authority: 'GENERATED_DRAFT',
-    formula_id: '',
-    name: '',
-    composition: [],
-    source_id: '',
-    evidence_refs: [],
-    candidate_ref: ref,
-  };
+  // Kernel Commit Boundary：canonical hydrate 失败不得降级为空的 GENERATED_DRAFT 产品。
+  // 只有当 candidate_ref 能解析到 canonical source/product（NORMATIVE）或 P2 case-derived 时才产出 formula。
+  let formula: ClinicalResult['formula'];
 
   if (ref) {
     const candidate = context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula');

@@ -9,16 +9,19 @@ import type { ClinicalStrategy } from '../../contracts/clinical-strategy.js';
 import { AuthorityPipeline } from '../authority/pipeline.js';
 import { EVIDENCE_EVENT_TYPES } from '../workspace/evidence-projection.js';
 import { HYPOTHESIS_EVENT_TYPES } from '../workspace/hypothesis-projection.js';
-import { getCanonicalFormula } from '../../clinical/formula.js';
+import { getCanonicalFormula, validateNormativeFormula } from '../../clinical/formula.js';
 import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { computeModificationEvidenceClosure } from '../../clinical/modification-evidence.js';
 import { loadIndex } from '../../knowledge/build.js';
 import { setFormulaIdentityTrace, type FormulaIdentityTrace } from '../../trace.js';
-import { contractResolved, contractSatisfied, outcomeCoverage, refreshControlPlaneV21 } from '../control-plane/control-plane-v21-session.js';
+import { ledgerContractResolved, ledgerContractSatisfied, ledgerOutcomeCoverage, refreshControlPlaneV21 } from '../control-plane/control-plane-v21-session.js';
 import { projectFormulaSet } from '../../control-plane-v2/result-projection.js';
 import type { ProjectedFormula } from '../../control-plane-v2/result-projection.js';
 import type { OutcomeProjectionV21 } from '../../control-plane-v21/result-projection.js';
 import { treatmentDeliveryArtifacts, treatmentDeliveryCompleteness } from '../../clinical/capability-delivery.js';
+import { CandidateHandleRegistry } from '../commit/candidate-handle-registry.js';
+import { CommitCoordinator, type CommitEnvironment } from '../commit/commit-coordinator.js';
+import type { CommitRecord } from '../../contracts/commit.js';
 
 export interface ClinicalRunResult extends RuntimeRunResult {
   workspace: ClinicalWorkspace;
@@ -33,6 +36,11 @@ export interface ClinicalRunResult extends RuntimeRunResult {
   agentLoop?: AgentLoopTrace;
   strategy: ClinicalStrategy;
   contextMetrics?: ContextMetrics;
+  /**
+   * Kernel Commit Boundary：本次 run 的唯一权威交付真相。
+   * 下游（final / UI / audit）只能从这些 committed records 投影，不得从 Workspace/Proposal 重建。
+   */
+  commits: CommitRecord[];
   /** Phase 8：确定性结果装配（outcome 覆盖 + 方剂集合投影），不由模型重新总结。 */
   controlPlane?: {
     outcomeCoverage: OutcomeProjectionV21[];
@@ -50,7 +58,7 @@ export interface ClinicalRunResult extends RuntimeRunResult {
  */
 function recordCandidateDecision(proposal: AgentResult, context: RuntimeContext): void {
   if (proposal.mode !== 'clinical') return;
-  const ref = proposal.formula.candidate_ref;
+  const ref = proposal.formula?.candidate_ref;
   if (!ref) return;
   for (const candidate of context.workspace.candidates) {
     if (candidate.kind !== 'formula') continue;
@@ -68,13 +76,9 @@ function recordCandidateDecision(proposal: AgentResult, context: RuntimeContext)
  */
 async function finalizeSourceClosures(proposal: AgentResult, context: RuntimeContext): Promise<void> {
   if (proposal.mode !== 'clinical') return;
-  const ref = proposal.formula.candidate_ref;
+  const ref = proposal.formula?.candidate_ref;
   const candidate = ref ? context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula') : undefined;
 
-  // H15.6 同源多方水合：以 P1 sourceId 为 gate，而不是 sourceAuthority 字段。
-  // sourceAuthority 只在 formula.search_candidates 单一路径被写入 payload；而 knowledge.search /
-  // formula.search_normative 同样会产出 P1 候选却未标注该字段，导致同源多方被静默丢弃。
-  // sourceId 以 `P1:` 为稳定前缀，且 hydrateSourceFormulaSet 内部已 fail-closed 校验 sourceTier === 'P1'。
   if (candidate?.sourceId?.startsWith('P1:')) {
     try {
       const idx = await loadIndex();
@@ -102,25 +106,24 @@ function recordHypothesisDecision(proposal: AgentResult, context: RuntimeContext
 }
 
 /**
- * candidate_ref → canonical formula record，再进入 Authority 校验。
- * H7：canonical hydrate 由 Harness 内部完成，不依赖模型重建 composition。
- *
+ * candidate_ref → canonical formula record。
  * H7.1：candidate_ref 是最终 formula identity 的唯一来源。模型提供的
  * name / formula_id / source_id / composition 不得覆盖 canonical data。
- * 若 candidate_ref 不存在，保持现有 fail-closed / non-normative 行为。
+ * Kernel Commit Boundary 切后：canonical hydrate 失败**不再**降级为空 GENERATED_DRAFT；
+ * 缺失即缺失（formula 为 undefined），由 commit 阶段 fail-closed。
  */
 export async function hydrateFormulaProposal(proposal: AgentResult, context: RuntimeContext): Promise<AgentResult> {
   if (proposal.mode !== 'clinical') return proposal;
-  const ref = proposal.formula.candidate_ref;
-  if (!ref) return proposal;
+  const formula = proposal.formula;
+  const ref = formula?.candidate_ref;
+  if (!ref || !formula) return proposal;
   const candidate = context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula');
   if (!candidate?.formulaId || !candidate?.sourceId) return proposal;
-  // 已 hydrate 的 candidate（或测试 fixture）直接复用 composition，避免重复 hydrate。
   if (candidate.composition && candidate.composition.length > 0) {
     return {
       ...proposal,
       formula: {
-        ...proposal.formula,
+        ...formula,
         formula_id: candidate.formulaId,
         source_id: candidate.sourceId,
         composition: candidate.composition,
@@ -128,13 +131,12 @@ export async function hydrateFormulaProposal(proposal: AgentResult, context: Run
       },
     };
   }
-  // H7 canonical hydrate：card 级 candidate 无 composition，由 Harness 内部从 canonical store 查找。
   const canonical = await getCanonicalFormula(candidate.sourceId, candidate.formulaId, context.runId);
   if (!canonical) return proposal;
   return {
     ...proposal,
     formula: {
-      ...proposal.formula,
+      ...formula,
       formula_id: canonical.formulaId,
       source_id: canonical.sourceId,
       composition: [canonical.composition],
@@ -144,7 +146,135 @@ export async function hydrateFormulaProposal(proposal: AgentResult, context: Run
 }
 
 /**
- * 稳定的 Runtime 外壳：prepare → reason/propose → compare/hydrate → authority。
+ * 从 RuntimeContext + proposal 组装 Kernel Commit Environment。
+ * 这里只做「数据适配」，不含任何业务/模态分支；provider/field 校验全部来自 manifest / 闭世界核心。
+ */
+function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult): CommitEnvironment {
+  return {
+    safety: {
+      status: context.safety.status,
+      reviewRequired: context.safety.reviewRequired,
+      reasons: context.safety.reasons,
+    },
+    readReasoningProduct: (ref) => {
+      if (ref === 'clinical-assessment') {
+        if (proposal.mode !== 'clinical') return undefined;
+        return {
+          disease: proposal.disease?.name ?? '',
+          syndrome: proposal.syndrome?.name ?? '',
+          treatment: proposal.treatment?.text ?? '',
+        };
+      }
+      const deliveries = treatmentDeliveryArtifacts(context.workspace);
+      const idx = Number.parseInt(ref, 10);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= deliveries.length) return undefined;
+      return deliveries[idx] as unknown as Record<string, unknown>;
+    },
+    validateDelivery: (outcome, product) => {
+      if (outcome === 'outcome:clinical-assessment') {
+        const disease = typeof product.disease === 'string' && product.disease.trim().length > 0;
+        const syndrome = typeof product.syndrome === 'string' && product.syndrome.trim().length > 0;
+        const treatment = typeof product.treatment === 'string' && product.treatment.trim().length > 0;
+        if (disease && syndrome && treatment) {
+          const provider = context.capabilities.find((c) => c.provides?.includes('outcome:clinical-assessment'));
+          return { ok: true, providerId: provider?.id ?? 'clinical-core' };
+        }
+        return { ok: false, code: 'MISSING_REQUIRED_FIELDS', missing: ['disease', 'syndrome', 'treatment'] };
+      }
+      const completeness = treatmentDeliveryCompleteness(context.capabilities, product);
+      if (!completeness.complete) {
+        return { ok: false, code: 'MISSING_REQUIRED_FIELDS', missing: completeness.missingFields };
+      }
+      if (!completeness.capabilityId) return { ok: false, code: 'NO_PROVIDER' };
+      return { ok: true, providerId: completeness.capabilityId };
+    },
+    hydrateCanonicalCandidate: async (truth) => {
+      const sep = truth.canonicalKey.indexOf('::');
+      if (sep <= 0) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+      const sourceId = truth.canonicalKey.slice(0, sep);
+      const formulaId = truth.canonicalKey.slice(sep + 2);
+      const canonical = await getCanonicalFormula(sourceId, formulaId, context.runId);
+      if (!canonical) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+      // P0：composition / structured product facts binding validation（复用现有确定性 validator）。
+      if (typeof truth.composition === 'string' && truth.composition.trim().length > 0) {
+        const validation = await validateNormativeFormula({ sourceId, formulaId, composition: truth.composition });
+        if (!validation.valid) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+      }
+      const provider = context.capabilities.find((c) => c.provides?.includes('outcome:clinical-assessment'));
+      return {
+        ok: true,
+        providerId: provider?.id ?? 'clinical-core',
+        product: {
+          name: canonical.name,
+          composition: [canonical.composition],
+          source_id: canonical.sourceId,
+          formula_id: canonical.formulaId,
+        },
+        sourceRefs: [canonical.sourceId],
+      };
+    },
+  };
+}
+
+/** 依据 proposal + workspace，把 REQUIRED delivery 意图提交进 Kernel Commit Ledger（fail-closed）。 */
+async function commitDeliveries(
+  context: RuntimeContext,
+  proposal: AgentResult,
+  registry: CandidateHandleRegistry,
+): Promise<CommitRecord[]> {
+  const coordinator = new CommitCoordinator(registry, context.commitLedger);
+  const env = buildCommitEnvironment(context, proposal);
+  const records: CommitRecord[] = [];
+  if (proposal.mode !== 'clinical') return records;
+
+  // 0) clinical assessment（baseline outcome）—— MODEL_DERIVED，闭世界核心完整性校验。
+  const assessment = await coordinator.commit(
+    { outcome: 'outcome:clinical-assessment', reasoningArtifactRef: 'clinical-assessment' },
+    env,
+  );
+  if (assessment.ok) records.push(assessment.record);
+
+  // 1) herbal formula delivery：Agent 只能引用候选；canonical identity + composition binding 由 Kernel 解析并水合。
+  const candidateRef = proposal.formula?.candidate_ref;
+  if (candidateRef) {
+    const candidate = context.workspace.candidates.find(
+      (c) => c.kind === 'formula' && c.id === candidateRef,
+    );
+    if (candidate?.sourceId && candidate?.formulaId) {
+      const handle = registry.issue({
+        kind: candidate.kind,
+        canonicalKey: `${candidate.sourceId}::${candidate.formulaId}`,
+        sourceId: candidate.sourceId,
+        productId: candidate.formulaId,
+        composition: candidate.composition?.join(''),
+        provenanceKind: 'CANONICAL_SOURCE',
+      });
+      const result = await coordinator.commit(
+        { outcome: 'outcome:clinical-assessment', candidateHandle: handle },
+        env,
+      );
+      if (result.ok) records.push(result.record);
+    }
+  }
+
+  // 2) treatment-form delivery：Agent 的 advisory 载荷经 manifest field 校验后才 commit。
+  const deliveries = treatmentDeliveryArtifacts(context.workspace);
+  for (let i = 0; i < deliveries.length; i++) {
+    const delivery = deliveries[i];
+    const outcome = typeof delivery.outcome === 'string' ? delivery.outcome : '';
+    if (!outcome) continue;
+    const result = await coordinator.commit(
+      { outcome, reasoningArtifactRef: String(i) },
+      env,
+    );
+    if (result.ok) records.push(result.record);
+  }
+
+  return records;
+}
+
+/**
+ * 稳定的 Runtime 外壳：prepare → reason/propose → commit → authority → project。
  * 业务能力应通过注册数据接入，而不是在此处新增分支。
  */
 export class ClinicalRuntime {
@@ -161,39 +291,44 @@ export class ClinicalRuntime {
     const output = await this.primaryAgent.run(context, onEvent);
     recordCandidateDecision(output.proposal, context);
     recordHypothesisDecision(output.proposal, context);
-    const rawFormula = output.proposal.mode === 'clinical' ? output.proposal.formula : undefined;
     const proposal = await hydrateFormulaProposal(output.proposal, context);
-    // H15.6：确定性同源多方水合 + 加减证据闭环（先于 Authority，不改处方权）。
     await finalizeSourceClosures(output.proposal, context);
+
     // canonical safety truth：模型 proposal.safety 不覆盖 canonical safety disposition。
+    // 安全与 formula authority 正交；CAUTION 的 review 语义由 reviewRequired/reviewReasons + commit 的 executionClearance 承载。
     const withCanonicalSafety: AgentResult = proposal.mode === 'clinical'
       ? {
           ...proposal,
           safety: {
-            status: context.safety.blockNormativeCommit ? 'BLOCK' : 'PASS',
+            status: context.safety.status === 'BLOCK' ? 'BLOCK' : 'PASS',
             reviewRequired: context.safety.reviewRequired,
             reviewReasons: context.safety.reviewReasons,
           },
         }
       : proposal;
+
+    // Kernel Commit Boundary：唯一权威交付真相（fail-closed hydrate + manifest field 校验 + 正交 execution clearance）。
+    const registry = new CandidateHandleRegistry();
+    const commits = await commitDeliveries(context, withCanonicalSafety, registry);
+
     const authority = await this.authority.resolve(withCanonicalSafety, context);
 
     // H8 Forensic：只记录 identity chain 进 Trace，不改变任何行为。
     if (proposal.mode === 'clinical') {
-      const ref = proposal.formula.candidate_ref;
+      const ref = proposal.formula?.candidate_ref;
       let canonicalFormula: FormulaIdentityTrace['canonicalFormula'];
       if (ref) {
-        const [sid, fid] = ref.split('::');
-        if (sid && fid) {
-          const c = await getCanonicalFormula(sid, fid);
+        const candidate = context.workspace.candidates.find((c) => c.kind === 'formula' && c.id === ref);
+        if (candidate?.sourceId && candidate?.formulaId) {
+          const c = await getCanonicalFormula(candidate.sourceId, candidate.formulaId);
           if (c) canonicalFormula = { sourceId: c.sourceId, formulaId: c.formulaId, name: c.name, composition: c.composition };
         }
       }
       const formulaDecision = authority.decisions.find((d) => d.stage === 'formula.authority');
       setFormulaIdentityTrace(context.runId, {
         candidateRef: ref,
-        rawFormula: rawFormula ? { name: rawFormula.name, sourceId: rawFormula.source_id, formulaId: rawFormula.formula_id, composition: rawFormula.composition } : undefined,
-        hydratedFormula: { sourceId: proposal.formula.source_id, formulaId: proposal.formula.formula_id, name: proposal.formula.name, composition: proposal.formula.composition },
+        rawFormula: proposal.formula ? { name: proposal.formula.name, sourceId: proposal.formula.source_id, formulaId: proposal.formula.formula_id, composition: proposal.formula.composition } : undefined,
+        hydratedFormula: proposal.formula ? { sourceId: proposal.formula.source_id, formulaId: proposal.formula.formula_id, name: proposal.formula.name, composition: proposal.formula.composition } : undefined,
         canonicalFormula,
         authorityBlockCode: formulaDecision?.reasons?.[0],
         authorityReasons: formulaDecision?.reasons,
@@ -227,6 +362,7 @@ export class ClinicalRuntime {
       agentLoop: output.agentLoop,
       strategy: context.strategy,
       contextMetrics: output.contextMetrics,
+      commits,
       ...(assembled.controlPlane ? { controlPlane: assembled.controlPlane } : {}),
     };
   }
@@ -246,7 +382,8 @@ export class ClinicalRuntime {
     const state = context.controlPlaneV21;
     if (!state || state.compileStatus !== 'COMPILED') return { proposal };
     refreshControlPlaneV21(context);
-    const coverage = outcomeCoverage(state);
+    // P0：coverage/DELIVERED/completion/readiness 的唯一真相来自 CommitLedger（+ graph terminal）。
+    const coverage = ledgerOutcomeCoverage(state, context.commitLedger);
     const notDeliverable = coverage.filter((o) => o.status === 'NOT_DELIVERABLE');
     const modelAllowed = state.requestIR.generationPolicy.knowledgeSource === 'MODEL_ALLOWED';
     const formulaSet = projectFormulaSet(
@@ -257,8 +394,8 @@ export class ClinicalRuntime {
       outcomeCoverage: coverage,
       formulaSet,
       selectedCandidateRef: context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef,
-      contractResolved: contractResolved(state),
-      contractSatisfied: contractSatisfied(state),
+      contractResolved: ledgerContractResolved(state, context.commitLedger),
+      contractSatisfied: ledgerContractSatisfied(state, context.commitLedger),
     };
     if (proposal.mode !== 'clinical') return { proposal, controlPlane };
 

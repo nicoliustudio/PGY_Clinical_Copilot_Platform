@@ -13,6 +13,7 @@ import { ToolRegistry } from '../registry/tool-registry.js';
 import { HarnessSession } from './harness-session.js';
 import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../workspace/clinical-workspace.js';
 import { deriveGraphV21 } from '../control-plane/control-plane-v21-session.js';
+import { CommitLedger } from '../commit/commit-ledger.js';
 
 export interface RuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
@@ -95,6 +96,7 @@ export class RuntimePreparer implements RuntimePreparationPort {
       harness: undefined as unknown as RuntimeContext['harness'],
       workspace,
       workspaceStore,
+      commitLedger: new CommitLedger(),
     };
 
     context.harness = new HarnessSession(

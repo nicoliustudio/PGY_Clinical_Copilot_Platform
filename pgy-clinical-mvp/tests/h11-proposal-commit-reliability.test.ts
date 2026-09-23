@@ -114,20 +114,18 @@ test('proposal.submit 使用 candidate_ref canonical hydrate（Runtime ownership
   const { ws } = workspaceWithCandidate();
   const out = await canonicalizeProposalSubmit(MINIMAL_CLINICAL, context(ws), DOCS);
   if (out.mode !== 'clinical') throw new Error('expected clinical');
-  assert.equal(out.formula.authority, 'NORMATIVE');
-  assert.equal(out.formula.formula_id, 'F:A');
-  assert.equal(out.formula.source_id, 'P1:A');
-  assert.equal(out.formula.composition[0], '药甲10g，药乙6g');
-  assert.equal(out.formula.candidate_ref, 'P1:A::F:A');
+  assert.equal(out.formula?.authority, 'NORMATIVE');
+  assert.equal(out.formula?.formula_id, 'F:A');
+  assert.equal(out.formula?.source_id, 'P1:A');
+  assert.equal(out.formula?.composition[0], '药甲10g，药乙6g');
+  assert.equal(out.formula?.candidate_ref, 'P1:A::F:A');
 });
 
-test('无 candidate_ref 时 Runtime 判定 GENERATED_DRAFT（不伪造 formula identity）', async () => {
+test('无 candidate_ref 时 Runtime 不伪造 formula identity（无 committed herbal product → 无 formula）', async () => {
   const { ws } = workspaceWithCandidate();
   const out = await canonicalizeProposalSubmit({ ...MINIMAL_CLINICAL, candidate_ref: undefined }, context(ws), DOCS);
   if (out.mode !== 'clinical') throw new Error('expected clinical');
-  assert.equal(out.formula.authority, 'GENERATED_DRAFT');
-  assert.equal(out.formula.formula_id, '');
-  assert.equal(out.formula.source_id, '');
+  assert.equal(out.formula, undefined);
 });
 
 test('canonical safety 不由模型控制（minimal schema 无 safety，输出占位 PASS）', async () => {

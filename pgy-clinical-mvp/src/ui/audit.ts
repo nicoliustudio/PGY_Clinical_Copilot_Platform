@@ -25,7 +25,7 @@ function hasEvidence(result: Extract<AgentResult, { mode: 'clinical' }>): boolea
   return (
     result.disease.evidence_refs.length > 0 ||
     result.syndrome.evidence_refs.length > 0 ||
-    result.formula.evidence_refs.length > 0
+    (result.formula?.evidence_refs.length ?? 0) > 0
   );
 }
 
@@ -51,14 +51,14 @@ export function classifyAudit(result: AgentResult, gold: GoldLabel): ClinicalAud
 
   const disease = matchDisease(result.disease.name, gold);
   const syndrome = matchSyndrome(result.syndrome.name, gold);
-  const formula = matchFormula(result.formula.source_id, gold);
+  const formula = matchFormula(result.formula?.source_id ?? '', gold);
   const exactMatch = { disease, syndrome, formula };
 
   if (disease && syndrome && formula) {
     return { classification: 'GOLD_MATCH', exactMatch, summary: '病名、辨证、方剂均与 gold 参考一致。' };
   }
 
-  if (result.formula.authority === 'BLOCKED') {
+  if (result.formula?.authority === 'BLOCKED') {
     return {
       classification: 'DECISION_ERROR',
       exactMatch,
@@ -75,14 +75,14 @@ export function classifyAudit(result: AgentResult, gold: GoldLabel): ClinicalAud
   }
 
   if (disease && syndrome && !formula) {
-    if (result.formula.authority === 'NORMATIVE') {
+    if (result.formula?.authority === 'NORMATIVE') {
       return {
         classification: 'GOLD_EVIDENCE_TENSION',
         exactMatch,
         summary: '病证命中，但 Agent 选择了与 gold 不同的规范方，二者均可能有依据，属于 gold/evidence 冲突。',
       };
     }
-    if (result.formula.evidence_refs.length === 0) {
+    if ((result.formula?.evidence_refs.length ?? 0) === 0) {
       return {
         classification: 'EVIDENCE_GAP',
         exactMatch,

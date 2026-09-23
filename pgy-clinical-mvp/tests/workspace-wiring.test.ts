@@ -88,10 +88,10 @@ test('formula candidate hydration 接入 proposal flow', async () => {
   const { authority } = await runtime.run('demo input');
   assert.equal(authority.status, 'ALLOWED');
   if (authority.proposal.mode !== 'clinical') throw new Error('expected clinical');
-  assert.equal(authority.proposal.formula.formula_id, 'F:demo');
-  assert.equal(authority.proposal.formula.source_id, 'P1:demo');
-  assert.deepEqual(authority.proposal.formula.composition, ['demo-herb']);
-  assert.equal(authority.proposal.formula.name, 'demo-formula');
+  assert.equal(authority.proposal.formula?.formula_id, 'F:demo');
+  assert.equal(authority.proposal.formula?.source_id, 'P1:demo');
+  assert.deepEqual(authority.proposal.formula?.composition, ['demo-herb']);
+  assert.equal(authority.proposal.formula?.name, 'demo-formula');
 });
 
 test('P2 formula.get_evidence 保留实际 candidateRef 关联，供 recovery 判断 evidence 已展开', () => {

@@ -98,16 +98,8 @@ export async function buildTestRuntime(
 
   const authority = new AuthorityPipeline([
     new SafetyInvariantStage(),
-    new FormulaAuthorityStage({
-      apply: async (input) => {
-        const valid =
-          input.sourceId.length > 0 &&
-          (options.validateFormula?.(input.sourceId) ?? true);
-        return valid
-          ? { authority: 'NORMATIVE' as const }
-          : { authority: 'BLOCKED' as const, reason: 'TEST_FORMULA_MUTATION' };
-      },
-    }),
+    // Kernel Commit Boundary：formula binding 校验移至 commit；此关卡仅作只读占位。
+    new FormulaAuthorityStage(),
   ]);
 
   return new ClinicalRuntime(
