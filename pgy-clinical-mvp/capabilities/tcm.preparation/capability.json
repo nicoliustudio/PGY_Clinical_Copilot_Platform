@@ -64,11 +64,15 @@
         "form",
         "disposition",
         "statement",
-        "sourceEvidenceRefs",
-        "details",
-        "usage"
+        "sourceEvidenceRefs"
       ],
-      "materialization": "REASONING_PRODUCT"
+      "materialization": "SOURCE_BOUND",
+      "sourceRequiredFields": [
+        "asset_id",
+        "title",
+        "provenance.raw_text",
+        "content_hash"
+      ]
     }
   ],
   "controlPlaneV21": {

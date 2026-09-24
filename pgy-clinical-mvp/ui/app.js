@@ -441,6 +441,18 @@ function renderClinical(r, authority) {
     formulaLines = `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(r.formula?.name)}${r.formula?.source_id ? ` <span class="ev-refs">${esc(r.formula.source_id)}</span>` : ''}<div class="herb-list">${herbs}</div></span></div>`;
   }
 
+  // First-class SOURCE_BOUND deliveries. Render every committed source member without filtering or
+  // reinterpreting it. JSON rendering is intentionally lossless: rich source topology (e.g. body/ear/water
+  // acupuncture regimens) must not be flattened into a generic points string in the UI.
+  const sourceBoundLines = Array.isArray(r.deliveries)
+    ? r.deliveries
+        .filter((d) => d?.source_bundle && d.outcome !== 'modality:herbal-formula')
+        .map((d) => {
+          const products = Array.isArray(d.source_bundle?.products) ? d.source_bundle.products : [];
+          return products.map((p) => `<div class="clinical-line treatment source-bound"><span class="k">来源治疗</span><span class="v">${esc(p.name || p.productId || d.outcome)} <span class="ev-refs">${esc(p.productId || '')}</span><div class="muted">${esc(d.outcome || '')} · ${esc(d.execution_clearance || '')}</div><pre class="source-payload">${esc(JSON.stringify(p.payload ?? {}, null, 2))}</pre></span></div>`).join('');
+        }).join('')
+    : '';
+
   let treatmentLines = '';
   if (Array.isArray(r.treatment_deliveries) && r.treatment_deliveries.length) {
     treatmentLines = r.treatment_deliveries.map((d) => {
@@ -456,6 +468,7 @@ function renderClinical(r, authority) {
       <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}<span class="confidence">${r.syndrome?.confidence != null ? (r.syndrome.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.syndrome?.evidence_refs)}</span></div>
       <div class="clinical-line"><span class="k">治法</span><span class="v">${esc(r.treatment?.text)}${ev(r.treatment?.evidence_refs)}</span></div>
       ${formulaLines}
+      ${sourceBoundLines}
       ${treatmentLines}
       ${missing ? `<div class="missing-info"><strong>尚缺信息</strong><ul>${missing}</ul></div>` : ''}
     </div>`;

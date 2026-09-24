@@ -35,7 +35,8 @@
     "delivery:check": "npm run test:delivery-integrity",
     "authority:check": "node scripts/check-authority-cutover.mjs",
     "test:authority-cutover": "node --import tsx --test tests/authority-cutover.invariants.test.ts tests/commit-boundary.invariants.test.ts tests/delivery-integrity.test.ts",
-    "authority-boundary:check": "node scripts/check-authority-boundary-closure.mjs"
+    "authority-boundary:check": "node scripts/check-authority-boundary-closure.mjs",
+    "truth-genesis:check": "node scripts/check-source-authority-closure.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.49",

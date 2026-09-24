@@ -439,7 +439,7 @@ const ACTION_PRINCIPLE = `## Action Principle
 - Reuse before retrieving. Before another retrieval, name the unresolved decision it could change (disease framing / syndrome judgment / treatment method / formula selection / safety disposition). If the workspace already has sufficient evidence for that decision, reuse existing evidence instead of retrieving again.
 - Do not retrieve merely to increase confidence or completeness. Do not continue broad retrieval after a viable canonical candidate exists unless new evidence could materially change the decision.
 - Commit workspace cognition atomically: when one clinical decision includes candidate focus, candidate assessment, hypothesis update, and uncertainty resolution, commit them together in one workspace.record_deliberation. Do not split one cognitive decision into multiple workspace writes unless later information genuinely changes the decision. Do not repeat workspace mutations that are already persisted.
-- Choose the clinical action you need. Do not manually fabricate canonical identity/source binding. The Kernel performs deterministic hydration and validation when you call delivery.commit.
+- Choose the clinical action you need. Do not manually fabricate canonical identity/source binding. For SOURCE_BOUND treatment outcomes, retrieve the exact asset with knowledge.get_asset, record that hydrated asset id in treatmentPlan.treatmentDeliveries[].sourceAssetRefs, and keep source-owned product facts out of the reasoning draft. The Kernel binds and validates the canonical asset when you call delivery.commit.
 - Reuse already activated capabilities, validated candidates, and existing deterministic results when still valid. Do not repeat execution chores that do not change the business objective.
 - When the clinical decision is sufficiently complete, commit every runnable required delivery with delivery.commit; only then submit the proposal. Do not repeat deterministic Kernel work.
 - Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty.`;
@@ -482,15 +482,20 @@ function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
       + 'from the list above; one delivery closes only its own outcome obligation. '
       + 'Use treatmentPlan.treatmentFormDecision only when exactly one delivery exists.',
       'A delivery must implement the very treatment form its `outcome` names. Never let a neighbouring or auxiliary technique '
-      + 'stand in for the requested form. Product completeness is manifest-driven: a delivery remains OPEN until every required '
-      + 'field declared by its capability is present.',
+      + 'stand in for the requested form. For reasoning-derived products, draft completeness is manifest-driven. For SOURCE_BOUND '
+      + 'products, the draft carries identity/qualification plus sourceAssetRefs; source-owned content is validated and frozen from the hydrated canonical asset at delivery.commit.',
     );
     for (const outcome of pending) {
       const capability = context.capabilities.find((c) => c.provides?.includes(outcome));
       const obligation = capability?.deliveryObligations?.[0];
       if (!obligation) continue;
       const fields = requiredDeliveryFields(obligation, outcome);
-      if (fields.length > 0) lines.push(`- ${outcome} required delivery fields: ${fields.join(', ')}`);
+      if (fields.length > 0) lines.push(`- ${outcome} required draft fields: ${fields.join(', ')}`);
+      if (obligation.materialization === 'SOURCE_BOUND') {
+        const sourceFields = [...new Set([...(obligation.sourceRequiredFields ?? []), ...(obligation.sourceRequiredFieldsByOutcome?.[outcome] ?? [])])];
+        lines.push(`- ${outcome} is SOURCE_BOUND: hydrate the selected canonical asset and set sourceAssetRefs; do not rewrite its source-owned facts in the draft.`);
+        if (sourceFields.length > 0) lines.push(`  Kernel source fields: ${sourceFields.join(', ')}`);
+      }
     }
   }
   return `${lines.join('\n')}\n`;

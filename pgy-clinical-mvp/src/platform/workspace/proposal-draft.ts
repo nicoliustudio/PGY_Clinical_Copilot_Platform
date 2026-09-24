@@ -1,34 +1,5 @@
 import type { ProposalSubmitInput } from '../../contracts/result.js';
 import type { ClinicalWorkspace, ProposalDraft, TreatmentFormDecision } from '../../contracts/workspace.js';
-import { getRuntimeAsset } from '../../knowledge/runtime-catalog.js';
-
-/**
- * 从 treatment-form decision 已引用的 Runtime Catalog 资产，确定性补齐组成 / 制法 / 用法。
- *
- * Core 不识别 GF-/AC-/PREP- 等业务前缀，也不识别“膏方/针灸/制剂”等 form 字符串；
- * 它只根据 sourceEvidenceRefs 尝试解析资产中已有的 presentation fields。
- * 这保持了：医学判断由 Agent，已选证据的机械呈现由 Runtime。
- */
-function hydrateTreatmentFormAdvisory(decision: TreatmentFormDecision, scopes: string[]): TreatmentFormDecision {
-  if (scopes.length === 0) return decision;
-  if (decision.sourceEvidenceRefs.length === 0) return decision;
-  for (const ref of decision.sourceEvidenceRefs) {
-    const asset = getRuntimeAsset(ref, scopes) as Record<string, unknown> | null;
-    if (!asset) continue;
-    const comp = asset.composition as { raw?: string } | undefined;
-    const preparation = typeof asset.preparation_process === 'string' ? asset.preparation_process : undefined;
-    const usage = typeof asset.usage === 'string' ? asset.usage : undefined;
-    if (comp?.raw || preparation || usage) {
-      return {
-        ...decision,
-        advisoryComposition: comp?.raw ? [comp.raw] : decision.advisoryComposition,
-        preparation: preparation ?? decision.preparation,
-        usage: usage ?? decision.usage,
-      };
-    }
-  }
-  return decision;
-}
 
 function renderTreatmentFormDecision(decision?: TreatmentFormDecision): string {
   if (!decision) return '';
@@ -54,9 +25,7 @@ export function buildProposalDraft(workspace: ClinicalWorkspace, scopes: string[
   const syndrome = workspace.patternAssessment?.primary?.statement ?? leading?.label;
 
   const plan = spine.treatmentPlan;
-  const effectivePlan = plan?.treatmentFormDecision
-    ? { ...plan, treatmentFormDecision: hydrateTreatmentFormAdvisory(plan.treatmentFormDecision, scopes) }
-    : plan;
+  const effectivePlan = plan;
   const treatment = effectivePlan
     ? [
         effectivePlan.primaryPrinciple,

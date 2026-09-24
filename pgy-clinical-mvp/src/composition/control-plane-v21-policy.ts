@@ -2,11 +2,12 @@ import type { ControlPlanePolicyV21 } from '../control-plane-v21/types.js';
 
 /**
  * Product composition policy, intentionally outside the generic planner.
- * A normal clinical run requires a clinical assessment outcome even when the user asks for a
- * treatment modality. Other products can supply a different baseline without changing planner code.
+ * Product baseline for this TCM copilot: clinical assessment + source-supported herbal treatment.
+ * Planner suppresses baseline modality outcomes when the user explicitly requires another modality
+ * or explicitly excludes that baseline modality; the planner remains business-name agnostic.
  */
 export const CONTROL_PLANE_V21_POLICY: ControlPlanePolicyV21 = {
-  baselineOutcomes: ['outcome:clinical-assessment'],
+  baselineOutcomes: ['outcome:clinical-assessment', 'modality:herbal-formula'],
 
   /**
    * V2.1.2：参数化完成要求。

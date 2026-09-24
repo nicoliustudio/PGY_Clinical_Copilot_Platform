@@ -111,12 +111,16 @@ test('delivery integrity: incomplete treatment payload cannot become DELIVERED',
   assert.equal(deriveCapabilityDeliveryClosures(capabilities, workspace, [])[0]?.status, 'DELIVERED');
 });
 
-test('delivery integrity: production manifests declare completeness outside Core', () => {
+test('delivery integrity: production manifests declare SOURCE_BOUND completeness outside Core', () => {
   const gaofang = JSON.parse(readFileSync(join(root, 'capabilities/gaofang/capability.json'), 'utf8')) as any;
   const external = JSON.parse(readFileSync(join(root, 'capabilities/tcm.external-therapy/capability.json'), 'utf8')) as any;
-  assert(gaofang.deliveryObligations[0].requiredFields.includes('preparation'));
-  assert(gaofang.deliveryObligations[0].requiredFields.includes('usage'));
-  assert(external.deliveryObligations[0].requiredFieldsByOutcome['modality:acupuncture'].includes('details.points'));
+  assert.equal(gaofang.deliveryObligations[0].materialization, 'SOURCE_BOUND');
+  assert(gaofang.deliveryObligations[0].sourceRequiredFields.includes('composition.raw'));
+  assert(gaofang.deliveryObligations[0].sourceRequiredFields.includes('preparation_process'));
+  assert(gaofang.deliveryObligations[0].sourceRequiredFields.includes('usage'));
+  assert.equal(external.deliveryObligations[0].materialization, 'SOURCE_BOUND');
+  assert(external.deliveryObligations[0].sourceRequiredFieldsByOutcome['modality:acupuncture'].includes('protocol.regimens'));
+  assert(external.deliveryObligations[0].sourceRequiredFieldsByOutcome['modality:acupuncture'].includes('protocol.raw'));
 });
 
 test('delivery integrity: ACTIVE source member survives UNKNOWN composition', () => {

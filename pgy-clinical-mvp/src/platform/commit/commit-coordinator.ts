@@ -16,6 +16,10 @@ export interface CommitEnvironment {
   validateDelivery(outcome: string, product: Readonly<Record<string, unknown>>):
     | { ok: true; providerId: string }
     | { ok: false; code: 'NO_PROVIDER' | 'AMBIGUOUS_PROVIDER' | 'MISSING_REQUIRED_FIELDS' | 'IDENTITY_MISMATCH'; missing?: string[] };
+  /** SOURCE_BOUND: hydrate immutable canonical source product(s) from Runtime-owned source receipts. */
+  hydrateSourceBoundProduct?: (outcome: string) =>
+    | { ok: true; providerId: string; product: Readonly<Record<string, unknown>>; sourceBundle: CommittedSourceBundle; sourceRefs: readonly string[] }
+    | { ok: false; code: 'CANONICAL_HYDRATION_FAILED' | 'SOURCE_BINDING_MISMATCH' | 'MISSING_REQUIRED_FIELDS'; details?: readonly string[] };
   /** 从内部 candidate truth 水合 canonical product/source，并做 composition binding 校验。必须 fail closed。 */
   hydrateCanonicalCandidate(truth: CandidateTruth, outcome: string): Promise<
     | { ok: true; providerId: string; product: Readonly<Record<string, unknown>>; sourceBundle?: CommittedSourceBundle; sourceRefs: readonly string[] }
@@ -58,6 +62,29 @@ export class CommitCoordinator {
             providerId: hydrated.providerId,
           },
           ...(hydrated.sourceBundle ? { sourceBundle: hydrated.sourceBundle } : {}),
+          product: hydrated.product,
+        }),
+      };
+    }
+
+    if (intent.sourceBound) {
+      if (!env.hydrateSourceBoundProduct) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+      const hydrated = env.hydrateSourceBoundProduct(intent.outcome);
+      if (!hydrated.ok) return { ok: false, code: hydrated.code, details: hydrated.details };
+      return {
+        ok: true,
+        record: this.ledger.append({
+          outcome: intent.outcome,
+          semanticIdentity: intent.outcome,
+          providerId: hydrated.providerId,
+          deliveryStatus: 'DELIVERED',
+          executionClearance: clearance,
+          provenance: {
+            kind: 'CANONICAL_SOURCE',
+            sourceRefs: hydrated.sourceRefs,
+            providerId: hydrated.providerId,
+          },
+          sourceBundle: hydrated.sourceBundle,
           product: hydrated.product,
         }),
       };

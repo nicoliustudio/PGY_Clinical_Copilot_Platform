@@ -69,6 +69,8 @@ export interface CommitIntent {
   candidateHandle?: CandidateHandle;
   /** 指向 reasoning/advisory 状态的引用（非权威载荷）。 */
   reasoningArtifactRef?: string;
+  /** SOURCE_BOUND materialization request. Kernel resolves the exact hydrated canonical asset(s). */
+  sourceBound?: boolean;
 }
 
 export type CommitFailureCode =

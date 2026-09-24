@@ -275,7 +275,10 @@ test('V2.1.2 invariant: 家族项不得顶替用户点名的具体形式（fail-
   const graph = structuralGraphV21(validated.ir, descriptors, CONTROL_PLANE_V21_POLICY);
   assert(graph.issues.some((issue) => issue.type === 'UNSUPPORTED_OUTCOME' && issue.outcome === 'unresolved:拔罐'));
   assert.equal(
-    graph.nodes.some((n) => n.target.type === 'artifact:treatment-delivery'),
+    graph.nodes.some((n) =>
+      n.target.type === 'artifact:treatment-delivery' &&
+      n.rootOutcomes.some((o) => o === 'modality:external-therapy' || o === 'unresolved:拔罐'),
+    ),
     false,
     '家族项不得被当作精确满足而产生交付义务',
   );

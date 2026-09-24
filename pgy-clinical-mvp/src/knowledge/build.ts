@@ -54,6 +54,7 @@ interface NormativeEntry {
     name?: string;
     composition?: string;
     raw_composition?: string;
+    preparation?: string;
     source_tier?: string;
     knowledge_role?: string;
     entity_status?: string;
@@ -149,11 +150,17 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
     const formulas: NormativeFormula[] = (n.formulas ?? []).map((f) => {
       const localModificationsDeclared = Object.prototype.hasOwnProperty.call(f, 'inline_modification_text')
         || Object.prototype.hasOwnProperty.call(f, 'inline_modifications');
+      const compositionDeclared = Object.prototype.hasOwnProperty.call(f, 'composition')
+        || Object.prototype.hasOwnProperty.call(f, 'raw_composition');
+      const composition = str(f.composition ?? f.raw_composition);
+      const preparationDeclared = Object.prototype.hasOwnProperty.call(f, 'preparation');
       const usageDeclared = Object.prototype.hasOwnProperty.call(f, 'usage');
       return {
         id: str(f.id),
         name: str(f.name),
-        composition: str(f.composition ?? f.raw_composition),
+        composition,
+        compositionPresence: !compositionDeclared ? 'UNKNOWN' : composition.trim() ? 'PRESENT' : 'KNOWN_EMPTY',
+        ...(preparationDeclared ? { preparation: str(f.preparation) } : {}),
         ...(localModificationsDeclared
           ? { sourceModifications: normalizeSourceModificationList(f.inline_modification_text, f.inline_modifications) }
           : {}),
@@ -177,6 +184,7 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
       ...formulas.flatMap((f) => [
         `方剂：${f.name}（${f.composition}）`,
         ...((f.sourceModifications ?? []).length > 0 ? [`方剂加减：${(f.sourceModifications ?? []).join('；')}`] : []),
+        ...(f.preparation ? [`方剂制备：${f.preparation}`] : []),
         ...(f.usage ? [`方剂用法：${f.usage}`] : []),
       ]),
       ...((sourceModifications?.length ?? 0) > 0 ? [`来源节点加减：${sourceModifications!.join('；')}`] : []),
@@ -405,7 +413,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   if (!force && existsSync(cacheFile)) {
     const cached = loadJson<KnowledgeIndex>(cacheFile);
     // Durable knowledge shape changed: stale caches must never hide source-preserved product fields.
-    if (cached.schemaVersion === 3 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
+    if (cached.schemaVersion === 4 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
       return cached;
     }
     console.log('[index] 检测到旧 schema 缓存，重建索引');
@@ -421,7 +429,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const vectors = await embed(docs.map((d) => d.text));
 
   const index: KnowledgeIndex = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     version: releaseVersion,
     releaseVersion,
     builtAt: new Date().toISOString(),

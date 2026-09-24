@@ -102,30 +102,38 @@
         "statement",
         "sourceEvidenceRefs"
       ],
-      "requiredFieldsByOutcome": {
+      "materialization": "SOURCE_BOUND",
+      "sourceRequiredFields": [
+        "asset_id",
+        "title",
+        "disease.name",
+        "indication_text",
+        "treatment_method",
+        "provenance.raw_text",
+        "content_hash"
+      ],
+      "sourceRequiredFieldsByOutcome": {
         "modality:acupuncture": [
-          "details.points",
-          "details.operation",
-          "details.frequency",
-          "details.course"
-        ],
-        "modality:moxibustion": [
-          "details.points",
-          "details.operation",
-          "details.frequency",
-          "details.course"
+          "protocol.modalities",
+          "protocol.points",
+          "protocol.technique",
+          "protocol.regimens",
+          "protocol.raw"
         ],
         "modality:auricular": [
-          "details.points",
-          "details.operation",
-          "details.frequency",
-          "details.course"
+          "protocol.points",
+          "protocol.regimens",
+          "protocol.raw"
+        ],
+        "modality:moxibustion": [
+          "protocol.points",
+          "protocol.regimens",
+          "protocol.raw"
         ],
         "modality:external-therapy": [
-          "details"
+          "protocol.raw"
         ]
-      },
-      "materialization": "REASONING_PRODUCT"
+      }
     }
   ],
   "controlPlaneV21": {

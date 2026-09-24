@@ -17,6 +17,12 @@ export interface SearchOptions {
   kind?: Kind;
   /** P1 → P2 fallback 原因（由 Agent 标注，可选）。 */
   fallbackReason?: string;
+  /**
+   * Recall-preservation guard for source-discovery channels. Keeps the strongest dense recalls
+   * visible even when the reranker omits them. This is not a score boost and does not infer medicine;
+   * it only prevents a downstream ranker from deleting upstream candidate visibility.
+   */
+  denseRecallGuard?: number;
 }
 
 /** 纯函数：按知识角色过滤文档。无 role 时不过滤（fail-open 仅限「未指定」；指定未知 role 不会发生，因为调用方枚举受限）。 */
@@ -69,7 +75,21 @@ export async function searchWithDiagnostics(
     score: r.score,
   }));
 
-  const hits: SearchHit[] = ranked.map((r) => {
+  const denseGuard = Math.max(0, Math.min(options.denseRecallGuard ?? 0, topK, candidates.length));
+  const selected: Array<{ index: number; score: number }> = [];
+  const seen = new Set<number>();
+  for (let i = 0; i < denseGuard; i++) {
+    selected.push({ index: i, score: candidates[i].score });
+    seen.add(i);
+  }
+  for (const r of ranked) {
+    if (seen.has(r.index)) continue;
+    selected.push({ index: r.index, score: r.score });
+    seen.add(r.index);
+    if (selected.length >= topK) break;
+  }
+
+  const hits: SearchHit[] = selected.map((r) => {
     const { doc } = candidates[r.index];
     return {
       sourceId: doc.id,

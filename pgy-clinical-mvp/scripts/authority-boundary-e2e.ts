@@ -16,11 +16,12 @@
  *          CLINICALLY_EXCLUDED 不改变 N
  */
 import { loadIndex } from '../src/knowledge/build.js';
+import { getRuntimeAsset, getRuntimeAssetScope } from '../src/knowledge/runtime-catalog.js';
+import { recordHydrationReceipt } from '../src/clinical/capability-evidence.js';
+import { projectClinicalResult } from '../src/platform/commit/result-projector.js';
 import { hydrateSourceFormulaSet } from '../src/clinical/source-formula-set.js';
 import { projectFormulaSet } from '../src/control-plane-v2/result-projection.js';
 import { buildResultView } from '../src/ui/views.js';
-import { treatmentDeliveryCompleteness } from '../src/clinical/capability-delivery.js';
-import { createClinicalWorkspace } from '../src/platform/workspace/clinical-workspace.js';
 import { discoverCapabilityManifests, loadSkills } from '../src/composition/load-assets.js';
 import { normalizeClinicalRequestIR } from '../src/control-plane-v2/request-ir.js';
 import { commitDeliveryOutcome } from '../src/platform/commit/delivery-transaction.js';
@@ -45,7 +46,6 @@ import { CONTROL_PLANE_V21_POLICY } from '../src/composition/control-plane-v21-p
 import { stubRequestCompiler } from '../tests/helpers.js';
 import type { ClinicalRequestIR } from '../src/control-plane-v2/types.js';
 import type { RuntimeContext } from '../src/contracts/runtime.js';
-import type { CapabilityDescriptor } from '../src/contracts/capability.js';
 import type { KnowledgeDoc } from '../src/knowledge/types.js';
 
 const results: Array<{ name: string; pass: boolean; detail: string }> = [];
@@ -104,17 +104,41 @@ async function e2e1(): Promise<void> {
   check('effective RequestIR 未改写原始 excluded', effective.outcomes.excluded.includes('modality:herbal-formula'));
   check('原始 RequestIR immutable（required 仍只有 acupuncture）', ctx.controlPlaneV21!.requestIR.outcomes.required.length === 1 && ctx.controlPlaneV21!.requestIR.outcomes.required[0] === 'modality:acupuncture');
 
-  // 针灸交付 mandatory fields（provider manifest requiredFields）。
-  const manifests: CapabilityDescriptor[] = await discoverCapabilityManifests();
-  const acupunctureComplete = {
-    outcome: 'modality:acupuncture', form: 'acupuncture', disposition: 'CURRENTLY_SUITABLE' as const, statement: '针刺方案',
-    sourceEvidenceRefs: ['AC-049'], details: { points: ['合谷', '三阴交'], operation: '平补平泻', frequency: '每日1次', course: '10次' },
+  // 真实 SOURCE_BOUND 路径：Runtime Catalog AC-049 → hydration receipt → delivery.commit → CommitLedger → Final/UI。
+  const ac049 = getRuntimeAsset('AC-049', ctx.knowledgeScopes);
+  check('AC-049 canonical asset exists', Boolean(ac049));
+  if (!ac049) return;
+  const assetScope = getRuntimeAssetScope('AC-049');
+  check('AC-049 has activation scope', Boolean(assetScope), String(assetScope));
+  if (!assetScope) return;
+  recordHydrationReceipt(ctx.workspace, 'AC-049', assetScope);
+  ctx.workspace.clinicalDecisionSpine.treatmentPlan = {
+    primaryPrinciple: '疏肝理气，调经止痛', treatmentTarget: '痛经', evidenceRefs: ['AC-049'], version: 1,
+    treatmentDeliveries: [{
+      outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: '采用来源方案并做患者资格判断',
+      sourceEvidenceRefs: ['AC-049'], sourceAssetRefs: ['AC-049'],
+      // 这份模型草稿故意与来源不同；commit 后 source truth 仍必须来自 AC-049。
+      details: { points: ['模型自拟穴位不得成为 source truth'] },
+    }],
   };
-  const complete = treatmentDeliveryCompleteness(
-    manifests.map((m) => ({ id: m.id, confidence: 1, reason: 'e2e', provides: m.provides, deliveryObligations: m.deliveryObligations })),
-    acupunctureComplete,
-  );
-  check('针灸交付 mandatory fields complete', complete.complete, `missing=${JSON.stringify(complete.missingFields)}`);
+  const acupunctureCommit = await commitDeliveryOutcome(ctx, 'modality:acupuncture');
+  check('AC-049 delivery.commit succeeds', acupunctureCommit.ok, acupunctureCommit.ok ? String(acupunctureCommit.record.commitId) : JSON.stringify(acupunctureCommit));
+  if (!acupunctureCommit.ok) return;
+  check('acupuncture provenance = CANONICAL_SOURCE', acupunctureCommit.record.provenance.kind === 'CANONICAL_SOURCE');
+  check('Commit.sourceBundle carries exact AC-049 payload', JSON.stringify(acupunctureCommit.record.sourceBundle?.products[0]?.payload) === JSON.stringify(ac049));
+  const payload = acupunctureCommit.record.sourceBundle?.products[0]?.payload as Record<string, any> | undefined;
+  check('AC-049 body acupuncture source evidence visible', Array.isArray(payload?.protocol?.regimens) && payload.protocol.regimens.some((x: string) => x.includes('三阴交') && x.includes('关元') && x.includes('合谷')));
+  check('AC-049 auricular source evidence visible', Array.isArray(payload?.protocol?.regimens) && payload.protocol.regimens.some((x: string) => x.includes('子宫') && x.includes('交感') && x.includes('生殖区')));
+  check('reasoning draft cannot replace canonical source points', JSON.stringify(acupunctureCommit.record.sourceBundle).includes('模型自拟穴位不得成为 source truth') === false);
+  const projected = projectClinicalResult({}, ctx.commitLedger.all());
+  const view = buildResultView({
+    mode: 'clinical', status: 'COMPLETED',
+    disease: { name: '痛经', confidence: 0.9, evidence_refs: [] },
+    syndrome: { name: '气滞', confidence: 0.8, evidence_refs: [] },
+    treatment: { text: '疏肝理气，调经止痛', evidence_refs: [] },
+    deliveries: projected.deliveries as never, missing_information: [], safety: { status: 'PASS' },
+  } as never);
+  check('Final/UI preserve AC-049 source bundle', JSON.stringify(view.deliveries?.[0]?.source_bundle?.products?.[0]?.payload) === JSON.stringify(ac049));
 
   // clinical-assessment fact ownership：assessment 不得拥有 modality execution facts。
   const assessment = buildClinicalAssessmentProduct({
@@ -224,7 +248,7 @@ async function e2e2(): Promise<void> {
       missing_information: [], safety: { status: 'PASS' },
     } as never);
     check('2b UI.formula_set = N', view.formula_set?.length === N, `N=${N}, actual=${view.formula_set?.length}`);
-    check('2b UI 保留 excluded sibling（relation）', Boolean(view.formula_set?.some((f) => f.relation === 'CLINICALLY_EXCLUDED')));
+    check('2b UI 保留 excluded sibling（relation）', Boolean(view.formula_set?.some((f: any) => f.relation === 'CLINICALLY_EXCLUDED')));
 
     console.log('[E2E-2 real source]', JSON.stringify({ parent: target.id, N }));
     console.log('[E2E-2 Commit sourceBundle products]', commit.record.sourceBundle.products.length, 'qualifications=', JSON.stringify(commit.record.sourceBundle.products.map((p) => p.qualification)));

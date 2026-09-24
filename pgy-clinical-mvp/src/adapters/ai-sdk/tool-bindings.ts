@@ -311,6 +311,8 @@ const treatmentPlanSchema = z.object({
     disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
     statement: z.string(),
     sourceEvidenceRefs: z.array(z.string()),
+    /** Canonical Runtime Catalog assets selected as product truth; do not mix generic citations here. */
+    sourceAssetRefs: z.array(z.string()).optional(),
     /** V2.1.1: exact Request Outcome delivered by this item. */
     outcome: z.string(),
     advisoryComposition: z.array(z.string()).optional(),
@@ -324,6 +326,7 @@ const treatmentPlanSchema = z.object({
     disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
     statement: z.string(),
     sourceEvidenceRefs: z.array(z.string()),
+    sourceAssetRefs: z.array(z.string()).optional(),
     outcome: z.string().optional(),
     advisoryComposition: z.array(z.string()).optional(),
     preparation: z.string().optional(),
@@ -693,7 +696,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_deliberation': (context) => tool({
-    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标，若请求要求具体治疗形式交付则含 treatmentDeliveries[]，每项声明 form / disposition / statement / sourceEvidenceRefs / outcome）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
+    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标，若请求要求具体治疗形式交付则含 treatmentDeliveries[]；sourceEvidenceRefs 是普通支持证据，sourceAssetRefs 只放已通过 knowledge.get_asset 水合、准备绑定为产品真相的 canonical asset id；每项声明 form / disposition / statement / outcome）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
     inputSchema: z.object({
       focusedCandidates: z.array(z.string()).optional(),
       assessments: z.array(z.object({
@@ -888,8 +891,12 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           outcome,
           details: result.details,
           allowedNextActions: result.code === 'MISSING_REQUIRED_FIELDS'
-            ? ['complete the provider-declared required product fields, then retry delivery.commit']
-            : ['repair the deterministic commit precondition, then retry delivery.commit'],
+            ? ['complete the provider-declared required draft/source fields, then retry delivery.commit']
+            : result.code === 'SOURCE_BINDING_MISMATCH'
+              ? ['select the intended hydrated canonical asset explicitly in treatmentPlan.treatmentDeliveries[].sourceAssetRefs, then retry delivery.commit']
+              : result.code === 'CANONICAL_HYDRATION_FAILED'
+                ? ['hydrate the selected canonical source with the provider-declared hydration tool, persist its asset id in sourceAssetRefs, then retry delivery.commit']
+                : ['repair the deterministic commit precondition, then retry delivery.commit'],
         });
       }
       return {

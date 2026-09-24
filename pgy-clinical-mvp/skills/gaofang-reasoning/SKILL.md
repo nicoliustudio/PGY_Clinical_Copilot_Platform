@@ -17,7 +17,7 @@ When gaofang is active and a relevant GF asset has been retrieved, do not keep s
   - `TREAT_FIRST_THEN_FORM`
   - `CURRENTLY_NOT_SUITABLE`
 
-The decision must include a concise clinical statement and real `sourceEvidenceRefs` to retrieved GF assets. If the asset contains a clinically relevant composition/preparation/usage, it may be carried as **CASE-DERIVED ADVISORY** only.
+The decision must include a concise clinical statement and real `sourceEvidenceRefs` to retrieved evidence. When one hydrated GF asset is selected as the product truth, also place its exact asset id in `sourceAssetRefs`. Do **not** copy/rewrite its composition, preparation, usage, source patient, or other source-owned fields into the reasoning draft: `delivery.commit` binds the hydrated canonical asset deterministically as a SOURCE_BOUND product.
 
 ## Clinical method
 
@@ -28,7 +28,7 @@ The decision must include a concise clinical statement and real `sourceEvidenceR
 
 ## Evidence and authority
 
-- GF assets are case-derived treatment evidence. Retrieval is not adoption.
-- Never promote a GF case composition to NORMATIVE solely because it is a close match.
-- Keep canonical BaseFormula authority separate from the gaofang treatment-form advisory.
+- GF assets are source-bound case records. Retrieval is not adoption: only a hydrated asset selected through `sourceAssetRefs` (or the deterministic single-source compatibility bridge) may become gaofang product truth at `delivery.commit`.
+- Never promote a GF case composition to NORMATIVE solely because it is a close match; its authority remains the canonical GF source asset with its own provenance.
+- Keep canonical source facts (source patient, syndrome, composition, preparation, usage, contraindication, provenance) separate from patient-specific qualification/adaptation. Reasoning may judge suitability; it must not impersonate or rewrite the source asset.
 - When an exact or near-exact GF case is already retrieved and clinically applicable, move to treatment-form judgment and submission rather than repeating `search_cards`/`get_asset`.

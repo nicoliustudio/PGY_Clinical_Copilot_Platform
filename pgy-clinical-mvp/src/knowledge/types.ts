@@ -27,6 +27,10 @@ export interface NormativeFormula {
   id: string;
   name: string;
   composition: string;
+  /** Closed-world source presence: explicit empty and unavailable must not collapse. */
+  compositionPresence?: 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN';
+  /** Optional source preparation/process text; property absence means UNKNOWN, explicit empty means KNOWN_EMPTY. */
+  preparation?: string;
   /** Source-preserved formula-local modification rules. Empty means the source explicitly supplied none at formula level. */
   sourceModifications?: string[];
   /** Optional source usage text carried with the formula; never reconstructed by the model. */
@@ -98,7 +102,7 @@ export interface IndexBreakdown {
 
 export interface KnowledgeIndex {
   /** Runtime index schema. Bump when durable knowledge shape changes so stale .kb-cache cannot mask new fields. */
-  schemaVersion: 3;
+  schemaVersion: 4;
   version: string;
   releaseVersion: string;
   builtAt: string;

@@ -244,9 +244,9 @@ test('T9 TreatmentPlan 拒绝非法 disposition（fail-closed 不持久化）', 
   assert.equal(ws.clinicalDecisionSpine.treatmentPlan?.treatmentFormDecision, undefined);
 });
 
-// ---------- T10 Gaofang Composition 确定性回填 ----------
+// ---------- T10 Gaofang Composition：reasoning draft 不得复制 canonical source fields ----------
 
-test('T10 buildProposalDraft 从 GF 资产确定性补齐组成/制法/用法', () => {
+test('T10 buildProposalDraft 不得把 GF 资产的 canonical 组成/制法复制进 reasoning draft', () => {
   resetRuntimeCatalogCache();
   const { ws, store } = coreCompleteWorkspace();
   store.append('treatment.plan.recorded', {
@@ -261,9 +261,13 @@ test('T10 buildProposalDraft 从 GF 资产确定性补齐组成/制法/用法', 
   });
   const draft = buildProposalDraft(ws, ['gaofang']);
   assert.ok(draft.treatment, 'treatment 应非空');
-  assert.ok(draft.treatment.includes('治疗形式参考组成（CASE-DERIVED ADVISORY）'), '应渲染组成区块');
-  assert.ok(draft.treatment.includes('生晒参'), '应包含 GF-018 实际组成药味');
-  assert.ok(draft.treatment.includes('凉水浸1宿'), '应包含 GF-018 实际制法');
+  // 治疗形式决策本身（form/disposition/statement/evidence refs）仍被投影为 reasoning 信息。
+  assert.ok(draft.treatment.includes('治疗形式（膏方）'), '应渲染治疗形式决策');
+  assert.ok(draft.treatment.includes('GF-018'), '应保留 source evidence ref');
+  // Canonical source fields（组成/制法/用法）不得被复制进 reasoning draft —— 它们只存在于 source bundle。
+  assert.ok(!draft.treatment.includes('治疗形式参考组成（CASE-DERIVED ADVISORY）'), '不得渲染 canonical 组成区块');
+  assert.ok(!draft.treatment.includes('生晒参'), '不得复制 GF-018 canonical 组成药味');
+  assert.ok(!draft.treatment.includes('凉水浸1宿'), '不得复制 GF-018 canonical 制法');
 });
 
 test('T10 无 GF scope 时不回填（纯投影，不臆造）', () => {

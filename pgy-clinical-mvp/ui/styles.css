@@ -365,3 +365,17 @@ td .input-preview { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 .user-chip b { font-weight: 600; color: var(--text); }
 .user-chip .role-tag { font-size: 10px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 1px 5px; }
 
+
+/* Truth Genesis / Source Authority: lossless committed source payload rendering. */
+.source-bound .source-payload {
+  max-height: 28rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: .5rem 0 0;
+  padding: .65rem;
+  border-radius: .5rem;
+  background: rgba(0, 0, 0, .04);
+  font-size: .8rem;
+  line-height: 1.45;
+}

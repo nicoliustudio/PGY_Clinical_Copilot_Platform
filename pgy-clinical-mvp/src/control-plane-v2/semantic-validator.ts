@@ -20,7 +20,7 @@ import type { ClinicalRequestIR, OutcomeCommitment } from './types.js';
  * - 不新增 EffectId、不新增 scheduler 分支。
  */
 
-export type SemanticRelationV21 = 'EXACT' | 'ALIAS' | 'SUBTYPE' | 'FAMILY' | 'UNKNOWN';
+export type SemanticRelationV21 = 'EXACT' | 'ALIAS' | 'SUBTYPE' | 'COMPILER_BOUND' | 'FAMILY' | 'UNKNOWN';
 
 export interface MentionResolutionV21 {
   mention: string;
@@ -41,6 +41,7 @@ export interface SemanticOntologyV21 {
 export interface MentionRequestV21 {
   name: string;
   commitment: OutcomeCommitment;
+  canonicalTerm?: string;
 }
 
 export interface SemanticValidationV21 {
@@ -152,7 +153,24 @@ export function validateRequestSemantics(
 ): SemanticValidationV21 {
   const ontology = buildSemanticOntology(capabilities);
   const mentions: MentionRequestV21[] = ir.outcomes.mentions ?? [];
-  const resolutions = mentions.map((mention) => resolveMention(ontology, mention.name));
+  const rawResolutions = mentions.map((mention) => resolveMention(ontology, mention.name));
+  // Open-world semantics belong to the Request Compiler. The deterministic validator protects
+  // closed-world identity boundaries; it must not create a second semantic authority from raw text.
+  // For a surface the closed-world ontology cannot resolve lexically, accept only the compiler's
+  // explicit per-mention canonicalTerm witness. Never infer a binding from array cardinality.
+  // FAMILY remains fail-closed even if the compiler attempts to map it to the broader family.
+  const resolutions = rawResolutions.map((resolution) => {
+    const mention = mentions.find((item) => item.name === resolution.mention);
+    if (resolution.relation !== 'UNKNOWN') return resolution;
+    if (!mention?.canonicalTerm || !ontology.provides.has(mention.canonicalTerm)) return resolution;
+    if ((ir.outcomes.unresolved ?? []).includes(resolution.mention)) return resolution;
+    const declaredSet = mention.commitment === 'REQUIRED' ? ir.outcomes.required
+      : mention.commitment === 'PREFERRED' ? ir.outcomes.preferred
+        : mention.commitment === 'ALLOWED' ? (ir.outcomes.allowed ?? [])
+          : ir.outcomes.excluded;
+    if (!declaredSet.includes(mention.canonicalTerm)) return resolution;
+    return { ...resolution, relation: 'COMPILER_BOUND' as const, term: mention.canonicalTerm };
+  });
   const commitmentOf = (name: string): OutcomeCommitment =>
     mentions.find((mention) => mention.name === name)?.commitment ?? 'REQUIRED';
 
@@ -171,7 +189,7 @@ export function validateRequestSemantics(
 
   const proves = (term: string): MentionResolutionV21 | undefined =>
     resolutions.find((r) =>
-      r.term === term && (r.relation === 'EXACT' || r.relation === 'ALIAS' || r.relation === 'SUBTYPE'));
+      r.term === term && (r.relation === 'EXACT' || r.relation === 'ALIAS' || r.relation === 'SUBTYPE' || r.relation === 'COMPILER_BOUND'));
 
   const required = ir.outcomes.required.filter((term) => {
     if (baselineOutcomes.includes(term)) return true;
@@ -191,7 +209,7 @@ export function validateRequestSemantics(
 
   const handled = new Set<string>();
   for (const resolution of resolutions) {
-    if (resolution.relation === 'EXACT' || resolution.relation === 'ALIAS' || resolution.relation === 'SUBTYPE') continue;
+    if (resolution.relation === 'EXACT' || resolution.relation === 'ALIAS' || resolution.relation === 'SUBTYPE' || resolution.relation === 'COMPILER_BOUND') continue;
     if (excluded.has(resolution.mention)) continue;
     const commitment = commitmentOf(resolution.mention);
     if (commitment === 'ALLOWED' || commitment === 'EXCLUDED') continue;

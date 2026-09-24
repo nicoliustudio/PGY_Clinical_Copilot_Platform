@@ -3,7 +3,7 @@ import type { CapabilityDescriptor } from '../../contracts/capability.js';
 import type { AppliedBlockerV21, RuntimeContext } from '../../contracts/runtime.js';
 import type { ClinicalWorkspace } from '../../contracts/workspace.js';
 import type { DurableArtifactEnvelopeV21, EffectTerm, ObligationGraphV21, ObligationNodeV21 } from '../../control-plane-v21/types.js';
-import { buildObligationGraphV21, graphCompleteV21, runnableObligationsV21 } from '../../control-plane-v21/planner.js';
+import { buildObligationGraphV21, effectiveRequestedOutcomesV21, graphCompleteV21, runnableObligationsV21 } from '../../control-plane-v21/planner.js';
 import { admissibleEffectsV21, projectedToolIdsV21 } from '../../control-plane-v21/action-surface.js';
 import { projectOutcomeCoverageV21, type OutcomeProjectionV21 } from '../../control-plane-v21/result-projection.js';
 import type { ControlPlanePolicyV21 } from '../../control-plane-v21/types.js';
@@ -50,8 +50,7 @@ export function effectiveRequestIRV21(
 export function effectiveRequiredOutcomesV21(
   state: NonNullable<RuntimeContext['controlPlaneV21']>,
 ): string[] {
-  const ir = effectiveRequestIRV21(state);
-  return [...new Set([...state.policy.baselineOutcomes, ...ir.outcomes.required])];
+  return effectiveRequestedOutcomesV21(effectiveRequestIRV21(state), state.policy);
 }
 
 export function structuralGraphV21(

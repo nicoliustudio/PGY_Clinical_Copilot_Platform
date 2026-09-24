@@ -70,12 +70,24 @@
         "form",
         "disposition",
         "statement",
-        "sourceEvidenceRefs",
-        "advisoryComposition",
-        "preparation",
-        "usage"
+        "sourceEvidenceRefs"
       ],
-      "materialization": "REASONING_PRODUCT"
+      "materialization": "SOURCE_BOUND",
+      "sourceRequiredFields": [
+        "asset_id",
+        "title",
+        "disease.name",
+        "patient",
+        "syndrome_pattern",
+        "indication_text",
+        "treatment_method",
+        "composition.raw",
+        "preparation_process",
+        "usage",
+        "contraindication",
+        "provenance.raw_text",
+        "content_hash"
+      ]
     }
   ],
   "controlPlaneV21": {

@@ -84,7 +84,21 @@ export const clinicalResultSchema = z.object({
       sourceRefs: z.array(z.string()),
       providerId: z.string(),
     }),
-    source_bundle: z.unknown().optional(),
+    /**
+     * Lossless committed source bundle. UI renders, never re-selects or rewrites.
+     * Must carry every adopted sibling product with its exact canonical payload.
+     */
+    source_bundle: z.object({
+      sourceId: z.string(),
+      products: z.array(z.object({
+        productId: z.string(),
+        name: z.string(),
+        payload: z.record(z.string(), z.unknown()),
+        qualification: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
+        exclusionReason: z.string().optional(),
+      })),
+      sourceFacts: z.record(z.string(), z.unknown()),
+    }).optional(),
     product: z.record(z.string(), z.unknown()),
   })).optional(),
   /** V2.1.1 deterministic multi-modality deliveries from durable Workspace state. */

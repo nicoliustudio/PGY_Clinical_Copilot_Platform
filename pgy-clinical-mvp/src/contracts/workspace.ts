@@ -201,6 +201,9 @@ export interface TreatmentFormDecision {
   disposition: TreatmentFormDisposition;
   statement: string;
   sourceEvidenceRefs: string[];
+  /** Canonical Runtime Catalog assets selected for source-bound product materialization.
+   * This is distinct from generic supporting evidence. Kernel validates hydration receipts before commit. */
+  sourceAssetRefs?: string[];
   /** Case-derived advisory only; never changes BaseFormula authority. */
   advisoryComposition?: string[];
   preparation?: string;
@@ -280,6 +283,9 @@ export interface SourceFormulaEntry {
   formulaLocalModificationPresence?: SourceFieldPresence;
   /** Whether modification absence is known or source-level rules exist but cannot be safely attributed to this formula. */
   modificationStatus: SourceModificationStatus;
+  /** Optional source-preserved preparation/process text for this formula. */
+  preparation?: string;
+  preparationPresence?: SourceFieldPresence;
   /** Optional source-preserved usage text for this formula. */
   usage?: string;
   usagePresence?: SourceFieldPresence;

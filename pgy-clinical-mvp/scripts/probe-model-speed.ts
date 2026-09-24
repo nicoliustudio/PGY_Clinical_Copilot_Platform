@@ -20,7 +20,7 @@ const TOKEN_PLAN = {
 };
 
 const MODELS = [
-  { name: 'deepseek官方-deepseek-flash', baseURL: 'https://api.deepseek.com/v1', apiKey: 'sk-e454aaaf6fa6446d96a829c639d53ad0', model: 'deepseek-flash' },
+  { name: 'deepseek官方-deepseek-flash', baseURL: 'https://api.deepseek.com/v1', apiKey: 'sk-REDACTED-FOR-REVIEW-PACKAGE-NOT-A-KEY', model: 'deepseek-flash' },
   { name: '阿里tokenplan-qwen3.8-flash', baseURL: TOKEN_PLAN.baseURL, apiKey: TOKEN_PLAN.apiKey, model: 'qwen3.8-flash' },
   { name: '阿里tokenplan-deepseek-v4.1-flash', baseURL: TOKEN_PLAN.baseURL, apiKey: TOKEN_PLAN.apiKey, model: 'deepseek-v4.1-flash' },
 ];

@@ -82,6 +82,27 @@ function productionCandidates(target: ArtifactTarget, capabilities: CapabilityDe
  * Generic backward-chaining planner.
  * No artifact type, modality, disease, tool id, or clinical phase is special-cased here.
  */
+
+/**
+ * Product-level default contract projection.
+ *
+ * Baseline modality outcomes are defaults, not hidden extra obligations. Explicit user modality
+ * choices specialize the baseline; explicit exclusions remove it. Keeping this projection as one
+ * pure function prevents graph/readiness/completion from drifting into different required sets.
+ */
+export function effectiveRequestedOutcomesV21(
+  ir: ClinicalRequestIR,
+  policy: ControlPlanePolicyV21,
+): string[] {
+  const explicitRequiredModalities = ir.outcomes.required.filter((outcome) => outcome.startsWith('modality:'));
+  const effectiveBaseline = policy.baselineOutcomes.filter((outcome) => {
+    if (ir.outcomes.excluded.includes(outcome)) return false;
+    if (outcome.startsWith('modality:') && explicitRequiredModalities.length > 0 && !explicitRequiredModalities.includes(outcome)) return false;
+    return true;
+  });
+  return [...new Set([...effectiveBaseline, ...ir.outcomes.required])];
+}
+
 export function buildObligationGraphV21(
   ir: ClinicalRequestIR,
   capabilities: CapabilityDescriptor[],
@@ -206,7 +227,7 @@ export function buildObligationGraphV21(
     addBlocked(target, { type: 'UNSUPPORTED_OUTCOME', question: message, details: { requested: unresolved } }, 'request', outcome);
   }
 
-  const requestedOutcomes = [...new Set([...policy.baselineOutcomes, ...ir.outcomes.required])];
+  const requestedOutcomes = effectiveRequestedOutcomesV21(ir, policy);
   for (const outcome of requestedOutcomes) {
     const resolution = resolveOutcomeProvider(outcome, capabilities);
     if (resolution.status === 'UNSUPPORTED') {

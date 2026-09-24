@@ -49,7 +49,7 @@ export interface ClinicalRequestIR {
      * Deterministic Semantic Validator 用它验证 required 是否被 exact/alias/subtype 证明，
      * 并按承诺等级决定不可表示形式的处置。
      */
-    mentions?: Array<{ name: string; commitment: OutcomeCommitment }>;
+    mentions?: Array<{ name: string; commitment: OutcomeCommitment; canonicalTerm?: SemanticType }>;
     /**
      * REQUIRED 且不可表示 → typed UNSUPPORTED_OUTCOME，阻断主任务。
      * 可选以兼容既有 V2.1 fixtures。

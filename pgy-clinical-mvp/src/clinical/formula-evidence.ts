@@ -149,6 +149,54 @@ export function projectionToQuery(p: FormulaRetrievalProjection): string {
   ].filter(nonEmpty).join('，');
 }
 
+
+/**
+ * Canonical source recall must not be conditioned on the model's current syndrome/treatment hypothesis.
+ * This query is derived only from patient facts + already identified disease names. It is deliberately
+ * separate from projectionToQuery(), which is the hypothesis-support channel.
+ */
+export function patientFactRecallQuery(workspace: ClinicalWorkspace, diseaseNames: string[]): string {
+  const values: string[] = [];
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed || values.includes(trimmed)) return;
+    values.push(trimmed.slice(0, 120));
+  };
+  for (const disease of diseaseNames) add(disease);
+  for (const fact of workspace.caseFacts ?? []) {
+    if (fact.polarity === 'explicitly_absent' || fact.polarity === 'unknown') continue;
+    add(fact.value);
+    if (values.length >= 10) break;
+  }
+  // Legacy/runtime-view compatibility: some preparation paths still expose patient facts through
+  // workspace.facts. Read only explicit string values; never consume hypothesis/treatment fields here.
+  if (values.length < 10) {
+    for (const raw of workspace.facts ?? []) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const record = raw as Record<string, unknown>;
+      const polarity = record.polarity;
+      if (polarity === 'explicitly_absent' || polarity === 'unknown') continue;
+      add(record.value);
+      if (values.length >= 10) break;
+    }
+  }
+  return values.join('，');
+}
+
+function mergeHitsBySource(...groups: SearchHit[][]): SearchHit[] {
+  const out: SearchHit[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const hit of group) {
+      if (seen.has(hit.sourceId)) continue;
+      seen.add(hit.sourceId);
+      out.push(hit);
+    }
+  }
+  return out;
+}
+
 function docToEvidenceCard(doc: KnowledgeDoc, formulaId: string): FormulaEvidenceCard | null {
   const f = doc.formulas.find((x) => x.id === formulaId);
   if (!f) return null;
@@ -191,15 +239,24 @@ export async function searchFormulaCandidates(
   const projection = buildFormulaRetrievalProjection(workspace, diseaseNames);
   if (!projection) return { candidates: [], projection: null, diagnostics: null };
   const query = projectionToQuery(projection);
+  const patientQuery = patientFactRecallQuery(workspace, projection.disease);
 
-  // 1. P1 检索 → 只保留 applicable P1（disease 核心匹配当前病名，避免妇科语境 P1 误命中阻断 fallback）。
-  const p1 = await searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'NORMATIVE_TREATMENT' });
-  const applicableHits = p1.hits.filter(
+  // 1a. Patient-fact source recall: independent of current pattern/treatment hypothesis. A small
+  // dense recall guard prevents rerank from deleting the strongest upstream source candidates.
+  const sourceRecall = patientQuery
+    ? await searchWithDiagnostics(patientQuery, topK, scopes, 'formula.search_candidates', {
+        role: 'NORMATIVE_TREATMENT',
+        denseRecallGuard: Math.min(3, topK),
+      })
+    : null;
+  // 1b. Hypothesis-support search remains useful, but it can no longer control the entire visible source set.
+  const hypothesisSearch = await searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'NORMATIVE_TREATMENT' });
+  const applicableHits = mergeHitsBySource(sourceRecall?.hits ?? [], hypothesisSearch.hits).filter(
     (h) => h.authority === 'P1' && isApplicableDisease(h.provenance.disease, projection.disease),
   );
   const p1Candidates = buildP1Candidates(applicableHits);
   if (p1Candidates.length > 0) {
-    return { candidates: p1Candidates, projection, diagnostics: p1.diagnostics };
+    return { candidates: p1Candidates, projection, diagnostics: sourceRecall?.diagnostics ?? hypothesisSearch.diagnostics };
   }
 
   // 2. P2 fallback：无 applicable P1 时，优先检索 formula-level 病例方药单元（encounter-level），

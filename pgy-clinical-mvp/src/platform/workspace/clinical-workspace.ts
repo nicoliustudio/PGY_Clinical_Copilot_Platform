@@ -565,6 +565,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         disposition: disposition as TreatmentFormDisposition,
         statement,
         sourceEvidenceRefs: asStringArray(x.sourceEvidenceRefs),
+        sourceAssetRefs: asStringArray(x.sourceAssetRefs),
         advisoryComposition: asStringArray(x.advisoryComposition),
         preparation: asString(x.preparation),
         usage: asString(x.usage),

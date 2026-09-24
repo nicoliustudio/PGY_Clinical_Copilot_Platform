@@ -20,6 +20,7 @@ export const clinicalRequestIRSchema = z.object({
     mentions: z.array(z.object({
       name: z.string(),
       commitment: z.enum(['REQUIRED', 'PREFERRED', 'ALLOWED', 'EXCLUDED']),
+      canonicalTerm: z.string().optional(),
     })).optional().default([]),
     unresolved: z.array(z.string()).optional().default([]),
     unresolvedPreferred: z.array(z.string()).optional().default([]),
@@ -113,7 +114,7 @@ const REQUEST_COMPILER_PROMPT = `你是 Clinical Request Compiler。你的任务
 2. required = 用户明确要求必须交付；preferred = 倾向但不阻塞；excluded = 明确不要。
 2b. 「精确对应项」= 语义上与用户点名的形式同级的具体项。若 availableSemanticTypes 里只有更宽泛的
    上位/家族项（例如把某具体技法归入一个更大的治疗方式家族），不构成精确对应项，禁止用它顶替。
-2c. outcomes.mentions 只记录**治疗形式** + 承诺等级（只写形式本身，不归一、不翻译、不拼接整句）：
+2c. outcomes.mentions 只记录**治疗形式** + 承诺等级 + 首次语义归一结果（只写形式本身，不拼接整句）：
    - 「必须/只要能做 X/以 X 为主/只做 X」→ REQUIRED
    - 「希望 X/最好有 X」→ PREFERRED
    - 「可以考虑 X/也行/顺便/必要时可以 X」→ ALLOWED
@@ -126,7 +127,10 @@ const REQUEST_COMPILER_PROMPT = `你是 Clinical Request Compiler。你的任务
      mentions = [{ "name": "开方", "commitment": "EXCLUDED" }]     ← 只有「开方」是治疗形式
      required = 代表临床评估结论的 outcome type
      「辨证」「治法」既不写进 mentions，也不写进 unresolved。
-   required/preferred/allowed/excluded 里的值必须逐字来自 availableSemanticTypes；mentions 里保留原话。
+   required/preferred/allowed/excluded 里的值必须逐字来自 availableSemanticTypes；mentions.name 保留原话。
+   若该 mention 在 availableSemanticTypes 中有同级精确语义对应项，把该值同时写入 mentions.canonicalTerm；
+   canonicalTerm 必须逐字来自 availableSemanticTypes，且必须与对应 required/preferred/allowed/excluded 数组一致。
+   若没有精确对应项，省略 canonicalTerm。不要用更宽 family 或相邻 modality 填 canonicalTerm。
    若某个等级的形式在 availableSemanticTypes 中没有精确对应项，只写 mentions，**不要**写进该等级数组，
    也不要改用「最接近」的 modality 顶替。
    System 会独立校验 required 是否被 mentions 中某个形式精确证明，并按承诺等级决定不可表示形式的处置，
@@ -158,7 +162,7 @@ const REQUEST_COMPILER_PROMPT = `你是 Clinical Request Compiler。你的任务
     "preferred": [],
     "allowed": ["<可以考虑但不要求的形式，逐字来自 availableSemanticTypes>"],
     "excluded": [],
-    "mentions": [{ "name": "<用户点名的治疗形式原话>", "commitment": "REQUIRED" }],
+    "mentions": [{ "name": "<用户点名的治疗形式原话>", "commitment": "REQUIRED", "canonicalTerm": "<有精确对应时逐字来自 availableSemanticTypes；否则省略本字段>" }],
     "unresolved": [],
     "unresolvedPreferred": [],
     "exclusive": false

@@ -14,6 +14,7 @@ import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { loadIndex } from '../../knowledge/build.js';
 import { CandidateHandleRegistry } from './candidate-handle-registry.js';
 import { CommitCoordinator, type CommitEnvironment } from './commit-coordinator.js';
+import { materializeSourceBoundProduct } from './source-bound-materializer.js';
 
 function fact<T>(presence: FieldPresence, value: T | undefined, provenanceRefs: readonly string[]): FactField<T> {
   if (presence === 'PRESENT' && value !== undefined) return { presence, value, provenanceRefs };
@@ -31,6 +32,8 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
       ?? (formula.sourceModifications.length > 0 ? 'PRESENT' : 'UNKNOWN');
     const sharedPresence = set.sourceLevelModificationPresence
       ?? (set.sourceLevelModifications.length > 0 ? 'PRESENT' : 'UNKNOWN');
+    const preparationPresence = formula.preparationPresence
+      ?? (formula.preparation === undefined ? 'UNKNOWN' : formula.preparation.trim() ? 'PRESENT' : 'KNOWN_EMPTY');
     const usagePresence = formula.usagePresence
       ?? (formula.usage === undefined ? 'UNKNOWN' : formula.usage.trim() ? 'PRESENT' : 'KNOWN_EMPTY');
     const patientPresence: FieldPresence = !isPrimary
@@ -43,7 +46,7 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
       payload: {
         formulaRef: formula.formulaRef,
         composition: fact(compositionPresence, compositionPresence === 'PRESENT' ? formula.composition : undefined, [set.parentRecordRef]),
-        preparation: fact('UNKNOWN', undefined, [set.parentRecordRef]),
+        preparation: fact(preparationPresence, preparationPresence === 'PRESENT' ? formula.preparation : undefined, [set.parentRecordRef]),
         usage: fact(usagePresence, usagePresence === 'PRESENT' ? formula.usage : undefined, [set.parentRecordRef]),
         modifications: {
           formulaLocal: fact(localPresence, localPresence === 'PRESENT' ? formula.sourceModifications : undefined, [formula.formulaRef]),
@@ -117,6 +120,13 @@ function buildCommitEnvironment(context: RuntimeContext): CommitEnvironment {
       if (!provider || provider.id !== completeness.capabilityId) return { ok: false, code: 'NO_PROVIDER' };
       return { ok: true, providerId: completeness.capabilityId };
     },
+    hydrateSourceBoundProduct: (outcome) => {
+      const owner = deliveryObligation(context, outcome);
+      if (!owner) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+      const capability = context.capabilities.find((item) => item.id === owner.capabilityId);
+      if (!capability) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+      return materializeSourceBoundProduct(context, capability, owner.obligation, outcome);
+    },
     hydrateCanonicalCandidate: async (truth, outcome) => {
       const sep = truth.canonicalKey.indexOf('::');
       if (sep <= 0) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
@@ -180,6 +190,10 @@ export async function commitDeliveryOutcome(context: RuntimeContext, outcome: st
 
   const coordinator = new CommitCoordinator(new CandidateHandleRegistry(), context.commitLedger);
   const env = buildCommitEnvironment(context);
+  if (owner.obligation.materialization === 'SOURCE_BOUND') {
+    return coordinator.commit({ outcome, sourceBound: true }, env);
+  }
+
   if (owner.obligation.materialization === 'CANONICAL_CANDIDATE') {
     const ref = context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
     if (!ref) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };

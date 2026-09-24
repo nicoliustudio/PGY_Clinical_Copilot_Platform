@@ -72,7 +72,11 @@ export function projectFormulaSet(
         ...(f.composition.trim() ? { value: f.composition } : {}),
         provenanceRefs: [set.parentRecordRef],
       },
-      preparation: { presence: 'UNKNOWN', provenanceRefs: [set.parentRecordRef] },
+      preparation: {
+        presence: f.preparationPresence ?? (f.preparation === undefined ? 'UNKNOWN' : f.preparation.trim() ? 'PRESENT' : 'KNOWN_EMPTY'),
+        ...(f.preparation ? { value: f.preparation } : {}),
+        provenanceRefs: [set.parentRecordRef],
+      },
       usage: {
         presence: f.usagePresence ?? (f.usage === undefined ? 'UNKNOWN' : f.usage.trim() ? 'PRESENT' : 'KNOWN_EMPTY'),
         ...(f.usage ? { value: f.usage } : {}),

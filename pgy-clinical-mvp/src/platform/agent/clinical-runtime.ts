@@ -159,15 +159,17 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
     },
     readReasoningProduct: (ref) => {
       if (ref === 'clinical-assessment') {
-        if (proposal.mode !== 'clinical') return undefined;
         const plan = context.workspace.clinicalDecisionSpine.treatmentPlan;
+        const disease = context.workspace.clinicalDecisionSpine.diseaseAssessment?.statement
+          ?? (proposal.mode === 'clinical' ? proposal.disease?.name : '');
+        const syndrome = context.workspace.patternAssessment?.primary?.statement
+          ?? (proposal.mode === 'clinical' ? proposal.syndrome?.name : '');
+        const treatmentPrinciple = plan?.primaryPrinciple
+          ?? (proposal.mode === 'clinical' ? proposal.treatment?.text : '');
         // Fact Ownership: the assessment commit owns principle-level clinical facts only. Exact
-        // modality execution (points/composition/operation/preparation/usage/frequency/course) is
-        // owned by its treatment delivery CommitRecord and must never be copied into this product.
+        // modality execution is owned by its treatment delivery CommitRecord.
         return buildClinicalAssessmentProduct({
-          disease: proposal.disease?.name ?? '',
-          syndrome: proposal.syndrome?.name ?? '',
-          treatmentPrinciple: plan?.primaryPrinciple ?? proposal.treatment?.text ?? '',
+          disease, syndrome, treatmentPrinciple,
           treatmentTarget: plan?.treatmentTarget,
           rationale: plan?.rationale,
         });
@@ -232,7 +234,6 @@ async function commitBaselineAssessment(
   context: RuntimeContext,
   proposal: AgentResult,
 ): Promise<void> {
-  if (proposal.mode !== 'clinical') return;
   if (context.commitLedger.delivered('outcome:clinical-assessment').length > 0) return;
   const coordinator = new CommitCoordinator(new CandidateHandleRegistry(), context.commitLedger);
   const env = buildCommitEnvironment(context, proposal);
@@ -263,6 +264,7 @@ function factProjection<T>(value: unknown): FactProjection<T> {
 
 function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula[] {
   return records.flatMap((record) => {
+    if (record.outcome !== 'modality:herbal-formula') return [];
     const bundle = record.sourceBundle;
     if (!bundle || record.deliveryStatus !== 'DELIVERED') return [];
     return bundle.products.map((product): ProjectedFormula => {
@@ -308,6 +310,7 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
 
 function committedLegacyFormula(records: readonly CommitRecord[]): Record<string, unknown> | undefined {
   for (const record of records) {
+    if (record.outcome !== 'modality:herbal-formula') continue;
     const bundle = record.sourceBundle;
     if (!bundle || record.deliveryStatus !== 'DELIVERED') continue;
     const primary = bundle.products.find((product) => product.qualification === 'PRIMARY_SELECTED');
@@ -503,7 +506,37 @@ export class ClinicalRuntime {
       contractResolved: ledgerContractResolved(state, context.commitLedger),
       contractSatisfied: ledgerContractSatisfied(state, context.commitLedger),
     };
-    if (proposal.mode !== 'clinical') return { proposal, controlPlane };
+    const assessment = committedClinicalAssessment(context.commitLedger.all());
+    // Safety-urgent is a distinct presentation contract. Do not downgrade an urgent response into
+    // a normal clinical envelope merely to preserve ordinary no-progress semantics. The no-progress
+    // preservation rule below applies to conversation/clarification termination paths.
+    if (proposal.mode === 'urgent') return { proposal, controlPlane };
+    const fallbackDisease = typeof assessment?.disease === 'string'
+      ? assessment.disease
+      : context.workspace.clinicalDecisionSpine.diseaseAssessment?.statement ?? '未形成完整辨病结论';
+    const fallbackSyndrome = typeof assessment?.syndrome === 'string'
+      ? assessment.syndrome
+      : context.workspace.patternAssessment?.primary?.statement ?? '未形成完整辨证结论';
+    const fallbackPrinciple = typeof assessment?.treatmentPrinciple === 'string'
+      ? assessment.treatmentPrinciple
+      : context.workspace.clinicalDecisionSpine.treatmentPlan?.primaryPrinciple ?? '交付未完全收口';
+    const baseClinical = proposal.mode === 'clinical'
+      ? proposal
+      : {
+          mode: 'clinical' as const,
+          status: 'BLOCKED' as const,
+          disease: { name: fallbackDisease, confidence: 0, evidence_refs: [] as string[] },
+          syndrome: { name: fallbackSyndrome, confidence: 0, evidence_refs: [] as string[] },
+          treatment: { text: fallbackPrinciple, evidence_refs: [] as string[] },
+          missing_information: [
+            proposal.mode === 'conversation' ? proposal.message : 'Execution terminated before clinical submit; committed deliveries are preserved below.',
+          ],
+          safety: {
+            status: context.safety.status === 'BLOCK' ? 'BLOCK' as const : 'PASS' as const,
+            reviewRequired: context.safety.reviewRequired,
+            reviewReasons: context.safety.reviewReasons,
+          },
+        };
 
     const explicit = notDeliverable.map((o) =>
       `required outcome ${o.outcome} is NOT_DELIVERABLE: the knowledge base returned no qualified asset`
@@ -537,24 +570,24 @@ export class ClinicalRuntime {
     }));
     const committedFormula = committedLegacyFormula(context.commitLedger.all());
     const deliveries = committedDeliveries(context.commitLedger.all());
-    const assessment = committedClinicalAssessment(context.commitLedger.all());
-    const diseaseName = typeof assessment?.disease === 'string' ? assessment.disease : proposal.disease.name;
-    const syndromeName = typeof assessment?.syndrome === 'string' ? assessment.syndrome : proposal.syndrome.name;
+    const diseaseName = typeof assessment?.disease === 'string' ? assessment.disease : baseClinical.disease.name;
+    const syndromeName = typeof assessment?.syndrome === 'string' ? assessment.syndrome : baseClinical.syndrome.name;
     const treatmentPrinciple = typeof assessment?.treatmentPrinciple === 'string'
       ? assessment.treatmentPrinciple
-      : proposal.treatment.text;
-    const { formula: _proposalFormula, formula_set: _proposalFormulaSet, treatment_deliveries: _proposalTreatmentDeliveries, deliveries: _proposalDeliveries, ...proposalWithoutProducts } = proposal as typeof proposal & { deliveries?: unknown };
+      : baseClinical.treatment.text;
+    const { formula: _proposalFormula, formula_set: _proposalFormulaSet, treatment_deliveries: _proposalTreatmentDeliveries, deliveries: _proposalDeliveries, ...proposalWithoutProducts } = baseClinical as typeof baseClinical & { deliveries?: unknown };
     return {
       proposal: {
         ...proposalWithoutProducts,
-        disease: { ...proposal.disease, name: diseaseName },
-        syndrome: { ...proposal.syndrome, name: syndromeName },
-        treatment: { ...proposal.treatment, text: treatmentPrinciple },
+        status: controlPlane.contractSatisfied ? 'COMPLETED' : 'BLOCKED',
+        disease: { ...baseClinical.disease, name: diseaseName },
+        syndrome: { ...baseClinical.syndrome, name: syndromeName },
+        treatment: { ...baseClinical.treatment, text: treatmentPrinciple },
         ...(committedFormula ? { formula: committedFormula } : {}),
         ...(formulaProjection.length ? { formula_set: formulaProjection } : {}),
         ...(treatmentDeliveries.length ? { treatment_deliveries: treatmentDeliveries } : {}),
         ...(deliveries.length ? { deliveries } : {}),
-        missing_information: [...new Set([...proposal.missing_information, ...explicit])],
+        missing_information: [...new Set([...baseClinical.missing_information, ...explicit])],
       } as AgentResult,
       controlPlane,
     };
