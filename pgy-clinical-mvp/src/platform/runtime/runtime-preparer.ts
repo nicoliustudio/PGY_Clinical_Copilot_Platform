@@ -140,6 +140,7 @@ export class RuntimePreparer implements RuntimePreparationPort {
       const graph = deriveGraphV21(requestIR, capabilityDescriptors, workspace, appliedBlockers, this.deps.controlPlane.policy, context.commitLedger);
       context.controlPlaneV21 = {
         requestIR,
+        adoptedOutcomes: [],
         graph,
         durableArtifacts: [],
         compileStatus,

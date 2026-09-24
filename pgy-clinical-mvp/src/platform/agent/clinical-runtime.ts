@@ -21,6 +21,7 @@ import type { OutcomeProjectionV21 } from '../../control-plane-v21/result-projec
 import { treatmentDeliveryArtifacts, treatmentDeliveryCompleteness } from '../../clinical/capability-delivery.js';
 import { CandidateHandleRegistry } from '../commit/candidate-handle-registry.js';
 import { CommitCoordinator, type CommitEnvironment } from '../commit/commit-coordinator.js';
+import { buildClinicalAssessmentProduct, validateClinicalAssessmentFactOwnership } from '../commit/fact-ownership.js';
 import type { CommitRecord } from '../../contracts/commit.js';
 
 export interface ClinicalRunResult extends RuntimeRunResult {
@@ -159,11 +160,17 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
     readReasoningProduct: (ref) => {
       if (ref === 'clinical-assessment') {
         if (proposal.mode !== 'clinical') return undefined;
-        return {
+        const plan = context.workspace.clinicalDecisionSpine.treatmentPlan;
+        // Fact Ownership: the assessment commit owns principle-level clinical facts only. Exact
+        // modality execution (points/composition/operation/preparation/usage/frequency/course) is
+        // owned by its treatment delivery CommitRecord and must never be copied into this product.
+        return buildClinicalAssessmentProduct({
           disease: proposal.disease?.name ?? '',
           syndrome: proposal.syndrome?.name ?? '',
-          treatment: proposal.treatment?.text ?? '',
-        };
+          treatmentPrinciple: plan?.primaryPrinciple ?? proposal.treatment?.text ?? '',
+          treatmentTarget: plan?.treatmentTarget,
+          rationale: plan?.rationale,
+        });
       }
       const deliveries = treatmentDeliveryArtifacts(context.workspace);
       const idx = Number.parseInt(ref, 10);
@@ -172,14 +179,16 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
     },
     validateDelivery: (outcome, product) => {
       if (outcome === 'outcome:clinical-assessment') {
+        const ownership = validateClinicalAssessmentFactOwnership(product);
+        if (!ownership.ok) return { ok: false, code: 'IDENTITY_MISMATCH', missing: ownership.forbiddenFields };
         const disease = typeof product.disease === 'string' && product.disease.trim().length > 0;
         const syndrome = typeof product.syndrome === 'string' && product.syndrome.trim().length > 0;
-        const treatment = typeof product.treatment === 'string' && product.treatment.trim().length > 0;
-        if (disease && syndrome && treatment) {
+        const principle = typeof product.treatmentPrinciple === 'string' && product.treatmentPrinciple.trim().length > 0;
+        if (disease && syndrome && principle) {
           const provider = context.capabilities.find((c) => c.provides?.includes(outcome));
           return { ok: true, providerId: provider?.id ?? 'clinical-core' };
         }
-        return { ok: false, code: 'MISSING_REQUIRED_FIELDS', missing: ['disease', 'syndrome', 'treatment'] };
+        return { ok: false, code: 'MISSING_REQUIRED_FIELDS', missing: ['disease', 'syndrome', 'treatmentPrinciple'] };
       }
       const completeness = treatmentDeliveryCompleteness(context.capabilities, product);
       if (!completeness.complete) {
@@ -234,14 +243,21 @@ async function commitBaselineAssessment(
 }
 
 
-type FactProjection<T> = { presence?: string; value?: T };
+type FactProjection<T> = { presence: 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN'; value?: T; provenanceRefs: readonly string[] };
 
 function factProjection<T>(value: unknown): FactProjection<T> {
-  if (!value || typeof value !== 'object') return { presence: 'UNKNOWN' };
+  if (!value || typeof value !== 'object') return { presence: 'UNKNOWN', provenanceRefs: [] };
   const record = value as Record<string, unknown>;
+  const presence = record.presence === 'PRESENT' || record.presence === 'KNOWN_EMPTY' || record.presence === 'UNKNOWN'
+    ? record.presence
+    : 'UNKNOWN';
+  const provenanceRefs = Array.isArray(record.provenanceRefs)
+    ? record.provenanceRefs.filter((ref): ref is string => typeof ref === 'string')
+    : [];
   return {
-    presence: typeof record.presence === 'string' ? record.presence : 'UNKNOWN',
+    presence,
     ...(record.value !== undefined ? { value: record.value as T } : {}),
+    provenanceRefs,
   };
 }
 
@@ -258,6 +274,7 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
       const formulaLocal = factProjection<string[]>(modifications.formulaLocal);
       const sourceShared = factProjection<string[]>(modifications.sourceShared);
       const patientSpecific = factProjection<Array<{ statement?: string }>>(modifications.patientSpecific);
+      const preparation = factProjection<string>(payload.preparation);
       const usage = factProjection<string>(payload.usage);
       const localPresence = formulaLocal.presence === 'PRESENT'
         ? 'PRESENT'
@@ -278,6 +295,12 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
         ...(usage.presence === 'PRESENT' && usage.value ? { usage: usage.value } : {}),
         relation: product.qualification,
         applicableModifications: [],
+        facts: {
+          composition,
+          preparation,
+          usage,
+          modifications: { formulaLocal, sourceShared, patientSpecific },
+        },
       };
     });
   });
@@ -303,6 +326,11 @@ function committedLegacyFormula(records: readonly CommitRecord[]): Record<string
     };
   }
   return undefined;
+}
+
+function committedClinicalAssessment(records: readonly CommitRecord[]): Record<string, unknown> | undefined {
+  const record = records.find((item) => item.deliveryStatus === 'DELIVERED' && item.outcome === 'outcome:clinical-assessment');
+  return record?.product as Record<string, unknown> | undefined;
 }
 
 function committedTreatmentDeliveries(records: readonly CommitRecord[]): Array<Record<string, unknown>> {
@@ -362,9 +390,16 @@ export class ClinicalRuntime {
   async run(input: string, runId?: string, onEvent?: (event: AgentStreamEvent) => void): Promise<ClinicalRunResult> {
     const context = await this.preparer.prepare(input, runId);
     const output = await this.primaryAgent.run(context, onEvent);
-    recordCandidateDecision(output.proposal, context);
-    recordHypothesisDecision(output.proposal, context);
-    const proposal = await hydrateFormulaProposal(output.proposal, context);
+    const v21Authoritative = context.controlPlaneV21?.compileStatus === 'COMPILED';
+    // V2.1: proposal is a reasoning summary only. Post-hoc proposal candidate/syndrome fields may not
+    // mutate durable decision state or hydrate products. Legacy mode retains compatibility behavior.
+    if (!v21Authoritative) {
+      recordCandidateDecision(output.proposal, context);
+      recordHypothesisDecision(output.proposal, context);
+    }
+    const proposal = v21Authoritative
+      ? output.proposal
+      : await hydrateFormulaProposal(output.proposal, context);
 
     // canonical safety truth：模型 proposal.safety 不覆盖 canonical safety disposition。
     // 安全与 formula authority 正交；CAUTION 的 review 语义由 reviewRequired/reviewReasons + commit 的 executionClearance 承载。
@@ -387,7 +422,9 @@ export class ClinicalRuntime {
 
     // H8 Forensic：只记录 identity chain 进 Trace，不改变任何行为。
     if (proposal.mode === 'clinical') {
-      const ref = proposal.formula?.candidate_ref;
+      const ref = context.controlPlaneV21?.compileStatus === 'COMPILED'
+        ? context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef
+        : proposal.formula?.candidate_ref;
       let canonicalFormula: FormulaIdentityTrace['canonicalFormula'];
       if (ref) {
         const candidate = context.workspace.candidates.find((c) => c.kind === 'formula' && c.id === ref);
@@ -496,13 +533,23 @@ export class ClinicalRuntime {
         : {}),
       ...(formula.usage ? { usage: formula.usage } : {}),
       relation: formula.relation,
+      ...(formula.facts ? { facts: formula.facts } : {}),
     }));
     const committedFormula = committedLegacyFormula(context.commitLedger.all());
     const deliveries = committedDeliveries(context.commitLedger.all());
+    const assessment = committedClinicalAssessment(context.commitLedger.all());
+    const diseaseName = typeof assessment?.disease === 'string' ? assessment.disease : proposal.disease.name;
+    const syndromeName = typeof assessment?.syndrome === 'string' ? assessment.syndrome : proposal.syndrome.name;
+    const treatmentPrinciple = typeof assessment?.treatmentPrinciple === 'string'
+      ? assessment.treatmentPrinciple
+      : proposal.treatment.text;
     const { formula: _proposalFormula, formula_set: _proposalFormulaSet, treatment_deliveries: _proposalTreatmentDeliveries, deliveries: _proposalDeliveries, ...proposalWithoutProducts } = proposal as typeof proposal & { deliveries?: unknown };
     return {
       proposal: {
         ...proposalWithoutProducts,
+        disease: { ...proposal.disease, name: diseaseName },
+        syndrome: { ...proposal.syndrome, name: syndromeName },
+        treatment: { ...proposal.treatment, text: treatmentPrinciple },
         ...(committedFormula ? { formula: committedFormula } : {}),
         ...(formulaProjection.length ? { formula_set: formulaProjection } : {}),
         ...(treatmentDeliveries.length ? { treatment_deliveries: treatmentDeliveries } : {}),

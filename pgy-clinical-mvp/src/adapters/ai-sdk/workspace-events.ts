@@ -1,4 +1,5 @@
 import type { WorkspaceBatchResult, WorkspaceControlPort, WorkspaceEventDraft, WorkspaceEventType } from '../../contracts/workspace.js';
+import { isToolFailureOutput, serializeToolError } from '../../contracts/tool-failure.js';
 
 function readField(obj: unknown, key: string): unknown {
   return typeof obj === 'object' && obj !== null ? (obj as Record<string, unknown>)[key] : undefined;
@@ -70,6 +71,8 @@ export function workspaceEventsForTool(
   input: unknown,
   output: unknown,
 ): WorkspaceEventDraft[] {
+  // Failed validation is observational only: it must never persist the rejected input.
+  if (isToolFailureOutput(output) || readField(output, 'accepted') === false) return [];
   if (toolName === 'capability.activate') {
     const id = readField(input, 'id');
     if (typeof id !== 'string') return [];
@@ -437,7 +440,11 @@ export function workspaceEventsForTool(
       drafts.push({ type: 'formula.review.recorded', payload: formulaReview as Record<string, unknown> });
     }
     const completionObligation = firstDefinedField(input, 'completionObligation');
-    if (typeof completionObligation === 'object' && completionObligation !== null) {
+    const ignoredArtifacts = Array.isArray(readField(output, 'ignoredArtifacts'))
+      ? (readField(output, 'ignoredArtifacts') as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [];
+    if (!ignoredArtifacts.includes('completionObligation')
+      && typeof completionObligation === 'object' && completionObligation !== null) {
       drafts.push({ type: 'completion.obligation.recorded', payload: completionObligation as Record<string, unknown> });
     }
 
@@ -476,5 +483,5 @@ export function applyToolExecutionResult(
     }
     return { rawOutput };
   }
-  return { error: envelope.error };
+  return { error: serializeToolError(envelope.error) };
 }

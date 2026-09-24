@@ -29,6 +29,31 @@ import {
  * 4. 交付闭包绑定 obligationId + provider + semantic outcome，不因「某个通用 artifact 存在」而互相满足。
  */
 
+/**
+ * The compiled Request IR is immutable audit truth. Runtime adoption extends only the effective
+ * required-outcome set; it never rewrites what the user originally requested/excluded.
+ */
+export function effectiveRequestIRV21(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+): ClinicalRequestIR {
+  const adopted = state.adoptedOutcomes ?? [];
+  if (adopted.length === 0) return state.requestIR;
+  return {
+    ...state.requestIR,
+    outcomes: {
+      ...state.requestIR.outcomes,
+      required: [...new Set([...state.requestIR.outcomes.required, ...adopted])],
+    },
+  };
+}
+
+export function effectiveRequiredOutcomesV21(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+): string[] {
+  const ir = effectiveRequestIRV21(state);
+  return [...new Set([...state.policy.baselineOutcomes, ...ir.outcomes.required])];
+}
+
 export function structuralGraphV21(
   requestIR: ClinicalRequestIR,
   capabilityDescriptors: CapabilityDescriptor[],
@@ -72,7 +97,7 @@ export function refreshControlPlaneV21(context: RuntimeContext): void {
     evidenceClosures,
   );
   const graph = deriveGraphV21(
-    state.requestIR,
+    effectiveRequestIRV21(state),
     state.capabilityDescriptors,
     context.workspace,
     state.appliedBlockers,
@@ -178,7 +203,7 @@ export function ledgerContractSatisfied(
   state: NonNullable<RuntimeContext['controlPlaneV21']>,
   ledger: CommitLedger,
 ): boolean {
-  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  const required = new Set(effectiveRequiredOutcomesV21(state));
   const coverage = ledgerOutcomeCoverage(state, ledger);
   return [...required].every((outcome) => coverage.find((item) => item.outcome === outcome)?.status === 'DELIVERED');
 }
@@ -188,7 +213,7 @@ export function ledgerContractResolved(
   state: NonNullable<RuntimeContext['controlPlaneV21']>,
   ledger: CommitLedger,
 ): boolean {
-  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  const required = new Set(effectiveRequiredOutcomesV21(state));
   return [...required].every((outcome) => {
     if (ledger.delivered(outcome).length > 0) return true;
     return state.graph.nodes.some((n) => n.rootOutcomes.includes(outcome) && (n.status === 'NOT_DELIVERABLE' || n.status === 'BLOCKED'));
@@ -205,7 +230,7 @@ export function ledgerContractResolved(
  * `resolved` but NOT `satisfied`. OPEN means a legal effect could still advance the outcome.
  */
 export function contractResolved(state: NonNullable<RuntimeContext['controlPlaneV21']>): boolean {
-  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  const required = new Set(effectiveRequiredOutcomesV21(state));
   return [...required].every((outcome) => {
     // Mirror terminalNodesFor: prefer a node whose target carries the outcome qualifier,
     // else the shared unscoped root (e.g. clinical-core for the baseline assessment outcome).
@@ -220,7 +245,7 @@ export function contractResolved(state: NonNullable<RuntimeContext['controlPlane
 
 /** A required user contract is satisfied only when every required/baseline outcome is DELIVERED. */
 export function contractSatisfied(state: NonNullable<RuntimeContext['controlPlaneV21']>): boolean {
-  const required = new Set([...state.policy.baselineOutcomes, ...state.requestIR.outcomes.required]);
+  const required = new Set(effectiveRequiredOutcomesV21(state));
   const coverage = outcomeCoverage(state);
   return [...required].every((outcome) => coverage.find((item) => item.outcome === outcome)?.status === 'DELIVERED');
 }

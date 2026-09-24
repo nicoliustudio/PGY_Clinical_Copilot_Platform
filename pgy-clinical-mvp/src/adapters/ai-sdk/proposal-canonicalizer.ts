@@ -28,7 +28,10 @@ export async function canonicalizeProposalSubmit(
   // 只有当 candidate_ref 能解析到 canonical source/product（NORMATIVE）或 P2 case-derived 时才产出 formula。
   let formula: ClinicalResult['formula'];
 
-  if (ref) {
+  // Authority Cutover: under V2.1 a proposal candidate_ref is only a reasoning hint. It must not
+  // hydrate/materialize a product or create a second product authority path. Product materialization
+  // happens only inside Kernel delivery.commit from durable selection state.
+  if (ref && context.controlPlaneV21?.compileStatus !== 'COMPILED') {
     const candidate = context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula');
     if (candidate?.formulaId && candidate?.sourceId) {
       const canonical = await getCanonicalFormula(candidate.sourceId, candidate.formulaId, context.runId, docs);

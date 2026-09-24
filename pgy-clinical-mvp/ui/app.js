@@ -406,13 +406,35 @@ function renderClinical(r, authority) {
   const missing = (r.missing_information || []).map((m) => `<li>${esc(m)}</li>`).join('');
   const ev = (refs) => (refs || []).map((x) => `<span class="ev-refs">${esc(x)}</span>`).join('');
 
-  // formula_set 存在时是最终多方展示真源（同源 sibling 不静默丢弃）；legacy formula 仅作兼容回退。
+  const renderFact = (label, fact) => {
+    if (!fact || !fact.presence) return '';
+    if (fact.presence === 'PRESENT') {
+      const raw = fact.value;
+      const value = Array.isArray(raw)
+        ? raw.map((item) => typeof item === 'string' ? item : (item?.statement || JSON.stringify(item))).join('；')
+        : String(raw ?? '');
+      return `<div class="muted">${esc(label)}：${esc(value)}</div>`;
+    }
+    return `<div class="muted">${esc(label)}：${esc(fact.presence === 'KNOWN_EMPTY' ? '明确无' : 'UNKNOWN')}</div>`;
+  };
+
+  // formula_set 是 committed SourceBundle 的 lossless compatibility projection。
+  // UI 只渲染，不按 qualification/presence 再筛选 source member。
   let formulaLines = '';
   if (Array.isArray(r.formula_set) && r.formula_set.length) {
     formulaLines = r.formula_set.map((f) => {
       const rel = f.relation === 'PRIMARY_SELECTED' ? '主选' : (f.relation === 'CLINICALLY_EXCLUDED' ? '已排除' : '同源备选');
-      const mod = f.modification_text ? f.modification_text : (f.modification_status === 'KNOWN_EMPTY' ? '无加减' : '');
-      return `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(f.name)}${f.source_ref ? ` <span class="ev-refs">${esc(f.source_ref)}</span>` : ''} <span class="muted">${esc(rel)}</span>${mod ? ` <span class="mod">${esc(mod)}</span>` : ''}<div class="herb-list">${esc(f.composition || '')}</div></span></div>`;
+      const facts = f.facts || {};
+      const mods = facts.modifications || {};
+      const composition = facts.composition?.presence === 'PRESENT' ? facts.composition.value : f.composition;
+      return `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(f.name)}${f.source_ref ? ` <span class="ev-refs">${esc(f.source_ref)}</span>` : ''} <span class="muted">${esc(rel)}</span>
+        <div class="herb-list">${facts.composition ? renderFact('组成', facts.composition) : esc(composition || '')}</div>
+        ${renderFact('方内原始加减', mods.formulaLocal)}
+        ${renderFact('来源节点共享加减', mods.sourceShared)}
+        ${renderFact('患者个体化加减', mods.patientSpecific)}
+        ${renderFact('制备', facts.preparation)}
+        ${renderFact('用法', facts.usage)}
+      </span></div>`;
     }).join('');
   } else if (r.formula?.name || (r.formula?.composition || []).length) {
     const herbs = (r.formula?.composition || []).map((h) => `<span class="herb-pill">${esc(h)}</span>`).join('');

@@ -31,6 +31,7 @@ import { evaluateProposalReadiness } from '../../platform/workspace/proposal-rea
 import {
   applyEvidenceNeedBlocker,
   blockedObligationsV21,
+  effectiveRequiredOutcomesV21,
   openObligationsV21,
   outcomeCoverage,
   refreshControlPlaneV21,
@@ -46,6 +47,7 @@ import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, ty
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
 import { getFormulaHydrationStats, resetFormulaHydrationStats } from '../../clinical/formula.js';
 import { requiredDeliveryFields } from '../../clinical/capability-delivery.js';
+import { ToolContractError } from '../../contracts/tool-failure.js';
 
 /**
  * H2.5D：promotion gap 只作为 Agent projection / diagnostics / trace，不再自动扩大 reasoning loop。
@@ -77,9 +79,18 @@ function wrapToolWithLedger(id: string, t: ToolSet[string], ledger: ToolCallLedg
       const key = stateKey ? stateKey() : undefined;
       const cached = ledger.reuse(id, input, key);
       if (cached) return cached.output;
-      const output = await original(input, options);
-      ledger.record(id, input, output, key);
-      return output;
+      try {
+        const output = await original(input, options);
+        ledger.record(id, input, output, key);
+        return output;
+      } catch (error) {
+        if (error instanceof ToolContractError) {
+          const output = error.failure;
+          ledger.record(id, input, output, key);
+          return output;
+        }
+        throw error;
+      }
     },
   } as ToolSet[string];
 }
@@ -99,6 +110,7 @@ function isStatefulLedgerTool(id: string): boolean {
     || id === 'formula.get_modification_evidence'
     || id === 'proposal.submit'
     || id === 'delivery.commit'
+    || id === 'delivery.adopt'
     || id.startsWith('workspace.');
 }
 
@@ -107,7 +119,27 @@ function scopeStateKey(context: RuntimeContext): string {
 }
 
 function runtimeStateKey(context: RuntimeContext): string {
-  return `workspace:${context.workspaceStore.version}|${scopeStateKey(context)}`;
+  const adopted = [...(context.controlPlaneV21?.adoptedOutcomes ?? [])].sort().join(',');
+  const capabilities = context.capabilities.map((c) => c.id).sort().join(',');
+  return `workspace:${context.workspaceStore.version}|${scopeStateKey(context)}|caps:${capabilities}|adopted:${adopted}|commits:${context.commitLedger.all().length}`;
+}
+
+/**
+ * Generic liveness signature. It contains only durable/control-plane state that can legitimately
+ * advance the run; tool-call count itself is deliberately excluded so repeated ineffective calls
+ * do not masquerade as progress.
+ */
+export function durableProgressSignature(context: RuntimeContext): string {
+  const state = context.controlPlaneV21;
+  return JSON.stringify({
+    workspaceVersion: context.workspaceStore.version,
+    commitCount: context.commitLedger.all().length,
+    activeCapabilities: context.capabilities.map((c) => c.id).sort(),
+    adoptedOutcomes: [...(state?.adoptedOutcomes ?? [])].sort(),
+    graph: (state?.graph.nodes ?? [])
+      .map((node) => `${node.id}:${node.status}`)
+      .sort(),
+  });
 }
 
 function ledgerStateKeyFor(id: string, context: RuntimeContext): string | undefined {
@@ -282,6 +314,8 @@ export function controlPlaneTraceV21(
     requestCompileStatus: state.compileStatus,
     ...(state.compileError ? { requestCompileError: state.compileError } : {}),
     requiredOutcomes: [...state.requestIR.outcomes.required],
+    adoptedOutcomes: [...state.adoptedOutcomes],
+    effectiveRequiredOutcomes: effectiveRequiredOutcomesV21(state),
     preferredOutcomes: [...state.requestIR.outcomes.preferred],
     allowedOutcomes: [...(state.requestIR.outcomes.allowed ?? [])],
     excludedOutcomes: [...state.requestIR.outcomes.excluded],
@@ -431,7 +465,7 @@ const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence
 function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
   const state = context.controlPlaneV21;
   if (!state || state.compileStatus !== 'COMPILED') return '';
-  const required = state.requestIR.outcomes.required;
+  const required = effectiveRequiredOutcomesV21(state);
   if (required.length === 0) return '';
   const pending = [...new Set(state.graph.nodes
     .filter((node) => node.required
@@ -623,7 +657,7 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
     '',
     mode === 'harness'
       ? context.controlPlaneV21?.compileStatus === 'COMPILED'
-        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。先完成 PREPARED reasoning/draft；当 delivery.commit 出现在合法工具面时，必须提交对应 exact outcome。所有 required delivery 均已 commit 后再调用 proposal.submit。'
+        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。若临床推理形成了原 contract 之外、且未被 excluded/exclusive 禁止的明确产品意图，先用 delivery.adopt(explicit canonical outcome) 扩展 effective contract；adopt 只创建义务，不等于交付。随后完成 PREPARED reasoning/draft；当 delivery.commit 出现在合法工具面时，提交对应 exact outcome。所有 required delivery 均已 commit 后再调用 proposal.submit。'
         : '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
       : 'Classic A/B：Capability 已由 legacy resolver 预装配；不要调用 Harness capability controls。',
     mode === 'harness'
@@ -715,6 +749,10 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     let repeatedNoProgressCorrectionCount = 0;
     let repeatedUnresolvedHypothesisCorrectionCount = 0;
     let repeatedTreatmentContextCorrectionCount = 0;
+    const noProgressActionLimit = 4;
+    let consecutiveNoProgressActions = 0;
+    let lastDurableProgressSignature = durableProgressSignature(context);
+    let stoppedForNoProgress = false;
     const recordCorrection = (code: string) => {
       const v = context.workspaceStore.version;
       if (code === lastCorrectionCode && v === workspaceVersionAtLastCorrection) {
@@ -872,12 +910,13 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         };
       },
       stopWhen: mode === 'harness'
-        ? [proposalSubmitReadyStep(), isStepCount(maxSteps)]
+        ? [proposalSubmitReadyStep(), () => consecutiveNoProgressActions >= noProgressActionLimit, isStepCount(maxSteps)]
         : [isStepCount(maxSteps)],
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const internalName = fromApiToolName(toolCall.toolName);
-        const stateKey = internalName === 'capability.discover' ? capabilityStateKey(context) : undefined;
-        const reused = ledger.isReused(internalName, toolCall.input, stateKey);
+        // Reuse is captured before execution. Do not recompute a stateful key here: the tool may
+        // already have changed Workspace/adoption/commit state by the time this callback runs.
+        const reused = ledger.consumeInvocationReuse(internalName, toolCall.input);
         const executionRole = classifyExecutionRole(internalName);
         const actionId = `A_${String(++actionCounter).padStart(4, '0')}`;
         const nowMs = Date.now();
@@ -1202,6 +1241,11 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
           workspaceEventCursor = all.length;
           onEvent?.({ type: 'workspace', events: delta });
         }
+
+        const nextSignature = durableProgressSignature(context);
+        if (nextSignature === lastDurableProgressSignature) consecutiveNoProgressActions += 1;
+        else consecutiveNoProgressActions = 0;
+        lastDurableProgressSignature = nextSignature;
       },
     });
 
@@ -1236,6 +1280,11 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       usage = response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens } : usage;
 
       if (submittedProposal !== undefined) break;
+      if (consecutiveNoProgressActions >= noProgressActionLimit) {
+        stoppedForNoProgress = true;
+        finalContract = completionContractFor(context);
+        break;
+      }
 
       finalContract = completionContractFor(context);
       if (resourceSteps - stepCount <= 0) break;
@@ -1281,7 +1330,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       }
     } else {
       // H15.5.3：budget 耗尽且 contract 不完整 → EXECUTION_INCOMPLETE，不伪装成 clarification。
-      terminationReason = 'execution_incomplete';
+      terminationReason = stoppedForNoProgress ? 'no_progress' : 'execution_incomplete';
       forcedFinalization = true;
       proposalSubmitted = false;
       commitReliability.finalProposalCommittedCount = 1;
@@ -1296,7 +1345,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         : '';
       proposal = {
         mode: 'conversation',
-        message: `EXECUTION_INCOMPLETE: missing artifacts [${missing.join(', ')}]${blockerNote}`,
+        message: `${stoppedForNoProgress ? 'NO_PROGRESS' : 'EXECUTION_INCOMPLETE'}: missing artifacts [${missing.join(', ')}]${blockerNote}`,
       };
     }
 

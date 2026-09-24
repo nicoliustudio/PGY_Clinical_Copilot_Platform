@@ -24,6 +24,7 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
   { id: 'formula.get_evidence', description: '两阶段方剂检索第二阶段：展开完整方剂证据', risk: 'low', treatmentSpecific: true, effects: ['formula:hydrate'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
   { id: 'formula.get_modification_evidence', description: '基础方已选后检索随证 ADD 加味证据（ADVISORY）', risk: 'low', treatmentSpecific: true, effects: ['formula:hydrate'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
   { id: 'formula.validate', description: '验证 source/formula/composition 同源绑定', risk: 'low', effects: ['formula:validate'], effectPatternsV21: [{ op: 'validate', target: { type: 'artifact:formula-evidence' } }] },
+  { id: 'delivery.adopt', description: '显式扩展 effective delivery contract；只创建义务，不产生产品或 DELIVERED', risk: 'low', effects: ['delivery:adopt-contract'] },
   { id: 'delivery.commit', description: '将当前 exact outcome 的 PREPARED 交付提交到 Kernel CommitLedger；只有成功 CommitRecord 才算 DELIVERED', risk: 'low', effects: ['delivery:kernel-commit'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:treatment-delivery' } }] },
   // V2.1.1: durable clinical mutations also participate in the effect surface.
   // Fine-grained payload legality is checked again inside workspace.record_deliberation, so a broad
@@ -56,7 +57,7 @@ export const BASELINE_TOOL_IDS: string[] = PLATFORM_TOOLS.map((t) => t.id)
   // 统一由 formula.search_candidates（applicable P1 → P2 fallback）承担；
   // search_normative 保留为 gaofang 能力（膏方基础方 P1 检索）专用工具。
   .filter((id) => id !== 'formula.search_normative');
-export const CLASSIC_BASELINE_TOOL_IDS: string[] = BASELINE_TOOL_IDS.filter((id) => id !== 'knowledge.get_source' && id !== 'delivery.commit');
+export const CLASSIC_BASELINE_TOOL_IDS: string[] = BASELINE_TOOL_IDS.filter((id) => id !== 'knowledge.get_source' && id !== 'delivery.commit' && id !== 'delivery.adopt');
 export const BASELINE_KNOWLEDGE_SCOPES: string[] = ['general'];
 
 /** 平台级 baseline skills：不依赖任何业务 capability，随 harness.baseline 注入。 */

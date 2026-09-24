@@ -15,7 +15,7 @@ export interface CommitEnvironment {
   /** 解析唯一语义 provider 并校验 manifest-required 字段。 */
   validateDelivery(outcome: string, product: Readonly<Record<string, unknown>>):
     | { ok: true; providerId: string }
-    | { ok: false; code: 'NO_PROVIDER' | 'AMBIGUOUS_PROVIDER' | 'MISSING_REQUIRED_FIELDS'; missing?: string[] };
+    | { ok: false; code: 'NO_PROVIDER' | 'AMBIGUOUS_PROVIDER' | 'MISSING_REQUIRED_FIELDS' | 'IDENTITY_MISMATCH'; missing?: string[] };
   /** 从内部 candidate truth 水合 canonical product/source，并做 composition binding 校验。必须 fail closed。 */
   hydrateCanonicalCandidate(truth: CandidateTruth, outcome: string): Promise<
     | { ok: true; providerId: string; product: Readonly<Record<string, unknown>>; sourceBundle?: CommittedSourceBundle; sourceRefs: readonly string[] }

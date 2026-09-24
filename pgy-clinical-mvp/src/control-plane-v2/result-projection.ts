@@ -1,6 +1,28 @@
 import type { FormulaCardinality } from './types.js';
 import type { SourceFormulaSet } from '../contracts/workspace.js';
 
+export type ProjectedPresence = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN';
+export interface ProjectedFact<T> {
+  presence: ProjectedPresence;
+  value?: T;
+  provenanceRefs?: readonly string[];
+}
+
+export interface ProjectedFormulaFacts {
+  composition: ProjectedFact<string>;
+  preparation: ProjectedFact<string>;
+  usage: ProjectedFact<string>;
+  modifications: {
+    formulaLocal: ProjectedFact<string[]>;
+    sourceShared: ProjectedFact<string[]>;
+    patientSpecific: ProjectedFact<Array<{
+      statement?: string;
+      patientEvidenceRefs?: string[];
+      sourceEvidenceRefs?: string[];
+    }>>;
+  };
+}
+
 export interface ProjectedFormula {
   formulaRef: string;
   formulaId: string;
@@ -13,6 +35,8 @@ export interface ProjectedFormula {
   usage?: string;
   relation: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
   applicableModifications: SourceFormulaSet['formulas'][number]['applicableModifications'];
+  /** Lossless product facts. Legacy flat fields above remain compatibility helpers only. */
+  facts?: ProjectedFormulaFacts;
 }
 
 /**
@@ -42,5 +66,31 @@ export function projectFormulaSet(
     usage: f.usage,
     relation: f.relation,
     applicableModifications: f.applicableModifications,
+    facts: {
+      composition: {
+        presence: f.compositionPresence ?? (f.composition.trim() ? 'PRESENT' : 'UNKNOWN'),
+        ...(f.composition.trim() ? { value: f.composition } : {}),
+        provenanceRefs: [set.parentRecordRef],
+      },
+      preparation: { presence: 'UNKNOWN', provenanceRefs: [set.parentRecordRef] },
+      usage: {
+        presence: f.usagePresence ?? (f.usage === undefined ? 'UNKNOWN' : f.usage.trim() ? 'PRESENT' : 'KNOWN_EMPTY'),
+        ...(f.usage ? { value: f.usage } : {}),
+        provenanceRefs: [set.parentRecordRef],
+      },
+      modifications: {
+        formulaLocal: {
+          presence: f.formulaLocalModificationPresence ?? (f.sourceModifications.length ? 'PRESENT' : 'UNKNOWN'),
+          ...(f.sourceModifications.length ? { value: [...f.sourceModifications] } : {}),
+          provenanceRefs: [f.formulaRef],
+        },
+        sourceShared: {
+          presence: set.sourceLevelModificationPresence ?? (set.sourceLevelModifications.length ? 'PRESENT' : 'UNKNOWN'),
+          ...(set.sourceLevelModifications.length ? { value: [...set.sourceLevelModifications] } : {}),
+          provenanceRefs: [set.parentRecordRef],
+        },
+        patientSpecific: { presence: 'UNKNOWN', provenanceRefs: [] },
+      },
+    },
   }));
 }

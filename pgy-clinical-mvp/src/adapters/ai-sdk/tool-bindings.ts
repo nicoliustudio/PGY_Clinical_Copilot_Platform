@@ -18,22 +18,24 @@ import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
 import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
-import { admissibleEffects, refreshControlPlaneV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
+import { admissibleEffects, effectiveRequestIRV21, effectiveRequiredOutcomesV21, refreshControlPlaneV21, requiredArtifactsFromGraphV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
 import { commitDeliveryOutcome } from '../../platform/commit/delivery-transaction.js';
+import { toolContractError, toolFailure } from '../../contracts/tool-failure.js';
+import { resolveOutcomeProvider } from '../../control-plane-v21/provider-resolver.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
 export type AiSdkToolBindings = Record<string, AiSdkToolBindingFactory>;
 
 function assertKnownCandidateRef(context: RuntimeContext, candidateRef: string): void {
   if (!context.workspace.candidates.some((c) => c.id === candidateRef)) {
-    throw new Error(`unknown candidateRef: ${candidateRef}`);
+    throw toolContractError('UNKNOWN_CANDIDATE_REF', `unknown candidateRef: ${candidateRef}`, { path: 'candidateRef', received: candidateRef, allowedNextActions: ['use a candidateRef already present in workspace.candidates'] });
   }
 }
 
 function assertKnownHypothesisRef(context: RuntimeContext, hypothesisRef: string): void {
   if (!context.workspace.hypothesisState.hypotheses.some((h) => h.id === hypothesisRef)) {
-    throw new Error(`unknown hypothesisRef: ${hypothesisRef}`);
+    throw toolContractError('UNKNOWN_HYPOTHESIS_REF', `unknown hypothesisRef: ${hypothesisRef}`, { path: 'hypothesisRef', received: hypothesisRef, allowedNextActions: ['use a hypothesisRef already present in workspace.hypothesisState'] });
   }
 }
 
@@ -109,8 +111,9 @@ function v21EvidenceGapRunnable(context: RuntimeContext): boolean {
 function assertDeclaredDeliveryOutcomes(context: RuntimeContext, treatmentPlan?: Record<string, unknown>): void {
   const state = context.controlPlaneV21;
   if (!state || state.compileStatus !== 'COMPILED') return;
-  const contract = [...state.requestIR.outcomes.required, ...state.requestIR.outcomes.preferred];
-  if (contract.length === 0 || !treatmentPlan) return;
+  const effectiveIR = effectiveRequestIRV21(state);
+  const contract = [...new Set([...effectiveRequiredOutcomesV21(state), ...effectiveIR.outcomes.preferred])];
+  if (!treatmentPlan) return;
   const declared: unknown[] = [];
   const deliveries = treatmentPlan.treatmentDeliveries;
   if (Array.isArray(deliveries)) {
@@ -120,9 +123,32 @@ function assertDeclaredDeliveryOutcomes(context: RuntimeContext, treatmentPlan?:
   if (single && typeof single === 'object') declared.push((single as Record<string, unknown>).outcome);
   for (const value of declared) {
     if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !contract.includes(value)) {
+      const resolution = resolveOutcomeProvider(value, state.capabilityDescriptors);
+      if (resolution.status === 'RESOLVED') {
+        throw toolContractError(
+          'PRODUCT_OUTCOME_NOT_ADOPTED',
+          `registered treatment outcome ${value} is not part of the effective delivery contract`,
+          {
+            path: 'treatmentPlan.treatmentDeliveries[].outcome',
+            received: value,
+            expected: contract,
+            outcome: value,
+            allowedNextActions: ['call delivery.adopt with this exact outcome, then retry the deliberation unchanged'],
+          },
+        );
+      }
+    }
     if (typeof value !== 'string' || !contract.includes(value)) {
-      throw new Error(
+      throw toolContractError(
+        'INVALID_SEMANTIC_IDENTITY',
         `unknown treatment delivery outcome: ${String(value)}; active request outcomes are: ${contract.join(', ')}`,
+        {
+          path: 'treatmentPlan.treatmentDeliveries[].outcome',
+          received: value,
+          expected: contract,
+          allowedNextActions: ['copy an exact canonical outcome from the active contract', 'use delivery.adopt only with an exact registered outcome'],
+        },
       );
     }
   }
@@ -155,10 +181,10 @@ function assertV21DeliberationLegality(
   if (!allowed) return;
   const changesCore = Boolean(input.diseaseAssessment || input.patternAssessment || (input.hypothesisUpdates?.length ?? 0) > 0);
   if (changesCore && !allowed.has('artifact:clinical-core')) {
-    throw new Error('V2.1 illegal mutation: clinical-core is not currently runnable');
+    throw toolContractError('ILLEGAL_MUTATION_PHASE', 'V2.1 illegal mutation: clinical-core is not currently runnable', { artifact: 'artifact:clinical-core', allowedNextActions: ['advance a currently runnable obligation', 'submit when the canonical graph is complete'] });
   }
   if (input.formulaSelection && !allowed.has('artifact:formula-selection')) {
-    throw new Error('V2.1 illegal mutation: formula-selection is not currently runnable');
+    throw toolContractError('ILLEGAL_MUTATION_PHASE', 'V2.1 illegal mutation: formula-selection is not currently runnable', { artifact: 'artifact:formula-selection', allowedNextActions: ['satisfy the formula evidence obligation first'] });
   }
 }
 
@@ -654,7 +680,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     }),
     execute: async (input) => {
       const errors = validateCandidateAssessmentRefs(context.workspace, input);
-      if (errors.length > 0) throw new Error(errors.join('; '));
+      if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
       return input;
     },
   }),
@@ -713,13 +739,13 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           contradictingEvidenceRefs: a.contradictingEvidenceRefs ?? [],
           assessmentEvidenceRefs: a.assessmentEvidenceRefs ?? [],
         });
-        if (errors.length > 0) throw new Error(errors.join('; '));
+        if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
       }
       for (const x of exclusions ?? []) assertKnownCandidateRef(context, x.candidateRef);
       for (const u of hypothesisUpdates ?? []) assertKnownHypothesisRef(context, u.hypothesisRef);
       if (patternAssessment) {
         const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
-        if (errors.length > 0) throw new Error(errors.join('; '));
+        if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
       }
       if (formulaSelection?.selectedCandidateRef) {
         assertKnownCandidateRef(context, formulaSelection.selectedCandidateRef);
@@ -744,7 +770,8 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       if (formulaSelection) updatedArtifacts.push('formulaSelection');
       if (modificationPlan) updatedArtifacts.push('modificationPlan');
       if (formulaReview) updatedArtifacts.push('formulaReview');
-      if (completionObligation) updatedArtifacts.push('completionObligation');
+      const graphOwnsCompletion = context.controlPlaneV21?.compileStatus === 'COMPILED';
+      if (completionObligation && !graphOwnsCompletion) updatedArtifacts.push('completionObligation');
       if (focusedCandidates && focusedCandidates.length > 0) updatedArtifacts.push('focusedCandidates');
       if (assessments && assessments.length > 0) updatedArtifacts.push('candidateAssessments');
       if (exclusions && exclusions.length > 0) updatedArtifacts.push('candidateExclusions');
@@ -754,6 +781,11 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         accepted: true,
         updatedArtifacts,
         remainingDecisionChangingUnknowns: remainingDecisionChangingUnknowns ?? [],
+        ...(graphOwnsCompletion ? {
+          completionAuthority: 'CONTROL_PLANE_GRAPH',
+          ignoredArtifacts: completionObligation ? ['completionObligation'] : [],
+          canonicalRequiredArtifacts: requiredArtifactsFromGraphV21(context.controlPlaneV21!),
+        } : {}),
       };
     },
   }),
@@ -769,9 +801,68 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     execute: async (input) => {
       const allowed = v21AdmissibleCommitTypes(context);
       if (allowed && !allowed.has('artifact:clinical-core')) {
-        throw new Error('V2.1 illegal mutation: hypothesis creation is closed after clinical-core completion');
+        throw toolContractError('ILLEGAL_MUTATION_PHASE', 'V2.1 illegal mutation: hypothesis creation is closed after clinical-core completion', { artifact: 'artifact:clinical-core', allowedNextActions: ['submit or advance a currently runnable delivery obligation'] });
       }
       return input;
+    },
+  }),
+  'delivery.adopt': (context) => tool({
+    description: 'Explicitly extend the effective delivery contract with one exact registered outcome discovered during clinical reasoning. Adoption creates obligations only; it never creates a product or DELIVERED state.',
+    inputSchema: z.object({ outcome: z.string().min(1), reason: z.string().optional() }),
+    execute: async ({ outcome }) => {
+      const state = context.controlPlaneV21;
+      if (!state || state.compileStatus !== 'COMPILED') {
+        return toolFailure('CONTROL_PLANE_UNAVAILABLE', 'delivery.adopt requires a compiled control-plane contract');
+      }
+      const original = state.requestIR;
+      const originallyDeclared = new Set([
+        ...original.outcomes.required,
+        ...original.outcomes.preferred,
+        ...(original.outcomes.allowed ?? []),
+      ]);
+      if (original.outcomes.excluded.includes(outcome)) {
+        return toolFailure('OUTCOME_EXCLUDED', `outcome ${outcome} was explicitly excluded by the user request`, {
+          outcome,
+          allowedNextActions: ['respect the excluded outcome and continue with the remaining contract'],
+        });
+      }
+      if (original.outcomes.exclusive && !originallyDeclared.has(outcome)) {
+        return toolFailure('EXCLUSIVE_CONTRACT_VIOLATION', `exclusive request forbids adopting ${outcome}`, {
+          outcome,
+          expected: [...originallyDeclared],
+          allowedNextActions: ['continue with an outcome already admitted by the exclusive request'],
+        });
+      }
+      const resolution = resolveOutcomeProvider(outcome, state.capabilityDescriptors);
+      if (resolution.status === 'UNSUPPORTED') {
+        return toolFailure('UNSUPPORTED_OUTCOME', `no enabled provider declares exact outcome ${outcome}`, {
+          outcome,
+          allowedNextActions: ['use an exact semantic outcome declared by the enabled registry'],
+        });
+      }
+      if (resolution.status === 'AMBIGUOUS') {
+        return toolFailure('AMBIGUOUS_PROVIDER', `multiple providers declare exact outcome ${outcome}`, {
+          outcome,
+          details: resolution.candidates,
+          allowedNextActions: ['resolve provider ambiguity in capability manifests before adoption'],
+        });
+      }
+      const alreadyRequired = effectiveRequiredOutcomesV21(state).includes(outcome);
+      if (!alreadyRequired) state.adoptedOutcomes.push(outcome);
+      const providerId = resolution.candidates[0]?.capabilityId;
+      if (providerId && !context.harness.isCapabilityActive(providerId)) {
+        context.harness.activateCapability(providerId, 'control-plane-v21:delivery-adopt');
+      }
+      refreshControlPlaneV21(context);
+      return {
+        ok: true,
+        outcome,
+        adopted: !alreadyRequired,
+        effectiveRequiredOutcomes: effectiveRequiredOutcomesV21(state),
+        nextObligations: runnableObligations(state)
+          .filter((node) => node.rootOutcomes.includes(outcome))
+          .map((node) => ({ id: node.id, type: node.target.type, outcome: node.target.qualifiers?.outcome })),
+      };
     },
   }),
   'delivery.commit': (context) => tool({
@@ -780,7 +871,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     execute: async ({ outcome }) => {
       const state = context.controlPlaneV21;
       if (!state || state.compileStatus !== 'COMPILED') {
-        return { ok: false, code: 'CONTROL_PLANE_UNAVAILABLE' };
+        return toolFailure('CONTROL_PLANE_UNAVAILABLE', 'control plane is unavailable; no exact delivery contract can be committed');
       }
       refreshControlPlaneV21(context);
       const runnable = runnableObligations(state).find((node) =>
@@ -788,11 +879,19 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         && node.target.qualifiers?.outcome === outcome
       );
       if (!runnable) {
-        return { ok: false, code: 'DELIVERY_NOT_RUNNABLE', outcome };
+        return toolFailure('DELIVERY_NOT_RUNNABLE', `delivery is not runnable for outcome ${outcome}`, { outcome, allowedNextActions: ['advance the prerequisite obligations shown in the current control-plane graph'] });
       }
       const result = await commitDeliveryOutcome(context, outcome);
       refreshControlPlaneV21(context);
-      if (!result.ok) return result;
+      if (!result.ok) {
+        return toolFailure(result.code, `delivery commit failed for ${outcome}: ${result.code}`, {
+          outcome,
+          details: result.details,
+          allowedNextActions: result.code === 'MISSING_REQUIRED_FIELDS'
+            ? ['complete the provider-declared required product fields, then retry delivery.commit']
+            : ['repair the deterministic commit precondition, then retry delivery.commit'],
+        });
+      }
       return {
         ok: true,
         commitId: result.record.commitId,

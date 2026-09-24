@@ -5,6 +5,12 @@ import { FORMULA_AUTHORITY_STATES } from './proposal.js';
  * Agent 输出契约 —— 机器可评测的区分结构（conversation/clarification/urgent/clinical）。
  * 注意：Agent 输出始终是 Proposal，Authority Pipeline 之后才可能成为权威状态。
  */
+const projectedFactSchema = z.object({
+  presence: z.enum(['PRESENT', 'KNOWN_EMPTY', 'UNKNOWN']),
+  value: z.unknown().optional(),
+  provenanceRefs: z.array(z.string()).optional(),
+});
+
 export const clinicalResultSchema = z.object({
   mode: z.literal('clinical'),
   status: z.enum(['COMPLETED', 'BLOCKED']),
@@ -54,6 +60,16 @@ export const clinicalResultSchema = z.object({
     source_level_modification_rules: z.array(z.string()).optional(),
     usage: z.string().optional(),
     relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
+    facts: z.object({
+      composition: projectedFactSchema,
+      preparation: projectedFactSchema,
+      usage: projectedFactSchema,
+      modifications: z.object({
+        formulaLocal: projectedFactSchema,
+        sourceShared: projectedFactSchema,
+        patientSpecific: projectedFactSchema,
+      }),
+    }).optional(),
   })).optional(),
   /** First-class authoritative projection. Every entry is derived from a Kernel CommitRecord. */
   deliveries: z.array(z.object({

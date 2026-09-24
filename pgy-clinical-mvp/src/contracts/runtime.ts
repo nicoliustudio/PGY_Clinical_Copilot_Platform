@@ -83,7 +83,10 @@ export interface RuntimeContext {
   commitLedger: CommitLedger;
   /** V2.1 shadow/cutover state. Uses the same Request IR with parameterized planning semantics. */
   controlPlaneV21?: {
+    /** Immutable user-compiled request. Contract expansion is recorded separately in adoptedOutcomes. */
     requestIR: ClinicalRequestIR;
+    /** Kernel-owned append-only contract extensions created only by delivery.adopt. */
+    adoptedOutcomes: string[];
     graph: ObligationGraphV21;
     durableArtifacts: DurableArtifactEnvelopeV21[];
     /** Request IR 是否成功编译；FAILED 时 V2.1 不接管 action surface（退化为纯观测）。 */

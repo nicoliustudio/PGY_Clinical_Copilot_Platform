@@ -39,5 +39,6 @@ test('tool-error envelope 不产生 evidence event', () => {
 
   assert.equal(store.trace().length, before);
   assert.equal(workspace.evidenceState.evidenceItems.length, 0);
-  assert.ok(result.error instanceof Error);
+  // Typed failure / error serialization contract：error 必须是 JSON-safe 结构，不再是裸 Error 或 {}。
+  assert.equal((result.error as { message?: string } | undefined)?.message, 'boom');
 });

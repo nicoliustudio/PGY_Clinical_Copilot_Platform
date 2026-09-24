@@ -25,6 +25,21 @@ test('identical deterministic tool call 可复用结果', () => {
   assert.equal(ledger.isReused('knowledge.get_source', input), true);
 });
 
+test('stateful reuse decision is captured at invocation time, not recomputed after state changes', () => {
+  const ledger = new ToolCallLedger();
+  const input = { outcome: 'modality:test' };
+  assert.equal(ledger.reuse('workspace.record_deliberation', input, 'state:v1'), undefined);
+  ledger.record('workspace.record_deliberation', input, { ok: false }, 'state:v1');
+  assert.equal(ledger.consumeInvocationReuse('workspace.record_deliberation', input), false);
+
+  const cached = ledger.reuse('workspace.record_deliberation', input, 'state:v1');
+  assert.ok(cached);
+  // Even if the mutable state has already moved to v2 by callback time, the invocation truth is stable.
+  assert.equal(ledger.consumeInvocationReuse('workspace.record_deliberation', input), true);
+  assert.equal(ledger.reuse('workspace.record_deliberation', input, 'state:v2'), undefined);
+  assert.equal(ledger.consumeInvocationReuse('workspace.record_deliberation', input), false);
+});
+
 test('对象 key 顺序不影响 deterministic 身份', () => {
   assert.equal(stableStringify({ a: 1, b: 2 }), stableStringify({ b: 2, a: 1 }));
   assert.notEqual(stableStringify({ a: 1, b: 2 }), stableStringify({ a: 1, b: 3 }));

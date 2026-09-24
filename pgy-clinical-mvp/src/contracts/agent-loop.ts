@@ -29,6 +29,7 @@ export type TerminationReason =
   | 'timeout_fallback'
   | 'agent_stopped_without_submit'
   | 'execution_incomplete'
+  | 'no_progress'
   | 'runtime_committed_ready_state'
   | 'provider_error';
 
@@ -57,7 +58,12 @@ export interface ControlPlaneTraceV21 {
   /** COMPILED：Request IR 建立成功，V2.1 拥有调度主权；FAILED：仅观测。 */
   requestCompileStatus: 'COMPILED' | 'FAILED';
   requestCompileError?: string;
+  /** Immutable user-compiled required outcomes. */
   requiredOutcomes: string[];
+  /** Kernel-owned contract expansions accepted through delivery.adopt. */
+  adoptedOutcomes?: string[];
+  /** Baseline + immutable request + adopted outcomes used by the live graph. */
+  effectiveRequiredOutcomes?: string[];
   preferredOutcomes: string[];
   /** V2.1.3：允许但不要求（“可以考虑”）；永不创建 obligation。 */
   allowedOutcomes: string[];

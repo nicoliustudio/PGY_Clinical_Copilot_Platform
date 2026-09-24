@@ -23,9 +23,22 @@ export function stableStringify(value: unknown): string {
 export class ToolCallLedger {
   private readonly results = new Map<string, { output: unknown; entry: ToolCallLedgerEntry }>();
   private readonly calls = new Map<string, number>();
+  private readonly invocationReuse = new Map<string, boolean[]>();
 
   private static key(toolName: string, input: unknown, stateKey?: string): string {
     return `${toolName}\u0000${stateKey ?? ''}\u0000${stableStringify(input)}`;
+  }
+
+  /** Invocation identity excludes stateKey because callbacks run after mutable state may change. */
+  private static invocationKey(toolName: string, input: unknown): string {
+    return `${toolName}\u0000${stableStringify(input)}`;
+  }
+
+  private recordInvocationReuse(toolName: string, input: unknown, reused: boolean): void {
+    const key = ToolCallLedger.invocationKey(toolName, input);
+    const queue = this.invocationReuse.get(key) ?? [];
+    queue.push(reused);
+    this.invocationReuse.set(key, queue);
   }
 
   /** 每次执行前调用；返回本次是该 key 的第几次调用（>1 即复用）。 */
@@ -39,7 +52,22 @@ export class ToolCallLedger {
   /** 尝试复用结果。返回 undefined 表示首次执行，应真实执行。stateKey 用于 stateful 工具（如 capability.discover）。 */
   reuse(toolName: string, input: unknown, stateKey?: string): { output: unknown } | undefined {
     this.bump(toolName, input, stateKey);
-    return this.results.get(ToolCallLedger.key(toolName, input, stateKey));
+    const cached = this.results.get(ToolCallLedger.key(toolName, input, stateKey));
+    this.recordInvocationReuse(toolName, input, cached !== undefined);
+    return cached;
+  }
+
+  /**
+   * Consume the reuse decision captured at invocation time. Never recompute a mutable stateKey in
+   * an after-execution callback.
+   */
+  consumeInvocationReuse(toolName: string, input: unknown): boolean {
+    const key = ToolCallLedger.invocationKey(toolName, input);
+    const queue = this.invocationReuse.get(key);
+    if (!queue || queue.length === 0) return false;
+    const reused = queue.shift() ?? false;
+    if (queue.length === 0) this.invocationReuse.delete(key);
+    return reused;
   }
 
   /** 记录一次真实执行的确定性结果。 */

@@ -79,6 +79,45 @@ test('buildResultView：deterministic formula_set / treatment_deliveries 不得�
   assert.deepEqual(view.treatment_deliveries?.[0].details, { points: ['合谷'], operation: '平补平泻', frequency: '每日1次', course: '10次' });
 });
 
+test('buildResultView：source products N→N 且三态/三类 modification facts 原样保留', () => {
+  const mkFacts = (localPresence: 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN') => ({
+    composition: { presence: 'PRESENT' as const, value: '药A 10g', provenance_refs: ['P1:a'] },
+    preparation: { presence: 'UNKNOWN' as const, provenance_refs: ['P1:a'] },
+    usage: { presence: 'KNOWN_EMPTY' as const, provenance_refs: ['P1:a'] },
+    modifications: {
+      formulaLocal: localPresence === 'PRESENT'
+        ? { presence: 'PRESENT' as const, value: ['加味A'], provenance_refs: ['P1:a::f1'] }
+        : { presence: localPresence, provenance_refs: ['P1:a::f1'] },
+      sourceShared: { presence: 'PRESENT' as const, value: ['共享加减'], provenance_refs: ['P1:a'] },
+      patientSpecific: { presence: 'UNKNOWN' as const, provenance_refs: [] },
+    },
+  });
+  const view = buildResultView(clinicalResult({
+    formula_set: [
+      {
+        formula_ref: 'P1:a::f1', formula_id: 'f1', name: '方一', composition: '药A 10g', source_ref: 'P1:a',
+        modification_rules: ['加味A'], modification_status: 'PRESENT', modification_text: '加味A', relation: 'PRIMARY_SELECTED', facts: mkFacts('PRESENT'),
+      },
+      {
+        formula_ref: 'P1:a::f2', formula_id: 'f2', name: '方二', composition: '药B 10g', source_ref: 'P1:a',
+        modification_rules: [], modification_status: 'KNOWN_EMPTY', modification_text: '无加减', relation: 'SOURCE_ALTERNATIVE', facts: mkFacts('KNOWN_EMPTY'),
+      },
+      {
+        formula_ref: 'P1:a::f3', formula_id: 'f3', name: '方三', composition: '药C 10g', source_ref: 'P1:a',
+        modification_rules: [], modification_status: 'UNKNOWN', modification_text: 'UNKNOWN', relation: 'CLINICALLY_EXCLUDED', facts: mkFacts('UNKNOWN'),
+      },
+    ],
+  }));
+
+  assert.equal(view.formula_set?.length, 3, 'UI DTO must not drop clinically excluded source siblings');
+  assert.equal(view.formula_set?.[2].relation, 'CLINICALLY_EXCLUDED');
+  assert.equal(view.formula_set?.[0].facts?.modifications.formulaLocal.presence, 'PRESENT');
+  assert.equal(view.formula_set?.[1].facts?.modifications.formulaLocal.presence, 'KNOWN_EMPTY');
+  assert.equal(view.formula_set?.[2].facts?.modifications.formulaLocal.presence, 'UNKNOWN');
+  assert.deepEqual(view.formula_set?.[0].facts?.modifications.sourceShared.value, ['共享加减']);
+  assert.equal(view.formula_set?.[0].facts?.modifications.patientSpecific.presence, 'UNKNOWN');
+});
+
 test('buildResultView：urgent 输出映射 message + risks', () => {
   const view = buildResultView({ mode: 'urgent', message: '需立即就医', risks: [{ description: '出血', severity: 'high' }] } as AgentResult);
   assert.equal(view.mode, 'urgent');
