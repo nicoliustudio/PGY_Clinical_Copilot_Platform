@@ -146,18 +146,29 @@ function baseDoc(
 function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
   const entries = loadJson<NormativeEntry[]>(path.join(config.kb.releaseDir, 'normative.json'));
   return entries.map((n) => {
-    const formulas: NormativeFormula[] = (n.formulas ?? []).map((f) => ({
-      id: str(f.id),
-      name: str(f.name),
-      composition: str(f.composition ?? f.raw_composition),
-      sourceModifications: normalizeSourceModificationList(f.inline_modification_text, f.inline_modifications),
-      usage: str(f.usage) || undefined,
-      sourceNote: str(f.source_note) || undefined,
-      sourceTier: str(f.source_tier),
-      knowledgeRole: str(f.knowledge_role),
-      entityStatus: str(f.entity_status),
-    }));
-    const sourceModifications = normalizeSourceModificationList(n.modification, n.modification_rules);
+    const formulas: NormativeFormula[] = (n.formulas ?? []).map((f) => {
+      const localModificationsDeclared = Object.prototype.hasOwnProperty.call(f, 'inline_modification_text')
+        || Object.prototype.hasOwnProperty.call(f, 'inline_modifications');
+      const usageDeclared = Object.prototype.hasOwnProperty.call(f, 'usage');
+      return {
+        id: str(f.id),
+        name: str(f.name),
+        composition: str(f.composition ?? f.raw_composition),
+        ...(localModificationsDeclared
+          ? { sourceModifications: normalizeSourceModificationList(f.inline_modification_text, f.inline_modifications) }
+          : {}),
+        ...(usageDeclared ? { usage: str(f.usage) } : {}),
+        sourceNote: str(f.source_note) || undefined,
+        sourceTier: str(f.source_tier),
+        knowledgeRole: str(f.knowledge_role),
+        entityStatus: str(f.entity_status),
+      };
+    });
+    const sourceModificationsDeclared = Object.prototype.hasOwnProperty.call(n, 'modification')
+      || Object.prototype.hasOwnProperty.call(n, 'modification_rules');
+    const sourceModifications = sourceModificationsDeclared
+      ? normalizeSourceModificationList(n.modification, n.modification_rules)
+      : undefined;
     const parts = [
       n.disease ? `病名：${n.disease}` : '',
       n.syndrome ? `证型：${n.syndrome}` : '',
@@ -168,7 +179,7 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
         ...((f.sourceModifications ?? []).length > 0 ? [`方剂加减：${(f.sourceModifications ?? []).join('；')}`] : []),
         ...(f.usage ? [`方剂用法：${f.usage}`] : []),
       ]),
-      ...(sourceModifications.length > 0 ? [`来源节点加减：${sourceModifications.join('；')}`] : []),
+      ...((sourceModifications?.length ?? 0) > 0 ? [`来源节点加减：${sourceModifications!.join('；')}`] : []),
     ].filter(Boolean);
     return baseDoc(layer, {
       id: `P1:${n.id}`,
@@ -182,7 +193,7 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
       sourceFile: str(n.source_file),
       sourceSchool: classifySourceSchool(str(n.source)),
       formulas,
-      sourceModifications,
+      ...(sourceModificationsDeclared ? { sourceModifications: sourceModifications ?? [] } : {}),
       raw: n,
     });
   });
@@ -394,7 +405,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   if (!force && existsSync(cacheFile)) {
     const cached = loadJson<KnowledgeIndex>(cacheFile);
     // Durable knowledge shape changed: stale caches must never hide source-preserved product fields.
-    if (cached.schemaVersion === 2 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
+    if (cached.schemaVersion === 3 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
       return cached;
     }
     console.log('[index] 检测到旧 schema 缓存，重建索引');
@@ -410,7 +421,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const vectors = await embed(docs.map((d) => d.text));
 
   const index: KnowledgeIndex = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     version: releaseVersion,
     releaseVersion,
     builtAt: new Date().toISOString(),

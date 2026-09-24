@@ -36,6 +36,8 @@ export interface ResultView {
     candidate_ref?: string;
     evidence_refs: string[];
   };
+  /** First-class authoritative deliveries; UI renders, never re-selects. */
+  deliveries?: NonNullable<ClinicalResult['deliveries']>;
   /** Deterministic multi-formula projection. UI renders, never re-selects. */
   formula_set?: NonNullable<ClinicalResult['formula_set']>;
   /** Deterministic multi-modality treatment deliveries. UI renders, never re-selects. */
@@ -55,6 +57,7 @@ export function buildResultView(result: AgentResult): ResultView {
     view.syndrome = result.syndrome;
     view.treatment = result.treatment;
     view.formula = result.formula;
+    view.deliveries = result.deliveries;
     view.formula_set = result.formula_set;
     view.treatment_deliveries = result.treatment_deliveries;
     view.missing_information = result.missing_information;
@@ -196,6 +199,7 @@ export interface TraceView {
   agentLoop?: RunTrace['agentLoop'];
   contextMetrics?: RunTrace['contextMetrics'];
   runMetrics?: RunTrace['runMetrics'];
+  commits?: RunTrace['commits'];
   snapshot: {
     modelProfileId?: string;
     promptHash?: string;
@@ -220,6 +224,7 @@ export function buildTraceView(trace: RunTrace): TraceView {
     agentLoop: trace.agentLoop,
     contextMetrics: trace.contextMetrics,
     runMetrics: trace.runMetrics,
+    commits: trace.commits,
     snapshot: {
       modelProfileId: trace.modelProfileId,
       promptHash: trace.promptHash,

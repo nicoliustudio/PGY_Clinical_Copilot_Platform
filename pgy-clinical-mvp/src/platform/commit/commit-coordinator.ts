@@ -17,7 +17,7 @@ export interface CommitEnvironment {
     | { ok: true; providerId: string }
     | { ok: false; code: 'NO_PROVIDER' | 'AMBIGUOUS_PROVIDER' | 'MISSING_REQUIRED_FIELDS'; missing?: string[] };
   /** 从内部 candidate truth 水合 canonical product/source，并做 composition binding 校验。必须 fail closed。 */
-  hydrateCanonicalCandidate(truth: CandidateTruth): Promise<
+  hydrateCanonicalCandidate(truth: CandidateTruth, outcome: string): Promise<
     | { ok: true; providerId: string; product: Readonly<Record<string, unknown>>; sourceBundle?: CommittedSourceBundle; sourceRefs: readonly string[] }
     | { ok: false; code: 'CANONICAL_HYDRATION_FAILED' | 'SOURCE_BINDING_MISMATCH' }
   >;
@@ -41,7 +41,7 @@ export class CommitCoordinator {
       const truth = this.handles.resolve(intent.candidateHandle);
       if (!truth) return { ok: false, code: 'UNKNOWN_HANDLE' };
 
-      const hydrated = await env.hydrateCanonicalCandidate(truth);
+      const hydrated = await env.hydrateCanonicalCandidate(truth, intent.outcome);
       if (!hydrated.ok) return { ok: false, code: hydrated.code };
 
       return {
@@ -79,11 +79,16 @@ export class CommitCoordinator {
           providerId: validation.providerId,
           deliveryStatus: 'DELIVERED',
           executionClearance: clearance,
-          provenance: {
-            kind: 'MODEL_DERIVED',
-            sourceRefs: [],
-            providerId: validation.providerId,
-          },
+          provenance: (() => {
+            const refs = Array.isArray(draft.sourceEvidenceRefs)
+              ? draft.sourceEvidenceRefs.filter((ref): ref is string => typeof ref === 'string' && ref.trim().length > 0)
+              : [];
+            return {
+              kind: refs.length > 0 ? 'CASE_DERIVED' as const : 'MODEL_DERIVED' as const,
+              sourceRefs: refs,
+              providerId: validation.providerId,
+            };
+          })(),
           product: draft,
         }),
       };

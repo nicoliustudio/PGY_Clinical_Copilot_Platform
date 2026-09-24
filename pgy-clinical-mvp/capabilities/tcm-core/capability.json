@@ -20,11 +20,29 @@
     "terms": [
       {
         "term": "modality:herbal-formula",
-        "aliases": ["汤药", "汤剂", "中药", "中药方", "方剂", "开方", "处方", "饮片"]
+        "aliases": [
+          "汤药",
+          "汤剂",
+          "中药",
+          "中药方",
+          "方剂",
+          "开方",
+          "处方",
+          "饮片"
+        ]
       },
       {
         "term": "outcome:clinical-assessment",
-        "aliases": ["辨证", "辨证论治", "证型判断", "病机分析", "治法", "治则", "治疗原则", "治疗大法"]
+        "aliases": [
+          "辨证",
+          "辨证论治",
+          "证型判断",
+          "病机分析",
+          "治法",
+          "治则",
+          "治疗原则",
+          "治疗大法"
+        ]
       }
     ]
   },
@@ -120,10 +138,7 @@
         ]
       },
       {
-        "id": "formula-delivery",
-        "forOutcomes": [
-          "modality:herbal-formula"
-        ],
+        "id": "formula-selection",
         "produces": {
           "type": "artifact:formula-selection",
           "qualifiers": {
@@ -155,7 +170,51 @@
             }
           }
         ]
+      },
+      {
+        "id": "formula-delivery",
+        "forOutcomes": [
+          "modality:herbal-formula"
+        ],
+        "produces": {
+          "type": "artifact:treatment-delivery",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability",
+          "producerRuleId": "$rule"
+        },
+        "requires": [
+          {
+            "type": "artifact:formula-selection",
+            "qualifiers": {
+              "outcome": "$outcome"
+            },
+            "producerCapabilityId": "$capability"
+          }
+        ],
+        "effects": [
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:treatment-delivery",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
       }
     ]
-  }
+  },
+  "deliveryObligations": [
+    {
+      "id": "herbal-formula-delivery",
+      "requiredArtifact": "formulaSelection",
+      "requiredFields": [
+        "selectedCandidateRef"
+      ],
+      "materialization": "CANONICAL_CANDIDATE"
+    }
+  ]
 }

@@ -20,6 +20,7 @@ import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, compute
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
 import { admissibleEffects, refreshControlPlaneV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
+import { commitDeliveryOutcome } from '../../platform/commit/delivery-transaction.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
 export type AiSdkToolBindings = Record<string, AiSdkToolBindingFactory>;
@@ -771,6 +772,35 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         throw new Error('V2.1 illegal mutation: hypothesis creation is closed after clinical-core completion');
       }
       return input;
+    },
+  }),
+  'delivery.commit': (context) => tool({
+    description: 'Commit one exact treatment outcome into the Kernel CommitLedger. Call only after the corresponding prepared draft/source selection and evidence obligations are complete. A successful CommitRecord is the only terminal delivery truth.',
+    inputSchema: z.object({ outcome: z.string().min(1) }),
+    execute: async ({ outcome }) => {
+      const state = context.controlPlaneV21;
+      if (!state || state.compileStatus !== 'COMPILED') {
+        return { ok: false, code: 'CONTROL_PLANE_UNAVAILABLE' };
+      }
+      refreshControlPlaneV21(context);
+      const runnable = runnableObligations(state).find((node) =>
+        node.target.type === 'artifact:treatment-delivery'
+        && node.target.qualifiers?.outcome === outcome
+      );
+      if (!runnable) {
+        return { ok: false, code: 'DELIVERY_NOT_RUNNABLE', outcome };
+      }
+      const result = await commitDeliveryOutcome(context, outcome);
+      refreshControlPlaneV21(context);
+      if (!result.ok) return result;
+      return {
+        ok: true,
+        commitId: result.record.commitId,
+        outcome: result.record.outcome,
+        providerId: result.record.providerId,
+        deliveryStatus: result.record.deliveryStatus,
+        executionClearance: result.record.executionClearance,
+      };
     },
   }),
   'proposal.submit': (context) => tool({

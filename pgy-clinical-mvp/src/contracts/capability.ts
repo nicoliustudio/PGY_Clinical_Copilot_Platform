@@ -105,6 +105,8 @@ export interface CapabilityDeliveryObligation {
   requiredFields?: string[];
   /** Optional outcome-specific field requirements. Keeps domain details in manifest data, not Core branches. */
   requiredFieldsByOutcome?: Record<string, string[]>;
+  /** Kernel materialization strategy. Business semantics stay in manifest data. */
+  materialization?: 'REASONING_PRODUCT' | 'CANONICAL_CANDIDATE';
   /** 可选：交付依赖的证据义务 id（用于 SEARCHED_NONE → NOT_DELIVERABLE 的合法终态）。 */
   dependsOnEvidenceObligationIds?: string[];
 }

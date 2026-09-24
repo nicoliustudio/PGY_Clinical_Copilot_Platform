@@ -98,7 +98,7 @@ export interface IndexBreakdown {
 
 export interface KnowledgeIndex {
   /** Runtime index schema. Bump when durable knowledge shape changes so stale .kb-cache cannot mask new fields. */
-  schemaVersion: 2;
+  schemaVersion: 3;
   version: string;
   releaseVersion: string;
   builtAt: string;

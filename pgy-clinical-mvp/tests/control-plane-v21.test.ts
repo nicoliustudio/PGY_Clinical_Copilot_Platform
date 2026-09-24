@@ -17,7 +17,8 @@ const tools = [
   { id: 'knowledge.search', effectPatterns: [{ op: 'retrieve' as const, target: { type: 'artifact:diagnostic-evidence' } }, { op: 'retrieve' as const, target: { type: 'artifact:evidence-gap' } }] },
   { id: 'knowledge.search_cards', effectPatterns: [{ op: 'retrieve' as const, target: { type: 'artifact:treatment-evidence' } }] },
   { id: 'formula.search_candidates', effectPatterns: [{ op: 'retrieve' as const, target: { type: 'artifact:formula-evidence' } }] },
-  { id: 'workspace.record_deliberation', effectPatterns: [{ op: 'commit' as const, target: { type: 'artifact:clinical-core' } }, { op: 'commit' as const, target: { type: 'artifact:treatment-delivery' } }, { op: 'commit' as const, target: { type: 'artifact:formula-selection' } }] },
+  { id: 'workspace.record_deliberation', effectPatterns: [{ op: 'commit' as const, target: { type: 'artifact:clinical-core' } }, { op: 'commit' as const, target: { type: 'artifact:treatment-draft' } }, { op: 'commit' as const, target: { type: 'artifact:formula-selection' } }] },
+  { id: 'delivery.commit', effectPatterns: [{ op: 'commit' as const, target: { type: 'artifact:treatment-delivery' } }] },
 ];
 function req(required: string[]) {
   return normalizeClinicalRequestIR({ version: 1, goal: 'treatment', outcomes: { required, preferred: [], excluded: [], exclusive: false }, outputPolicy: { formulaCardinality: { mode: 'PRIMARY_ONLY' } }, generationPolicy: { knowledgeSource: 'KB_PREFERRED' }, hardConstraints: [], preferences: [] });

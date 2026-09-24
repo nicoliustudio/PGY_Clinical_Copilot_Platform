@@ -137,7 +137,7 @@ export class RuntimePreparer implements RuntimePreparationPort {
         compileError = error instanceof Error ? error.message : String(error);
       }
       const appliedBlockers: AppliedBlockerV21[] = [];
-      const graph = deriveGraphV21(requestIR, capabilityDescriptors, workspace, appliedBlockers, this.deps.controlPlane.policy);
+      const graph = deriveGraphV21(requestIR, capabilityDescriptors, workspace, appliedBlockers, this.deps.controlPlane.policy, context.commitLedger);
       context.controlPlaneV21 = {
         requestIR,
         graph,

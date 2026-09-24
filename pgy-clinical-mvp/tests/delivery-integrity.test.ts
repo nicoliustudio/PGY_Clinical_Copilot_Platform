@@ -118,3 +118,35 @@ test('delivery integrity: production manifests declare completeness outside Core
   assert(gaofang.deliveryObligations[0].requiredFields.includes('usage'));
   assert(external.deliveryObligations[0].requiredFieldsByOutcome['modality:acupuncture'].includes('details.points'));
 });
+
+test('delivery integrity: ACTIVE source member survives UNKNOWN composition', () => {
+  const unknown = { ...formula('F2'), composition: '' };
+  const set = hydrateSourceFormulaSet([p1Doc([formula('F1'), unknown])], 'P1:K1::F1');
+  assert.ok(set);
+  assert.equal(set.formulas.length, 2);
+  const second = set.formulas.find((x) => x.formulaId === 'F2')!;
+  assert.equal(second.compositionPresence, 'UNKNOWN');
+  assert.equal(second.composition, '');
+});
+
+test('delivery integrity: clinical exclusion changes qualification, never SourceBundle projection cardinality', () => {
+  const set = hydrateSourceFormulaSet(
+    [p1Doc([formula('F1'), formula('F2'), formula('F3')])],
+    'P1:K1::F1',
+    { exclusions: { 'P1:K1::F3': { reason: 'patient-specific contraindication', evidenceRefs: ['CF1'] } } },
+  );
+  assert.ok(set);
+  const projected = projectFormulaSet(set, { mode: 'PRIMARY_ONLY' });
+  assert.deepEqual(projected.map((x) => x.formulaId), ['F1', 'F2', 'F3']);
+  assert.equal(projected.find((x) => x.formulaId === 'F3')?.relation, 'CLINICALLY_EXCLUDED');
+});
+
+test('delivery integrity: textual None is explicit KNOWN_EMPTY, not a real modification rule', () => {
+  const set = hydrateSourceFormulaSet([p1Doc([formula('F1', ['None'])], ['None'])], 'P1:K1::F1');
+  assert.ok(set);
+  assert.deepEqual(set.sourceLevelModifications, []);
+  assert.equal(set.sourceLevelModificationPresence, 'KNOWN_EMPTY');
+  assert.deepEqual(set.formulas[0].sourceModifications, []);
+  assert.equal(set.formulas[0].formulaLocalModificationPresence, 'KNOWN_EMPTY');
+  assert.equal(set.formulas[0].modificationStatus, 'KNOWN_EMPTY');
+});

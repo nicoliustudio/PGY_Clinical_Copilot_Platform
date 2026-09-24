@@ -434,6 +434,24 @@ const METRIC_LABELS: [string, string][] = [
   ['firstViableCandidateStep', '首个可用候选出现的步号'],
 ];
 
+function renderCommitLedger(trace: any): string {
+  const commits = Array.isArray(trace.commits) ? trace.commits : [];
+  if (commits.length === 0) return '- （无 CommitRecord）';
+  const lines = [
+    '| commitId | outcome | provider | delivery | clearance | source | products |',
+    '| --- | --- | --- | --- | --- | --- | ---: |',
+  ];
+  for (const record of commits) {
+    lines.push(`| \`${esc(record.commitId ?? '-')}\` | \`${esc(record.outcome ?? '-')}\` | \`${esc(record.providerId ?? '-')}\` | \`${esc(record.deliveryStatus ?? '-')}\` | \`${esc(record.executionClearance ?? '-')}\` | ${esc((record.sourceBundle?.sourceId ?? (record.provenance?.sourceRefs ?? []).join(', ')) || '-')} | ${record.sourceBundle?.products?.length ?? 0} |`);
+  }
+  lines.push('');
+  lines.push('**CommitRecord 原样载荷**');
+  commits.forEach((record: any, index: number) => {
+    lines.push(`\n**${index + 1}. ${record.outcome ?? '-'}**\n\n\`\`\`json\n${JSON.stringify(record, null, 2)}\n\`\`\``);
+  });
+  return lines.join('\n');
+}
+
 function renderMetrics(trace: any): string {
   const rm = trace.runMetrics ?? {};
   const al = trace.agentLoop ?? {};
@@ -694,20 +712,24 @@ ${renderResult(s.result)}
 - 裁决结果：\`${s.authority?.status}\`
 ${(s.authority?.decisions ?? []).map((dec: any) => `- 关卡 \`${dec.stage}\` → \`${dec.action}\`${dec.reasons?.length ? `（${dec.reasons.join('；')}）` : ''}`).join('\n')}
 
-#### 3.3 提交可靠性与过程指标
+#### 3.3 Kernel Commit Ledger（权威交付真相）
+
+${renderCommitLedger(trace)}
+
+#### 3.4 提交可靠性与过程指标
 
 > 以下为运行时遥测原值，仅作事实记录，不含通过/不通过判定；计数为 0 表示该路径本次未被触发，不等同于该环节缺失。
 
 ${renderMetrics(trace)}
 
-#### 3.4 上下文度量
+#### 3.5 上下文度量
 
 - 工作视图 token 估算：${trace.contextMetrics?.workingViewTokenEstimate ?? '-'}
 - 原始上下文 token 估算：${trace.contextMetrics?.rawContextTokenEstimate ?? '-'}
 - 压缩比：${trace.contextMetrics?.compressionRatio?.toFixed?.(2) ?? '-'}
 - prompt 组成：${JSON.stringify(trace.agentLoop?.promptComponents ?? {})}
 
-#### 3.5 证据可追溯性自检（确定性，无临床判断）
+#### 3.6 证据可追溯性自检（确定性，无临床判断）
 
 ${renderTraceability(s.result, s.workspace)}
 

@@ -176,7 +176,7 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
         const syndrome = typeof product.syndrome === 'string' && product.syndrome.trim().length > 0;
         const treatment = typeof product.treatment === 'string' && product.treatment.trim().length > 0;
         if (disease && syndrome && treatment) {
-          const provider = context.capabilities.find((c) => c.provides?.includes('outcome:clinical-assessment'));
+          const provider = context.capabilities.find((c) => c.provides?.includes(outcome));
           return { ok: true, providerId: provider?.id ?? 'clinical-core' };
         }
         return { ok: false, code: 'MISSING_REQUIRED_FIELDS', missing: ['disease', 'syndrome', 'treatment'] };
@@ -188,7 +188,7 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
       if (!completeness.capabilityId) return { ok: false, code: 'NO_PROVIDER' };
       return { ok: true, providerId: completeness.capabilityId };
     },
-    hydrateCanonicalCandidate: async (truth) => {
+    hydrateCanonicalCandidate: async (truth, outcome) => {
       const sep = truth.canonicalKey.indexOf('::');
       if (sep <= 0) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
       const sourceId = truth.canonicalKey.slice(0, sep);
@@ -200,7 +200,7 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
         const validation = await validateNormativeFormula({ sourceId, formulaId, composition: truth.composition });
         if (!validation.valid) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
       }
-      const provider = context.capabilities.find((c) => c.provides?.includes('outcome:clinical-assessment'));
+      const provider = context.capabilities.find((c) => c.provides?.includes(outcome));
       return {
         ok: true,
         providerId: provider?.id ?? 'clinical-core',
@@ -216,61 +216,134 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
   };
 }
 
-/** 依据 proposal + workspace，把 REQUIRED delivery 意图提交进 Kernel Commit Ledger（fail-closed）。 */
-async function commitDeliveries(
+/** Clinical assessment baseline is committed after proposal serialization.
+ * Treatment products are NOT committed here: they must enter the Ledger through `delivery.commit` inside the Agent loop.
+ */
+async function commitBaselineAssessment(
   context: RuntimeContext,
   proposal: AgentResult,
-  registry: CandidateHandleRegistry,
-): Promise<CommitRecord[]> {
-  const coordinator = new CommitCoordinator(registry, context.commitLedger);
+): Promise<void> {
+  if (proposal.mode !== 'clinical') return;
+  if (context.commitLedger.delivered('outcome:clinical-assessment').length > 0) return;
+  const coordinator = new CommitCoordinator(new CandidateHandleRegistry(), context.commitLedger);
   const env = buildCommitEnvironment(context, proposal);
-  const records: CommitRecord[] = [];
-  if (proposal.mode !== 'clinical') return records;
-
-  // 0) clinical assessment（baseline outcome）—— MODEL_DERIVED，闭世界核心完整性校验。
-  const assessment = await coordinator.commit(
+  await coordinator.commit(
     { outcome: 'outcome:clinical-assessment', reasoningArtifactRef: 'clinical-assessment' },
     env,
   );
-  if (assessment.ok) records.push(assessment.record);
+}
 
-  // 1) herbal formula delivery：Agent 只能引用候选；canonical identity + composition binding 由 Kernel 解析并水合。
-  const candidateRef = proposal.formula?.candidate_ref;
-  if (candidateRef) {
-    const candidate = context.workspace.candidates.find(
-      (c) => c.kind === 'formula' && c.id === candidateRef,
-    );
-    if (candidate?.sourceId && candidate?.formulaId) {
-      const handle = registry.issue({
-        kind: candidate.kind,
-        canonicalKey: `${candidate.sourceId}::${candidate.formulaId}`,
-        sourceId: candidate.sourceId,
-        productId: candidate.formulaId,
-        composition: candidate.composition?.join(''),
-        provenanceKind: 'CANONICAL_SOURCE',
-      });
-      const result = await coordinator.commit(
-        { outcome: 'outcome:clinical-assessment', candidateHandle: handle },
-        env,
-      );
-      if (result.ok) records.push(result.record);
-    }
+
+type FactProjection<T> = { presence?: string; value?: T };
+
+function factProjection<T>(value: unknown): FactProjection<T> {
+  if (!value || typeof value !== 'object') return { presence: 'UNKNOWN' };
+  const record = value as Record<string, unknown>;
+  return {
+    presence: typeof record.presence === 'string' ? record.presence : 'UNKNOWN',
+    ...(record.value !== undefined ? { value: record.value as T } : {}),
+  };
+}
+
+function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula[] {
+  return records.flatMap((record) => {
+    const bundle = record.sourceBundle;
+    if (!bundle || record.deliveryStatus !== 'DELIVERED') return [];
+    return bundle.products.map((product): ProjectedFormula => {
+      const payload = product.payload as Record<string, unknown>;
+      const composition = factProjection<string>(payload.composition);
+      const modifications = (payload.modifications && typeof payload.modifications === 'object')
+        ? payload.modifications as Record<string, unknown>
+        : {};
+      const formulaLocal = factProjection<string[]>(modifications.formulaLocal);
+      const sourceShared = factProjection<string[]>(modifications.sourceShared);
+      const patientSpecific = factProjection<Array<{ statement?: string }>>(modifications.patientSpecific);
+      const usage = factProjection<string>(payload.usage);
+      const localPresence = formulaLocal.presence === 'PRESENT'
+        ? 'PRESENT'
+        : formulaLocal.presence === 'KNOWN_EMPTY'
+          ? 'KNOWN_EMPTY'
+          : 'UNKNOWN';
+      return {
+        formulaRef: typeof payload.formulaRef === 'string'
+          ? payload.formulaRef
+          : `${bundle.sourceId}::${product.productId}`,
+        formulaId: product.productId,
+        name: product.name,
+        composition: composition.presence === 'PRESENT' ? composition.value ?? '' : '',
+        sourceRef: bundle.sourceId,
+        sourceModifications: formulaLocal.presence === 'PRESENT' ? formulaLocal.value ?? [] : [],
+        sourceLevelModifications: sourceShared.presence === 'PRESENT' ? sourceShared.value ?? [] : [],
+        modificationStatus: localPresence,
+        ...(usage.presence === 'PRESENT' && usage.value ? { usage: usage.value } : {}),
+        relation: product.qualification,
+        applicableModifications: [],
+      };
+    });
+  });
+}
+
+function committedLegacyFormula(records: readonly CommitRecord[]): Record<string, unknown> | undefined {
+  for (const record of records) {
+    const bundle = record.sourceBundle;
+    if (!bundle || record.deliveryStatus !== 'DELIVERED') continue;
+    const primary = bundle.products.find((product) => product.qualification === 'PRIMARY_SELECTED');
+    if (!primary) continue;
+    const payload = primary.payload as Record<string, unknown>;
+    const composition = factProjection<string>(payload.composition);
+    if (composition.presence !== 'PRESENT' || !composition.value) continue;
+    return {
+      authority: 'NORMATIVE',
+      formula_id: primary.productId,
+      name: primary.name,
+      composition: [composition.value],
+      source_id: bundle.sourceId,
+      evidence_refs: [bundle.sourceId],
+      candidate_ref: typeof payload.formulaRef === 'string' ? payload.formulaRef : `${bundle.sourceId}::${primary.productId}`,
+    };
   }
+  return undefined;
+}
 
-  // 2) treatment-form delivery：Agent 的 advisory 载荷经 manifest field 校验后才 commit。
-  const deliveries = treatmentDeliveryArtifacts(context.workspace);
-  for (let i = 0; i < deliveries.length; i++) {
-    const delivery = deliveries[i];
-    const outcome = typeof delivery.outcome === 'string' ? delivery.outcome : '';
-    if (!outcome) continue;
-    const result = await coordinator.commit(
-      { outcome, reasoningArtifactRef: String(i) },
-      env,
-    );
-    if (result.ok) records.push(result.record);
-  }
+function committedTreatmentDeliveries(records: readonly CommitRecord[]): Array<Record<string, unknown>> {
+  return records.flatMap((record) => {
+    if (record.deliveryStatus !== 'DELIVERED' || record.sourceBundle) return [];
+    if (record.outcome === 'outcome:clinical-assessment') return [];
+    const product = record.product as Record<string, unknown>;
+    if (typeof product.form !== 'string' || typeof product.disposition !== 'string' || typeof product.statement !== 'string') return [];
+    const refs = Array.isArray(product.sourceEvidenceRefs)
+      ? product.sourceEvidenceRefs.filter((ref): ref is string => typeof ref === 'string')
+      : [...record.provenance.sourceRefs];
+    return [{
+      outcome: record.outcome,
+      form: product.form,
+      disposition: product.disposition,
+      statement: product.statement,
+      source_evidence_refs: refs,
+      ...(Array.isArray(product.advisoryComposition) ? { advisory_composition: product.advisoryComposition } : {}),
+      ...(typeof product.preparation === 'string' ? { preparation: product.preparation } : {}),
+      ...(typeof product.usage === 'string' ? { usage: product.usage } : {}),
+      ...(product.details && typeof product.details === 'object' ? { details: product.details } : {}),
+    }];
+  });
+}
 
-  return records;
+function committedDeliveries(records: readonly CommitRecord[]) {
+  return records.map((record) => ({
+    commit_id: record.commitId as string,
+    outcome: record.outcome,
+    semantic_identity: record.semanticIdentity,
+    provider_id: record.providerId,
+    delivery_status: record.deliveryStatus,
+    execution_clearance: record.executionClearance,
+    provenance: {
+      kind: record.provenance.kind,
+      sourceRefs: [...record.provenance.sourceRefs],
+      providerId: record.provenance.providerId,
+    },
+    ...(record.sourceBundle ? { source_bundle: record.sourceBundle } : {}),
+    product: record.product,
+  }));
 }
 
 /**
@@ -292,7 +365,6 @@ export class ClinicalRuntime {
     recordCandidateDecision(output.proposal, context);
     recordHypothesisDecision(output.proposal, context);
     const proposal = await hydrateFormulaProposal(output.proposal, context);
-    await finalizeSourceClosures(output.proposal, context);
 
     // canonical safety truth：模型 proposal.safety 不覆盖 canonical safety disposition。
     // 安全与 formula authority 正交；CAUTION 的 review 语义由 reviewRequired/reviewReasons + commit 的 executionClearance 承载。
@@ -308,8 +380,8 @@ export class ClinicalRuntime {
       : proposal;
 
     // Kernel Commit Boundary：唯一权威交付真相（fail-closed hydrate + manifest field 校验 + 正交 execution clearance）。
-    const registry = new CandidateHandleRegistry();
-    const commits = await commitDeliveries(context, withCanonicalSafety, registry);
+    await commitBaselineAssessment(context, withCanonicalSafety);
+    const commits = [...context.commitLedger.all()];
 
     const authority = await this.authority.resolve(withCanonicalSafety, context);
 
@@ -386,10 +458,7 @@ export class ClinicalRuntime {
     const coverage = ledgerOutcomeCoverage(state, context.commitLedger);
     const notDeliverable = coverage.filter((o) => o.status === 'NOT_DELIVERABLE');
     const modelAllowed = state.requestIR.generationPolicy.knowledgeSource === 'MODEL_ALLOWED';
-    const formulaSet = projectFormulaSet(
-      context.workspace.sourceFormulaSet,
-      state.requestIR.outputPolicy.formulaCardinality,
-    );
+    const formulaSet = committedFormulaSet(context.commitLedger.all());
     const controlPlane = {
       outcomeCoverage: coverage,
       formulaSet,
@@ -406,32 +475,11 @@ export class ClinicalRuntime {
         : '; model-authored substitution is not permitted by the request generation policy'),
     );
     const cardinality = state.requestIR.outputPolicy.formulaCardinality;
-    if (cardinality.mode === 'AT_LEAST' && formulaSet.length < cardinality.count) {
-      explicit.push(`formula cardinality shortfall: requested at least ${cardinality.count}, but only ${formulaSet.length} eligible source formulas were deterministically available`);
+    const clinicallyEligibleFormulaCount = formulaSet.filter((formula) => formula.relation !== 'CLINICALLY_EXCLUDED').length;
+    if (cardinality.mode === 'AT_LEAST' && clinicallyEligibleFormulaCount < cardinality.count) {
+      explicit.push(`formula cardinality shortfall: requested at least ${cardinality.count}, but only ${clinicallyEligibleFormulaCount} clinically eligible source formulas were deterministically available`);
     }
-    const treatmentDeliveries = treatmentDeliveryArtifacts(context.workspace).flatMap((delivery) => {
-      const completeness = treatmentDeliveryCompleteness(
-        context.capabilities,
-        delivery as unknown as Record<string, unknown>,
-      );
-      if (!completeness.complete) {
-        explicit.push(
-          `incomplete treatment delivery ${delivery.outcome ?? delivery.form}: missing ${completeness.missingFields.join(', ')}`,
-        );
-        return [];
-      }
-      return [{
-        ...(delivery.outcome ? { outcome: delivery.outcome } : {}),
-        form: delivery.form,
-        disposition: delivery.disposition,
-        statement: delivery.statement,
-        source_evidence_refs: delivery.sourceEvidenceRefs,
-        ...(delivery.advisoryComposition?.length ? { advisory_composition: delivery.advisoryComposition } : {}),
-        ...(delivery.preparation ? { preparation: delivery.preparation } : {}),
-        ...(delivery.usage ? { usage: delivery.usage } : {}),
-        ...(delivery.details ? { details: delivery.details } : {}),
-      }];
-    });
+    const treatmentDeliveries = committedTreatmentDeliveries(context.commitLedger.all());
     const formulaProjection = formulaSet.map((formula) => ({
       formula_ref: formula.formulaRef,
       formula_id: formula.formulaId,
@@ -442,22 +490,25 @@ export class ClinicalRuntime {
       modification_status: formula.modificationStatus,
       modification_text: formula.modificationStatus === 'PRESENT'
         ? formula.sourceModifications.join('；')
-        : (formula.modificationStatus === 'KNOWN_EMPTY'
-          ? '无加减'
-          : '源节点存在加减规则，但无法安全归属到该方'),
-      ...(formula.modificationStatus === 'UNATTRIBUTED_SOURCE_RULES' && formula.sourceLevelModifications.length > 0
+        : (formula.modificationStatus === 'KNOWN_EMPTY' ? '无加减' : 'UNKNOWN'),
+      ...(formula.sourceLevelModifications.length > 0
         ? { source_level_modification_rules: formula.sourceLevelModifications }
         : {}),
       ...(formula.usage ? { usage: formula.usage } : {}),
       relation: formula.relation,
     }));
+    const committedFormula = committedLegacyFormula(context.commitLedger.all());
+    const deliveries = committedDeliveries(context.commitLedger.all());
+    const { formula: _proposalFormula, formula_set: _proposalFormulaSet, treatment_deliveries: _proposalTreatmentDeliveries, deliveries: _proposalDeliveries, ...proposalWithoutProducts } = proposal as typeof proposal & { deliveries?: unknown };
     return {
       proposal: {
-        ...proposal,
+        ...proposalWithoutProducts,
+        ...(committedFormula ? { formula: committedFormula } : {}),
         ...(formulaProjection.length ? { formula_set: formulaProjection } : {}),
         ...(treatmentDeliveries.length ? { treatment_deliveries: treatmentDeliveries } : {}),
+        ...(deliveries.length ? { deliveries } : {}),
         missing_information: [...new Set([...proposal.missing_information, ...explicit])],
-      },
+      } as AgentResult,
       controlPlane,
     };
   }

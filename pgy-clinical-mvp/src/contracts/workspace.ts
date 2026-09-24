@@ -263,7 +263,8 @@ export interface FormulaReview {
 export type FormulaAdoptionState = 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
 
 /** 同源原典方集合中的一个方。 */
-export type SourceModificationStatus = 'PRESENT' | 'KNOWN_EMPTY' | 'UNATTRIBUTED_SOURCE_RULES';
+export type SourceModificationStatus = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN' | 'UNATTRIBUTED_SOURCE_RULES';
+export type SourceFieldPresence = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN';
 
 export interface SourceFormulaEntry {
   /** 稳定公式引用 `${sourceId}::${formulaId}`。 */
@@ -271,12 +272,17 @@ export interface SourceFormulaEntry {
   formulaId: string;
   formulaName: string;
   composition: string;
+  /** Closed-world presence. Empty/missing composition must never erase source membership. */
+  compositionPresence?: SourceFieldPresence;
   /** Source-preserved formula-local modification rules. Empty is meaningful and must not be reconstructed by the model. */
   sourceModifications: string[];
+  /** Presence of formula-local source modification facts, independent from attribution. */
+  formulaLocalModificationPresence?: SourceFieldPresence;
   /** Whether modification absence is known or source-level rules exist but cannot be safely attributed to this formula. */
   modificationStatus: SourceModificationStatus;
   /** Optional source-preserved usage text for this formula. */
   usage?: string;
+  usagePresence?: SourceFieldPresence;
   /** 来源完整性与临床采纳的分离状态。 */
   relation: FormulaAdoptionState;
   exclusionReason?: string;
@@ -297,6 +303,8 @@ export interface SourceFormulaSet {
   completeness: 'COMPLETE';
   /** Parent/source-node rules retained even when attribution to one sibling formula would be unsafe. */
   sourceLevelModifications: string[];
+  /** Presence of source/node-shared modification facts. */
+  sourceLevelModificationPresence?: SourceFieldPresence;
   formulas: SourceFormulaEntry[];
 }
 

@@ -1,41 +1,45 @@
 import type { KnowledgeDoc } from '../knowledge/types.js';
 import type {
   FormulaAdoptionState,
+  SourceFieldPresence,
   SourceFormulaEntry,
   SourceFormulaSet,
 } from '../contracts/workspace.js';
 
 /**
- * H15.6 Source Formula Set —— 确定性同源多方水合。
+ * Source Formula Set —— canonical source membership projection.
  *
- * 关键不变式（不变量 1 + 二）：
- * - 一旦 Runtime 采用了一个具有处方权威的 P1 / normative 病-证 parent record，
- *   该 parent 下原知识库所有 ACTIVE 方必须被确定性水合出来。
- * - 禁止再经过 semantic search / topK / rerank / LLM 自主决定 / candidate frontier 截断。
- * - 主选方只有一个 PRIMARY_SELECTED；其余 ACTIVE 方是 SOURCE_ALTERNATIVE，
- *   只有存在明确临床排除依据时才标 CLINICALLY_EXCLUDED。
- * - `not selected` ≠ `clinically rejected`。
- *
- * 本模块是纯函数，不依赖模型、不读磁盘（docs 由调用方传入）。
+ * Membership and product completeness are deliberately independent:
+ * - every ACTIVE source product remains a member, even when a product field is UNKNOWN;
+ * - clinical qualification changes recommendation state, never source existence;
+ * - source-local/shared modification facts preserve PRESENT / KNOWN_EMPTY / UNKNOWN.
  */
 
-/** INACTIVE 之外的实体状态都视为可交付（fail-open 仅限「未声明/ACTIVE」）。 */
 function isActiveFormula(entityStatus: string | undefined): boolean {
   return entityStatus !== 'INACTIVE';
 }
 
+const EMPTY_MARKERS = new Set(['none', 'null', 'nil', '无', '无加减', '暂无', '无。', '-']);
+
+function normalizeTextList(value: string[] | undefined): { values: string[]; presence: SourceFieldPresence } {
+  if (value === undefined) return { values: [], presence: 'UNKNOWN' };
+  const cleaned = value
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !EMPTY_MARKERS.has(item.toLowerCase()));
+  if (cleaned.length === 0) return { values: [], presence: 'KNOWN_EMPTY' };
+  return { values: cleaned, presence: 'PRESENT' };
+}
+
+function textPresence(value: string | undefined): SourceFieldPresence {
+  if (value === undefined) return 'UNKNOWN';
+  return value.trim().length > 0 ? 'PRESENT' : 'KNOWN_EMPTY';
+}
+
 export interface HydrateSourceFormulaSetOptions {
-  /** 明确临床排除的公式引用集合 + 排除原因（可选）。缺省时所有非主选方均为 SOURCE_ALTERNATIVE。 */
   exclusions?: Record<string, { reason: string; evidenceRefs?: string[] }>;
 }
 
-/**
- * 由 selectedCandidateRef（`${sourceId}::${formulaId}`）确定性水合 parent 下的全部 ACTIVE 方。
- *
- * @param docs 已索引的知识文档（P1 normative docs）。
- * @param selectedCandidateRef 主选方引用（PRIMARY_SELECTED）。
- * @returns SourceFormulaSet；找不到 parent 或主选方不在 parent 内时返回 null（fail-closed）。
- */
 export function hydrateSourceFormulaSet(
   docs: KnowledgeDoc[],
   selectedCandidateRef: string,
@@ -47,13 +51,12 @@ export function hydrateSourceFormulaSet(
   const parent = docs.find((d) => d.id === sourceId && d.sourceTier === 'P1');
   if (!parent) return null;
 
-  const activeFormulas = parent.formulas.filter((f) => isActiveFormula(f.entityStatus) && f.composition.trim() !== '');
+  // SOURCE MEMBERSHIP: composition completeness must never decide whether an ACTIVE product exists.
+  const activeFormulas = parent.formulas.filter((f) => isActiveFormula(f.entityStatus));
   if (activeFormulas.length === 0) return null;
+  if (!activeFormulas.some((f) => f.id === selectedFormulaId)) return null;
 
-  const selectedExists = activeFormulas.some((f) => f.id === selectedFormulaId);
-  if (!selectedExists) return null;
-
-  const sourceLevelModifications = parent.sourceModifications ?? [];
+  const shared = normalizeTextList(parent.sourceModifications);
   const formulas: SourceFormulaEntry[] = activeFormulas.map((f) => {
     const formulaRef = `${sourceId}::${f.id}`;
     let relation: FormulaAdoptionState = 'SOURCE_ALTERNATIVE';
@@ -69,24 +72,31 @@ export function hydrateSourceFormulaSet(
         exclusionEvidenceRefs = exclusion.evidenceRefs;
       }
     }
-    const local = [...(f.sourceModifications ?? [])];
-    // A parent-level rule may be safely inherited only when the parent has exactly one ACTIVE formula.
-    // With multiple siblings, attribution is intentionally fail-closed: retain the rule at SourceFormulaSet level
-    // instead of silently copying it to every formula.
-    const sourceModifications = local.length > 0
-      ? local
-      : (activeFormulas.length === 1 ? [...sourceLevelModifications] : []);
-    const modificationStatus = sourceModifications.length > 0
+
+    const local = normalizeTextList(f.sourceModifications);
+    // Legacy compatibility only: when a single product source has shared rules, expose them locally too.
+    // Authoritative product facts still keep formula-local and source-shared scopes separate.
+    const legacyLocal = local.presence === 'PRESENT'
+      ? local.values
+      : (activeFormulas.length === 1 && shared.presence === 'PRESENT' ? shared.values : []);
+    const legacyStatus = legacyLocal.length > 0
       ? 'PRESENT' as const
-      : (sourceLevelModifications.length > 0 ? 'UNATTRIBUTED_SOURCE_RULES' as const : 'KNOWN_EMPTY' as const);
+      : (local.presence === 'UNKNOWN' ? 'UNKNOWN' as const
+        : (shared.presence === 'PRESENT' && activeFormulas.length > 1
+          ? 'UNATTRIBUTED_SOURCE_RULES' as const
+          : 'KNOWN_EMPTY' as const));
+
     return {
       formulaRef,
       formulaId: f.id,
       formulaName: f.name,
-      composition: f.composition,
-      sourceModifications,
-      modificationStatus,
+      composition: f.composition ?? '',
+      compositionPresence: f.composition.trim().length > 0 ? 'PRESENT' : 'UNKNOWN',
+      sourceModifications: legacyLocal,
+      formulaLocalModificationPresence: local.presence,
+      modificationStatus: legacyStatus,
       usage: f.usage,
+      usagePresence: textPresence(f.usage),
       relation,
       exclusionReason,
       exclusionEvidenceRefs,
@@ -100,17 +110,16 @@ export function hydrateSourceFormulaSet(
     syndrome: parent.syndrome,
     treatmentMethod: parent.treatment,
     completeness: 'COMPLETE',
-    sourceLevelModifications,
+    sourceLevelModifications: shared.values,
+    sourceLevelModificationPresence: shared.presence,
     formulas,
   };
 }
 
-/** 主选方数量不变式：恰好 0 或 1 个 PRIMARY_SELECTED。 */
 export function countPrimarySelected(set: SourceFormulaSet): number {
   return set.formulas.filter((f) => f.relation === 'PRIMARY_SELECTED').length;
 }
 
-/** 是否存在被误标成 CLINICALLY_EXCLUDED 的 ACTIVE 方（应为 SOURCE_ALTERNATIVE）。 */
 export function assertSinglePrimary(set: SourceFormulaSet): void {
   const primaries = countPrimarySelected(set);
   if (primaries !== 1) {

@@ -110,10 +110,10 @@ export async function runCase(
   const runtime = await getClinicalRuntime(mode);
   const trace = newTrace(input);
   try {
-    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, strategy, contextMetrics } = await runtime.run(input, trace.runId, options.onEvent);
+    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, strategy, contextMetrics, commits } = await runtime.run(input, trace.runId, options.onEvent);
     const result = authority.proposal;
     if (result.mode === 'clinical') result.run_id = trace.runId;
-    finishTrace(trace.runId, { finalResult: result, usage, snapshot, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, clinicalStrategy: strategy, contextMetrics });
+    finishTrace(trace.runId, { finalResult: result, usage, snapshot, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, clinicalStrategy: strategy, contextMetrics, commits });
     return { result, trace, workspace, authority };
   } catch (e) {
     finishTrace(trace.runId, { error: e instanceof Error ? e.message : String(e) });

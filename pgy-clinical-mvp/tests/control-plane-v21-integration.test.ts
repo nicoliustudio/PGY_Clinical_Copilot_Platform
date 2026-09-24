@@ -126,6 +126,19 @@ function nodeOf(context: RuntimeContext, type: string, outcome?: string): Obliga
   );
 }
 
+function commitOutcome(context: RuntimeContext, outcome: string, providerId: string): void {
+  context.commitLedger.append({
+    outcome,
+    semanticIdentity: outcome,
+    providerId,
+    deliveryStatus: 'DELIVERED',
+    executionClearance: 'CLEARED',
+    provenance: { kind: 'MODEL_DERIVED', sourceRefs: [], providerId },
+    product: { outcome },
+  });
+  refreshControlPlaneV21(context);
+}
+
 const ALL_INTERNAL_TOOLS = [...BASELINE_TOOL_IDS];
 
 // ---------------------------------------------------------------------------
@@ -254,6 +267,9 @@ test('精确 closure：针灸交付完成不会关闭膏方交付', async () => 
   refreshControlPlaneV21(context);
   assert.equal(nodeOf(context, 'artifact:treatment-evidence', 'modality:acupuncture')!.status, 'SATISFIED');
   assert.equal(nodeOf(context, 'artifact:treatment-evidence', 'modality:gaofang')!.status, 'OPEN');
+  assert.equal(nodeOf(context, 'artifact:treatment-draft', 'modality:acupuncture')!.status, 'SATISFIED');
+  assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'OPEN', 'Workspace draft must not close terminal delivery');
+  commitOutcome(context, 'modality:acupuncture', 'tcm.external-therapy');
   assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'SATISFIED');
   assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:gaofang')!.status, 'OPEN');
   const unmet = unmetObligationsV21(context.controlPlaneV21!);
@@ -285,6 +301,12 @@ test('V2.1.1 多治疗 delivery 可同时关闭针灸与膏方两个独立义务
     ],
   };
   refreshControlPlaneV21(context);
+  assert.equal(nodeOf(context, 'artifact:treatment-draft', 'modality:acupuncture')!.status, 'SATISFIED');
+  assert.equal(nodeOf(context, 'artifact:treatment-draft', 'modality:gaofang')!.status, 'SATISFIED');
+  assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'OPEN');
+  assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:gaofang')!.status, 'OPEN');
+  commitOutcome(context, 'modality:acupuncture', 'tcm.external-therapy');
+  commitOutcome(context, 'modality:gaofang', 'gaofang');
   assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'SATISFIED');
   assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:gaofang')!.status, 'SATISFIED');
 });
@@ -532,9 +554,10 @@ test('多个方：formulaCardinality 由确定性投影表达，同源方不会�
       { formulaRef: 'd', formulaId: 'fd', formulaName: 'D', composition: 'w', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [] },
     ],
   };
-  assert.deepEqual(projectFormulaSet(set, { mode: 'PRIMARY_ONLY' }).map((f) => f.formulaRef), ['a', 'b', 'c']);
-  assert.deepEqual(projectFormulaSet(set, { mode: 'AT_LEAST', count: 3 }).map((f) => f.formulaRef), ['a', 'b', 'c']);
-  assert.deepEqual(projectFormulaSet(set, { mode: 'ALL_ELIGIBLE' }).map((f) => f.formulaRef), ['a', 'b', 'c']);
+  assert.deepEqual(projectFormulaSet(set, { mode: 'PRIMARY_ONLY' }).map((f) => f.formulaRef), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(projectFormulaSet(set, { mode: 'AT_LEAST', count: 3 }).map((f) => f.formulaRef), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(projectFormulaSet(set, { mode: 'ALL_ELIGIBLE' }).map((f) => f.formulaRef), ['a', 'b', 'c', 'd']);
+  assert.equal(projectFormulaSet(set, { mode: 'PRIMARY_ONLY' })[3]?.relation, 'CLINICALLY_EXCLUDED');
 });
 
 test('typed planning blocker 阻断提交：未安装 provider 的 outcome 不得被静默降级', async () => {
@@ -674,6 +697,8 @@ test('graph 完整后 readiness 不再报 control plane blocker，且 runtime �
     version: 1,
   };
   refreshControlPlaneV21(context);
+  // Workspace 只产出 treatment-draft；terminal treatment-delivery 必须由 Kernel CommitRecord 关闭。
+  commitOutcome(context, 'modality:acupuncture', 'tcm.external-therapy');
   assert.deepEqual(unmetObligationsV21(context.controlPlaneV21!), []);
   const readiness = evaluateProposalReadiness(context);
   assert.equal(readiness.blockers.some((b) => b.message.startsWith('control plane incomplete')), false);

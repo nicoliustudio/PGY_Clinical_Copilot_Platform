@@ -18,7 +18,13 @@ export type DeliveryStatus = 'DELIVERED' | 'NOT_DELIVERABLE';
 export type ExecutionClearance = 'CLEARED' | 'REVIEW_REQUIRED' | 'BLOCKED';
 
 /** 来源字段的存在性状态。UNKNOWN ≠ KNOWN_EMPTY。 */
-export type FieldPresence = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN' | 'UNATTRIBUTED';
+export type FieldPresence = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN';
+
+/** Closed-world field fact. Absence and unknown are never conflated. */
+export type FactField<T> =
+  | { presence: 'PRESENT'; value: T; provenanceRefs: readonly string[] }
+  | { presence: 'KNOWN_EMPTY'; provenanceRefs: readonly string[] }
+  | { presence: 'UNKNOWN'; provenanceRefs: readonly string[] };
 
 export interface Provenance {
   kind: 'CANONICAL_SOURCE' | 'CASE_DERIVED' | 'MODEL_DERIVED';

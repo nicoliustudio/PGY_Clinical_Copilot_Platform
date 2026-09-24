@@ -44,9 +44,10 @@ export function deriveGraphV21(
   workspace: ClinicalWorkspace,
   appliedBlockers: AppliedBlockerV21[],
   policy: ControlPlanePolicyV21,
+  ledger?: CommitLedger,
 ): ObligationGraphV21 {
   const structural = structuralGraphV21(requestIR, capabilityDescriptors, policy);
-  const withTruth = projectGraphV21(structural, workspace, capabilityDescriptors);
+  const withTruth = projectGraphV21(structural, workspace, capabilityDescriptors, ledger);
   const withBlockers = projectBlockersV21(withTruth, appliedBlockers, workspace);
   return projectInsufficiencyFallbacks(withBlockers, workspace, requestIR, policy);
 }
@@ -76,6 +77,7 @@ export function refreshControlPlaneV21(context: RuntimeContext): void {
     context.workspace,
     state.appliedBlockers,
     state.policy,
+    context.commitLedger,
   );
   state.graph = graph;
   state.durableArtifacts = collectBoundArtifactsV21(graph, context.workspace);
@@ -256,7 +258,7 @@ export function requiredArtifactsFromGraphV21(
       }
       continue;
     }
-    if (node.target.type === 'artifact:treatment-delivery' && descriptor) {
+    if (node.target.type === 'artifact:treatment-draft' && descriptor) {
       for (const ob of descriptor.deliveryObligations ?? []) {
         keys.add(`capabilityDelivery:${descriptor.id}:${ob.id}`);
       }

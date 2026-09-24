@@ -4,6 +4,7 @@ import type { RetrievalDiagnostics } from './knowledge/diagnostics.js';
 import type { AgentLoopTrace, ContextMetrics } from './contracts/agent-loop.js';
 import type { ClinicalStrategy } from './contracts/clinical-strategy.js';
 import type { ActionReceipt, RunExecutionMetrics, H14TreatmentRetrieval } from './contracts/execution.js';
+import type { CommitRecord } from './contracts/commit.js';
 
 export interface ToolCallTrace { toolName: string; input: unknown; output: unknown; error?: unknown; ms: number; reused?: boolean; }
 
@@ -44,6 +45,8 @@ export interface RunTrace {
   agentLoop?: AgentLoopTrace;
   clinicalStrategy?: ClinicalStrategy;
   contextMetrics?: ContextMetrics;
+  /** Kernel authoritative delivery records for this run. Always present after a clinical run. */
+  commits?: CommitRecord[];
 }
 
 const traces = new Map<string, RunTrace>();
@@ -64,6 +67,7 @@ export function newTrace(input: string): RunTrace {
     deliberationCoverage: [],
     retrievalDiagnostics: [],
     actionReceipts: [],
+    commits: [],
   };
   traces.set(trace.runId, trace);
   return trace;
@@ -86,6 +90,8 @@ export function finishTrace(runId: string, args: {
   agentLoop?: AgentLoopTrace;
   clinicalStrategy?: ClinicalStrategy;
   contextMetrics?: ContextMetrics;
+  /** Kernel authoritative delivery records for this run. Always present after a clinical run. */
+  commits?: CommitRecord[];
 }): RunTrace {
   const trace = traces.get(runId);
   if (!trace) throw new Error(`trace 未初始化: ${runId}`);
@@ -103,6 +109,7 @@ export function finishTrace(runId: string, args: {
   if (args.agentLoop) trace.agentLoop = args.agentLoop;
   if (args.clinicalStrategy) trace.clinicalStrategy = args.clinicalStrategy;
   if (args.contextMetrics) trace.contextMetrics = args.contextMetrics;
+  if (args.commits) trace.commits = [...args.commits];
   if (args.snapshot) {
     trace.modelProfileId = args.snapshot.modelProfileId; trace.promptHash = args.snapshot.promptHash;
     trace.capabilities = args.snapshot.capabilities; trace.skills = args.snapshot.skills;

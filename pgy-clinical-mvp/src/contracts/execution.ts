@@ -58,7 +58,7 @@ export type ExecutionRoleCost = {
  * - RETRIEVAL          检索类（knowledge.search / get_source / formula.search_normative）
  * - COGNITIVE_MUTATION 认知状态持久化（workspace.* deliberation/focus/assessment/exclusion）
  * - VALIDATION         校验类（formula.validate）
- * - COMMIT             终结提交（proposal.submit）
+ * - COMMIT             终结提交（delivery.commit；proposal.submit 仅提交推理选择，不产生权威交付）
  * - CAPABILITY         能力发现/激活（capability.*）
  * - OTHER              其它
  */

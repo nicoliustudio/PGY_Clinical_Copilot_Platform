@@ -49,11 +49,27 @@ export const clinicalResultSchema = z.object({
     composition: z.string(),
     source_ref: z.string(),
     modification_rules: z.array(z.string()),
-    modification_status: z.enum(['PRESENT', 'KNOWN_EMPTY', 'UNATTRIBUTED_SOURCE_RULES']),
+    modification_status: z.enum(['PRESENT', 'KNOWN_EMPTY', 'UNKNOWN', 'UNATTRIBUTED_SOURCE_RULES']),
     modification_text: z.string(),
     source_level_modification_rules: z.array(z.string()).optional(),
     usage: z.string().optional(),
     relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
+  })).optional(),
+  /** First-class authoritative projection. Every entry is derived from a Kernel CommitRecord. */
+  deliveries: z.array(z.object({
+    commit_id: z.string(),
+    outcome: z.string(),
+    semantic_identity: z.string(),
+    provider_id: z.string(),
+    delivery_status: z.string(),
+    execution_clearance: z.string(),
+    provenance: z.object({
+      kind: z.enum(['CANONICAL_SOURCE', 'CASE_DERIVED', 'MODEL_DERIVED']),
+      sourceRefs: z.array(z.string()),
+      providerId: z.string(),
+    }),
+    source_bundle: z.unknown().optional(),
+    product: z.record(z.string(), z.unknown()),
   })).optional(),
   /** V2.1.1 deterministic multi-modality deliveries from durable Workspace state. */
   treatment_deliveries: z.array(z.object({

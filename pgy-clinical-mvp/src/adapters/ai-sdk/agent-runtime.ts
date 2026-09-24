@@ -98,6 +98,7 @@ function isStatefulLedgerTool(id: string): boolean {
     || id === 'formula.search_candidates'
     || id === 'formula.get_modification_evidence'
     || id === 'proposal.submit'
+    || id === 'delivery.commit'
     || id.startsWith('workspace.');
 }
 
@@ -400,13 +401,13 @@ const ACTION_PRINCIPLE = `## Action Principle
 - Before another tool call, determine whether the result is likely to materially change: disease framing, syndrome judgment, treatment method, or formula selection.
 - If it will not materially change any of these, do not call the tool.
 - Do not resolve every uncertainty.
-- When existing evidence already supports a defensible source-grounded proposal, call proposal.submit.
+- When existing evidence supports the required product draft, stop broad retrieval. If delivery.commit is available, commit the exact required outcome before proposal.submit.
 - Reuse before retrieving. Before another retrieval, name the unresolved decision it could change (disease framing / syndrome judgment / treatment method / formula selection / safety disposition). If the workspace already has sufficient evidence for that decision, reuse existing evidence instead of retrieving again.
 - Do not retrieve merely to increase confidence or completeness. Do not continue broad retrieval after a viable canonical candidate exists unless new evidence could materially change the decision.
 - Commit workspace cognition atomically: when one clinical decision includes candidate focus, candidate assessment, hypothesis update, and uncertainty resolution, commit them together in one workspace.record_deliberation. Do not split one cognitive decision into multiple workspace writes unless later information genuinely changes the decision. Do not repeat workspace mutations that are already persisted.
-- Choose the clinical action you need. Do not manually perform deterministic preparation (canonical hydrate, formula validation, source binding) that the Harness completes automatically before submit.
+- Choose the clinical action you need. Do not manually fabricate canonical identity/source binding. The Kernel performs deterministic hydration and validation when you call delivery.commit.
 - Reuse already activated capabilities, validated candidates, and existing deterministic results when still valid. Do not repeat execution chores that do not change the business objective.
-- When the clinical decision is sufficiently complete, submit the proposal instead of continuing exploration. Do not repeat deterministic preparation already handled by the Harness.
+- When the clinical decision is sufficiently complete, commit every runnable required delivery with delivery.commit; only then submit the proposal. Do not repeat deterministic Kernel work.
 - Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty.`;
 
 /** Diagnostic Pattern Set Spike：domain-general epistemic rules（仅开关 ON 时注入）。 */
@@ -568,7 +569,8 @@ export function classifyExecutionRole(toolName: string): ExecutionRole {
     return 'COGNITIVE_MUTATION';
   }
   if (toolName === 'formula.validate') return 'VALIDATION';
-  if (toolName === 'proposal.submit') return 'COMMIT';
+  if (toolName === 'delivery.commit') return 'COMMIT';
+  if (toolName === 'proposal.submit') return 'OTHER';
   if (toolName === 'capability.discover' || toolName === 'capability.activate') return 'CAPABILITY';
   return 'OTHER';
 }
@@ -621,7 +623,7 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
     '',
     mode === 'harness'
       ? context.controlPlaneV21?.compileStatus === 'COMPILED'
-        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。围绕当前 runnable obligation 执行，完成后调用 proposal.submit。'
+        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。先完成 PREPARED reasoning/draft；当 delivery.commit 出现在合法工具面时，必须提交对应 exact outcome。所有 required delivery 均已 commit 后再调用 proposal.submit。'
         : '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
       : 'Classic A/B：Capability 已由 legacy resolver 预装配；不要调用 Harness capability controls。',
     mode === 'harness'
@@ -859,7 +861,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         if (rec) {
           const recoverHeader = rec.kind === 'submit'
             ? 'Your structured clinical task now has all required durable artifacts. Call proposal.submit immediately to submit the final proposal. Do not end in free text.'
-            : `${RECOVERY_INSTRUCTION}\n\nMissing durable artifacts: ${rec.missing.join(', ')}.\nUse workspace.record_deliberation to write the missing clinical decisions (its diseaseAssessment / patternAssessment / treatmentPlan / formulaSelection / formulaReview / treatmentFormDecision fields as applicable), then call proposal.submit.`;
+            : `${RECOVERY_INSTRUCTION}\n\nMissing durable artifacts: ${rec.missing.join(', ')}.\nUse workspace.record_deliberation to write the missing clinical decisions or prepared delivery draft. When delivery.commit becomes available, commit each required exact outcome. Only after all required delivery commits are terminal should you call proposal.submit.`;
           instructions = `${recoverHeader}\n\n${baseInstructions}`;
         }
         return {

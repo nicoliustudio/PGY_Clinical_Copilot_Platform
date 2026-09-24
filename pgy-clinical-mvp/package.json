@@ -32,7 +32,9 @@
     "control:v212:check": "node scripts/control-plane-v212-check.mjs",
     "test:control:v211": "node --import tsx --test tests/control-plane-v21-integration.test.ts",
     "test:delivery-integrity": "node --import tsx --test tests/delivery-integrity.test.ts",
-    "delivery:check": "npm run test:delivery-integrity"
+    "delivery:check": "npm run test:delivery-integrity",
+    "authority:check": "node scripts/check-authority-cutover.mjs",
+    "test:authority-cutover": "node --import tsx --test tests/authority-cutover.invariants.test.ts tests/commit-boundary.invariants.test.ts tests/delivery-integrity.test.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.49",

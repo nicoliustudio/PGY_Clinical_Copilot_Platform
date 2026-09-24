@@ -29,8 +29,8 @@ export function projectFormulaSet(
   // it must never be used as a projection filter that silently drops source siblings.
   // PRIMARY_ONLY therefore means one reasoning anchor, not one visible source product.
   void cardinality;
-  const selected = set.formulas.filter((f) => f.relation !== 'CLINICALLY_EXCLUDED');
-  return selected.map((f) => ({
+  // SOURCE COMPLETENESS: clinical exclusion changes qualification, never source membership.
+  return set.formulas.map((f) => ({
     formulaRef: f.formulaRef,
     formulaId: f.formulaId,
     name: f.formulaName,

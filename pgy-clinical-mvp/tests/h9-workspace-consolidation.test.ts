@@ -32,7 +32,8 @@ test('classifyExecutionRole 正确分类六类角色', () => {
   assert.equal(classifyExecutionRole('workspace.record_candidate_assessment'), 'COGNITIVE_MUTATION');
   assert.equal(classifyExecutionRole('workspace.record_candidate_exclusion'), 'COGNITIVE_MUTATION');
   assert.equal(classifyExecutionRole('formula.validate'), 'VALIDATION');
-  assert.equal(classifyExecutionRole('proposal.submit'), 'COMMIT');
+  assert.equal(classifyExecutionRole('delivery.commit'), 'COMMIT');
+  assert.equal(classifyExecutionRole('proposal.submit'), 'OTHER');
   assert.equal(classifyExecutionRole('capability.activate'), 'CAPABILITY');
   assert.equal(classifyExecutionRole('unknown.tool'), 'OTHER');
 });

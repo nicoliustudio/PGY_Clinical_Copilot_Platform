@@ -74,7 +74,8 @@
         "advisoryComposition",
         "preparation",
         "usage"
-      ]
+      ],
+      "materialization": "REASONING_PRODUCT"
     }
   ],
   "controlPlaneV21": {
@@ -101,6 +102,40 @@
         ]
       },
       {
+        "id": "treatment-draft",
+        "produces": {
+          "type": "artifact:treatment-draft",
+          "qualifiers": {
+            "outcome": "$outcome"
+          },
+          "producerCapabilityId": "$capability",
+          "producerRuleId": "$rule"
+        },
+        "requires": [
+          {
+            "type": "artifact:clinical-core"
+          },
+          {
+            "type": "artifact:treatment-evidence",
+            "qualifiers": {
+              "outcome": "$outcome"
+            },
+            "producerCapabilityId": "$capability"
+          }
+        ],
+        "effects": [
+          {
+            "op": "commit",
+            "target": {
+              "type": "artifact:treatment-draft",
+              "qualifiers": {
+                "outcome": "$outcome"
+              }
+            }
+          }
+        ]
+      },
+      {
         "id": "treatment-delivery",
         "forOutcomes": [
           "modality:gaofang"
@@ -115,10 +150,7 @@
         },
         "requires": [
           {
-            "type": "artifact:clinical-core"
-          },
-          {
-            "type": "artifact:treatment-evidence",
+            "type": "artifact:treatment-draft",
             "qualifiers": {
               "outcome": "$outcome"
             },

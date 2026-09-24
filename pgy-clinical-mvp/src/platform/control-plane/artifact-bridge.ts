@@ -15,6 +15,7 @@ import { applyTypedBlockerV21 } from '../../control-plane-v21/blockers.js';
 import { importedArtifact } from '../../control-plane-v21/artifacts.js';
 import { stableToken } from '../../control-plane-v21/terms.js';
 import { checkClinicalCoreCompletion, isArtifactSatisfied } from '../workspace/clinical-workspace.js';
+import type { CommitLedger } from '../commit/commit-ledger.js';
 
 /**
  * Workspace → V2.1 Artifact Bridge（Phase 4）。
@@ -34,6 +35,7 @@ export type NodeTruth = 'SATISFIED' | 'NOT_DELIVERABLE' | 'OPEN';
 interface TruthContext {
   workspace: ClinicalWorkspace;
   capabilities: CapabilityDescriptor[];
+  commitLedger?: CommitLedger;
 }
 
 /** 某个 obligation 节点在**当前 durable state** 下的终态。 */
@@ -183,11 +185,24 @@ const TRUTH_READERS: Record<string, TruthReader> = {
     if (!capability) return 'OPEN';
     return capabilityEvidenceTruth(capability, workspace) ?? 'OPEN';
   },
-  // 治疗交付：由声明 deliveryObligations 的能力闭环投影（outcome → capability）。
-  'artifact:treatment-delivery': (node, { workspace, capabilities }) => {
+  // PREPARED delivery draft: Workspace may prove structural completeness, but this is never terminal authority.
+  'artifact:treatment-draft': (node, { workspace, capabilities }) => {
     const capability = outcomeProvider(node, capabilities);
     if (!capability) return 'OPEN';
     return capabilityDeliveryTruth(capability, workspace) ?? 'OPEN';
+  },
+  // TERMINAL delivery: only a matching Kernel CommitRecord may close the obligation.
+  'artifact:treatment-delivery': (node, { workspace, capabilities, commitLedger }) => {
+    const outcome = node.target.qualifiers?.outcome;
+    if (typeof outcome !== 'string') return 'OPEN';
+    const providerId = node.target.producerCapabilityId;
+    if (commitLedger?.delivered(outcome).some((record) => !providerId || record.providerId === providerId)) {
+      return 'SATISFIED';
+    }
+    const capability = outcomeProvider(node, capabilities);
+    return capability && capabilityDeliveryTruth(capability, workspace) === 'NOT_DELIVERABLE'
+      ? 'NOT_DELIVERABLE'
+      : 'OPEN';
   },
 };
 
@@ -277,8 +292,9 @@ export function projectGraphV21(
   structural: ObligationGraphV21,
   workspace: ClinicalWorkspace,
   capabilities: CapabilityDescriptor[],
+  commitLedger?: CommitLedger,
 ): ObligationGraphV21 {
-  const ctx: TruthContext = { workspace, capabilities };
+  const ctx: TruthContext = { workspace, capabilities, commitLedger };
   const byId = new Map(structural.nodes.map((node) => [node.id, node]));
   const resolved = new Map<string, NodeTruth>();
 

@@ -9,6 +9,8 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+const EMPTY_MODIFICATION_MARKERS = new Set(['none', 'null', 'nil', '无', '无加减', '暂无', '-']);
+
 function modificationText(value: unknown): string {
   if (typeof value === 'string') return value.trim();
   if (!value || typeof value !== 'object') return '';
@@ -37,7 +39,8 @@ export function normalizeSourceModificationList(...values: unknown[]): string[] 
       return;
     }
     const text = modificationText(value);
-    if (text && !out.includes(text)) out.push(text);
+    if (!text || EMPTY_MODIFICATION_MARKERS.has(text.toLowerCase())) return;
+    if (!out.includes(text)) out.push(text);
   };
   for (const value of values) push(value);
   return out;
