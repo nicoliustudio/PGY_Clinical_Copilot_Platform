@@ -12,10 +12,24 @@ const kbReleaseDir = path.resolve(req('KB_RELEASE_DIR'));
 export const config = {
   runtime: { mode: (process.env.CLINICAL_RUNTIME_MODE ?? 'harness') as 'harness' | 'classic' },
   llm: {
+    /** 官方 DeepSeek 通道（兼容既有 LLM_BASE_URL / LLM_API_KEY 语义）。 */
     baseURL: req('LLM_BASE_URL'),
     apiKey: req('LLM_API_KEY'),
-    fastModel: req('LLM_FAST_MODEL'),
+    /** 初始活动模型的 API model 名（前端可热切换，见 model/model-registry.ts）。 */
     deepModel: req('LLM_DEEP_MODEL'),
+    /** 初始活动模型的目录 id（优先级高于 LLM_DEEP_MODEL；留空则按模型名匹配）。 */
+    modelId: process.env.LLM_MODEL_ID ?? '',
+    /**
+     * 控制面固定模型。用于 Understanding / Request Compiler / Planner。
+     * 留空时默认使用 official:deepseek-chat，避免“切临床模型”同时改写控制栈语义，
+     * 从而污染模型 A/B。若该通道不可用，Runtime 会确定性回退到本次 run 的 clinical 模型。
+     */
+    controlModelId: process.env.LLM_CONTROL_MODEL_ID ?? 'official:deepseek-chat',
+    /** 阿里云百炼 token-plan 通道；未配置 key 时该通道模型在前端置灰（不产生死按钮）。 */
+    aliyun: {
+      baseURL: process.env.LLM_ALIYUN_BASE_URL ?? 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      apiKey: process.env.LLM_ALIYUN_API_KEY ?? '',
+    },
   },
   embedding: {
     baseURL: req('EMBEDDING_BASE_URL'),

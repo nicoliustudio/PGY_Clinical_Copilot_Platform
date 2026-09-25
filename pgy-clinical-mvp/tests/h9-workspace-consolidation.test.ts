@@ -40,11 +40,11 @@ test('classifyExecutionRole 正确分类六类角色', () => {
 
 // ---------- Batch deliberation → multiple events ----------
 
-test('一个 batch deliberation 可同时 focus 多个 candidate', () => {
+test('record_deliberation 不再直接 focus candidate（frontier 只由 focus_candidates 写入）', () => {
   const drafts = workspaceEventsForTool('workspace.record_deliberation', {
     focusedCandidates: ['c1', 'c2'],
   }, undefined);
-  assert.deepEqual(drafts.filter((d) => d.type === 'candidate.focused').map((d) => d.payload.id), ['c1', 'c2']);
+  assert.deepEqual(drafts.filter((d) => d.type === 'candidate.focused'), []);
 });
 
 test('一个 batch 可记录多个 candidate assessment', () => {
@@ -144,8 +144,8 @@ test('applyToolExecutionResult 返回 batchResult（written/deduped）', () => {
   seedWorkspace(store);
   const applied = applyToolExecutionResult(
     'workspace.record_deliberation',
-    { focusedCandidates: ['c1'] },
-    { type: 'tool-result', output: { focusedCandidates: ['c1'] } },
+    { diseaseAssessment: { statement: '崩漏' } },
+    { type: 'tool-result', output: { accepted: true } },
     store,
   );
   assert.ok(applied.batchResult);

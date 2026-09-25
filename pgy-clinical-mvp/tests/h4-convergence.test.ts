@@ -52,14 +52,12 @@ test('hypothesis 使用稳定 H_xxx ID（非 label/sourceId）', () => {
   assert.equal(hyp2?.payload.id, id);
 });
 
-test('knowledge.search 已返回 P1 formula 时直接 canonical hydrate 为 candidate', () => {
+test('knowledge.search 不再把 P1 formula 直接升级为 selectable candidate（仅 evidence）', () => {
   const drafts = workspaceEventsForTool('knowledge.search', { query: '崩漏' }, [
     { sourceId: 'P1:a', title: '崩漏', authority: 'P1', excerpt: 'x', provenance: { source: '', sourceFile: '', disease: '', syndrome: '气虚下陷', treatment: '' }, formulas: [{ id: 'F:1', name: '补中益气汤', composition: '黄芪 党参', sourceTier: 'P1', knowledgeRole: 'normative' }] },
   ]);
-  const cand = drafts.find((d) => d.type === 'candidate.presented');
-  assert.ok(cand, '应直接 hydrate 出 candidate');
-  assert.equal(cand.payload.id, 'P1:a::F:1');
-  assert.equal(cand.payload.formulaId, 'F:1');
+  assert.equal(drafts.some((d) => d.type === 'candidate.presented'), false, 'generic search 不得制造 selectable formula candidate');
+  assert.ok(drafts.some((d) => d.type === 'evidence.added'), '仍应产生 evidence');
 });
 
 test('CaseFactRef（CF_xxx）可被 deliberation 引用', () => {

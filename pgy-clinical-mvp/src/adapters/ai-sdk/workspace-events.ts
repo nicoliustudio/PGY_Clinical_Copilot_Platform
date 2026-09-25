@@ -97,39 +97,11 @@ export function workspaceEventsForTool(
       .map((hit) => (typeof hit === 'object' && hit !== null ? evidenceItemDraft(hit as Record<string, unknown>) : null))
       .filter((x): x is WorkspaceEventDraft => x !== null);
 
-    // H12：knowledge.search 只产生 evidence / presented candidate，不自动产生 patient hypothesis。
-    // provenance.syndrome 是 SOURCE_SYNDROME_LABEL（知识元数据），不是 patient diagnosis。
-    const candidates: WorkspaceEventDraft[] = [];
-    for (const hit of output) {
-      const sourceId = readField(hit, 'sourceId');
-      const authority = readField(hit, 'authority');
-      // 直接 canonical hydrate：knowledge.search 已返回明确 P1 formula candidate 时，
-      // 不要求重复 formula.search_normative。
-      if (authority === 'P1' && typeof sourceId === 'string') {
-        const formulas = readField(hit, 'formulas');
-        if (Array.isArray(formulas)) {
-          for (const f of formulas) {
-            const formulaId = readField(f, 'id');
-            const composition = readField(f, 'composition');
-            if (typeof formulaId === 'string' && typeof composition === 'string' && composition.trim()) {
-              candidates.push({
-                type: 'candidate.presented',
-                payload: {
-                  id: `${sourceId}::${formulaId}`,
-                  formulaId,
-                  sourceId,
-                  composition: [composition],
-                  name: readField(f, 'name'),
-                  originatingHypothesisRefs: [],
-                },
-              });
-            }
-          }
-        }
-      }
-    }
-
-    return [completed, ...added, ...candidates];
+    // Candidate Authority is intentionally single-surface: generic knowledge.search contributes
+    // evidence only. Selectable formula candidates may only originate from formula.search_candidates
+    // (or the explicitly retained legacy formula.search_normative surface). This prevents a broad
+    // retrieval path from bypassing patient-fact recall protection and manufacturing candidates.
+    return [completed, ...added];
   }
 
   if (toolName === 'knowledge.get_source') {
@@ -235,6 +207,14 @@ export function workspaceEventsForTool(
           sourceId: readField(c, 'sourceId'),
           name: readField(c, 'formulaName'),
           sourceAuthority: readField(c, 'sourceAuthority'),
+          sourceKind: readField(c, 'sourceKind'),
+          retrievalRank: readField(c, 'retrievalRank'),
+          retrievalScore: readField(c, 'retrievalScore'),
+          retrievalLane: readField(c, 'retrievalLane'),
+          selectionUnit: readField(c, 'selectionUnit'),
+          sourceProductRefs: readField(c, 'sourceProductRefs'),
+          sourceProductNames: readField(c, 'sourceProductNames'),
+          sourceProductCount: readField(c, 'sourceProductCount'),
           sourceCaseRef: readField(c, 'sourceCaseRef'),
           sourceEvidenceRef: readField(c, 'sourceEvidenceRef'),
           visitRef: readField(c, 'visitRef'),
@@ -243,6 +223,21 @@ export function workspaceEventsForTool(
           originatingHypothesisRefs: [],
         },
       });
+    }
+    // CandidateSet is one Runtime transaction: canonical evidence is materialized first, then the
+    // Kernel receipt freezes the complete selectable universe together with those evidence links.
+    const candidateRefs = (candidates as Record<string, unknown>[])
+      .map((candidate) => readField(candidate, 'candidateRef'))
+      .filter((ref): ref is string => typeof ref === 'string');
+    const hydrated = Array.isArray(result?.hydratedEvidence) ? result.hydratedEvidence : [];
+    for (const entry of hydrated as Record<string, unknown>[]) {
+      const candidateRef = readField(entry, 'candidateRef');
+      const evidence = readField(entry, 'evidence');
+      if (typeof candidateRef !== 'string' || !evidence || typeof evidence !== 'object') continue;
+      drafts.push(...workspaceEventsForTool('formula.get_evidence', { candidateRef }, evidence));
+    }
+    if (candidateRefs.length > 0) {
+      drafts.push({ type: 'candidate.frontier.set', payload: { candidateRefs } });
     }
     return drafts;
   }
@@ -255,10 +250,16 @@ export function workspaceEventsForTool(
     const formulaName = readField(doc, 'formulaName');
     const requestedCandidateRef = readField(input, 'candidateRef');
     const derivedCandidateRef = `${sourceId}::${readField(doc, 'formulaId')}`;
+    const canonicalCandidateRef = typeof requestedCandidateRef === 'string' && requestedCandidateRef
+      ? requestedCandidateRef
+      : derivedCandidateRef;
     return [{
       type: 'evidence.added',
       payload: {
-        id: sourceId,
+        // Evidence identity is candidate-scoped, not parent-source-scoped. Three sibling formulas
+        // from the same P1 source must produce three durable hydration facts; otherwise each new
+        // evidence event overwrites the previous sibling linkage and formula-evidence can never close.
+        id: `formula-evidence:${canonicalCandidateRef}`,
         sourceRef: sourceId,
         sourceType: readField(doc, 'sourceTier') ?? 'knowledge',
         sourceSchool: readPath(doc, 'provenance', 'sourceSchool'),
@@ -267,14 +268,8 @@ export function workspaceEventsForTool(
         evidenceKind: 'treatment_knowledge',
         sourceDisease: readPath(doc, 'provenance', 'disease'),
         sourceSyndrome: readPath(doc, 'provenance', 'syndrome'),
-        // 优先保留调用时的 canonical candidateRef。P2 formula-level candidate 的
-        // candidateRef 与 formulaId 并非同一字符串，若只重建 `${sourceId}::${formulaId}`
-        // 会丢失 candidate ↔ expanded evidence 的 durable linkage，导致 recovery 无法判断
-        // “这个 frontier candidate 是否已经读过完整证据”。
-        relatedCandidates: [
-          typeof requestedCandidateRef === 'string' ? requestedCandidateRef : undefined,
-          derivedCandidateRef,
-        ].filter((x): x is string => typeof x === 'string' && x.length > 0),
+        relatedCandidates: [canonicalCandidateRef, derivedCandidateRef]
+          .filter((x, index, all): x is string => typeof x === 'string' && x.length > 0 && all.indexOf(x) === index),
         supportingSignals: [],
         contradictingSignals: [],
       },
@@ -282,12 +277,16 @@ export function workspaceEventsForTool(
   }
 
   if (toolName === 'workspace.consider_hypotheses') {
-    const hyps = Array.isArray(readField(input, 'hypotheses')) ? readField(input, 'hypotheses') : [];
+    const resolved = readField(output, 'hypotheses');
+    const hyps = Array.isArray(resolved)
+      ? resolved
+      : (Array.isArray(readField(input, 'hypotheses')) ? readField(input, 'hypotheses') : []);
     const drafts: WorkspaceEventDraft[] = [];
     for (const h of (hyps as unknown[])) {
       const label = readField(h, 'label');
       if (typeof label !== 'string' || !label.trim()) continue;
-      const id = stableHypothesisId(label);
+      const suppliedRef = readField(h, 'hypothesisRef');
+      const id = typeof suppliedRef === 'string' && suppliedRef ? suppliedRef : stableHypothesisId(label);
       drafts.push({
         type: 'hypothesis.presented',
         payload: {
@@ -339,19 +338,27 @@ export function workspaceEventsForTool(
   if (toolName === 'workspace.focus_candidates') {
     const refs = Array.isArray(readField(input, 'candidateRefs')) ? readField(input, 'candidateRefs') : [];
     const candidateRefs = (refs as unknown[]).filter((x): x is string => typeof x === 'string');
-    return candidateRefs.map((candidateRef) => ({
+    const drafts: WorkspaceEventDraft[] = candidateRefs.map((candidateRef) => ({
       type: 'candidate.focused' as const,
       payload: { id: candidateRef, candidateRef },
     }));
+    // focus_candidates deterministically hydrates every focused candidate. Persist those canonical
+    // evidence facts in the same atomic tool result so a partial frontier cannot strand selection.
+    const hydrated = Array.isArray(readField(output, 'hydratedEvidence')) ? readField(output, 'hydratedEvidence') : [];
+    for (const entry of hydrated as Record<string, unknown>[]) {
+      const candidateRef = readField(entry, 'candidateRef');
+      const evidence = readField(entry, 'evidence');
+      if (typeof candidateRef !== 'string' || !evidence || typeof evidence !== 'object') continue;
+      drafts.push(...workspaceEventsForTool('formula.get_evidence', { candidateRef }, evidence));
+    }
+    return drafts;
   }
 
-  if (toolName === 'workspace.record_deliberation') {
+  if (toolName === 'workspace.record_deliberation' || toolName === 'workspace.commit_clinical_model') {
     const drafts: WorkspaceEventDraft[] = [];
-    const focusedField = firstDefinedField(input, 'focusedCandidateRefs', 'focusedCandidates');
-    const focused = Array.isArray(focusedField) ? focusedField : [];
-    for (const candidateRef of (focused as unknown[]).filter((x): x is string => typeof x === 'string')) {
-      drafts.push({ type: 'candidate.focused', payload: { id: candidateRef, candidateRef } });
-    }
+    // Frontier authority is intentionally exclusive to workspace.focus_candidates because that tool
+    // atomically hydrates canonical evidence for every focused formula. workspace deliberation tools must not
+    // recreate a partial-frontier bypass.
 
     const assessmentsField = firstDefinedField(input, 'candidateAssessments', 'assessments');
     const assessments = Array.isArray(assessmentsField) ? assessmentsField : [];
@@ -423,17 +430,11 @@ export function workspaceEventsForTool(
     if (typeof diseaseAssessment === 'object' && diseaseAssessment !== null) {
       drafts.push({ type: 'disease.assessment.recorded', payload: diseaseAssessment as Record<string, unknown> });
     }
-    const treatmentPlan = firstDefinedField(input, 'treatmentPlan');
+    // Tool execution may return a Runtime-normalized plan (e.g. SOURCE_BOUND source-owned fields
+    // stripped before persistence). Durable state must use that canonical payload, not raw model input.
+    const treatmentPlan = firstDefinedField(output, 'canonicalTreatmentPlan') ?? firstDefinedField(input, 'treatmentPlan');
     if (typeof treatmentPlan === 'object' && treatmentPlan !== null) {
       drafts.push({ type: 'treatment.plan.recorded', payload: treatmentPlan as Record<string, unknown> });
-    }
-    const formulaSelection = firstDefinedField(input, 'formulaSelection');
-    if (typeof formulaSelection === 'object' && formulaSelection !== null) {
-      drafts.push({ type: 'formula.selection.recorded', payload: formulaSelection as Record<string, unknown> });
-    }
-    const modificationPlan = firstDefinedField(input, 'modificationPlan');
-    if (typeof modificationPlan === 'object' && modificationPlan !== null) {
-      drafts.push({ type: 'modification.plan.recorded', payload: modificationPlan as Record<string, unknown> });
     }
     const formulaReview = firstDefinedField(input, 'formulaReview');
     if (typeof formulaReview === 'object' && formulaReview !== null) {

@@ -10,7 +10,7 @@ import type {
   KnowledgeIndex,
   NormativeFormula,
 } from './types.js';
-import { normalizeSourceModificationList } from './source-normalization.js';
+import { normalizeSourceModificationList, splitInlineFormulaModification } from './source-normalization.js';
 
 function loadJson<T>(p: string): T {
   return JSON.parse(readFileSync(p, 'utf8')) as T;
@@ -148,11 +148,23 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
   const entries = loadJson<NormativeEntry[]>(path.join(config.kb.releaseDir, 'normative.json'));
   return entries.map((n) => {
     const formulas: NormativeFormula[] = (n.formulas ?? []).map((f) => {
-      const localModificationsDeclared = Object.prototype.hasOwnProperty.call(f, 'inline_modification_text')
-        || Object.prototype.hasOwnProperty.call(f, 'inline_modifications');
       const compositionDeclared = Object.prototype.hasOwnProperty.call(f, 'composition')
         || Object.prototype.hasOwnProperty.call(f, 'raw_composition');
-      const composition = str(f.composition ?? f.raw_composition);
+      const rawComposition = Object.prototype.hasOwnProperty.call(f, 'raw_composition')
+        ? f.raw_composition
+        : f.composition;
+      const inlineSplit = splitInlineFormulaModification(rawComposition);
+      const explicitInline = normalizeSourceModificationList(f.inline_modification_text, f.inline_modifications);
+      const localModifications = explicitInline.length > 0 ? explicitInline : inlineSplit.modifications;
+      const localPresence = explicitInline.length > 0
+        ? 'PRESENT' as const
+        : (compositionDeclared ? inlineSplit.presence : 'UNKNOWN' as const);
+      // The source-owned composition must never contain a second embedded field. If the raw source
+      // carries `加减:` inline, split it here so downstream product ownership remains injective:
+      // composition owns ingredients; sourceModifications owns formula-local modification rules.
+      const composition = compositionDeclared
+        ? (inlineSplit.composition || str(f.composition ?? f.raw_composition))
+        : '';
       const preparationDeclared = Object.prototype.hasOwnProperty.call(f, 'preparation');
       const usageDeclared = Object.prototype.hasOwnProperty.call(f, 'usage');
       return {
@@ -161,9 +173,7 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
         composition,
         compositionPresence: !compositionDeclared ? 'UNKNOWN' : composition.trim() ? 'PRESENT' : 'KNOWN_EMPTY',
         ...(preparationDeclared ? { preparation: str(f.preparation) } : {}),
-        ...(localModificationsDeclared
-          ? { sourceModifications: normalizeSourceModificationList(f.inline_modification_text, f.inline_modifications) }
-          : {}),
+        ...(localPresence !== 'UNKNOWN' ? { sourceModifications: localModifications } : {}),
         ...(usageDeclared ? { usage: str(f.usage) } : {}),
         sourceNote: str(f.source_note) || undefined,
         sourceTier: str(f.source_tier),

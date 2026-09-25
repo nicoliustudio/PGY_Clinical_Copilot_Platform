@@ -1,5 +1,6 @@
 import type { KnowledgeDoc } from '../knowledge/types.js';
 import type {
+  CandidateReference,
   FormulaAdoptionState,
   SourceFieldPresence,
   SourceFormulaEntry,
@@ -7,12 +8,15 @@ import type {
 } from '../contracts/workspace.js';
 
 /**
- * Source Formula Set —— canonical source membership projection.
+ * Source Formula Set —— source membership projection for both normative P1 sources and historical P2 cases.
  *
- * Membership and product completeness are deliberately independent:
- * - every ACTIVE source product remains a member, even when a product field is UNKNOWN;
- * - clinical qualification changes recommendation state, never source existence;
- * - source-local/shared modification facts preserve PRESENT / KNOWN_EMPTY / UNKNOWN.
+ * P1 semantics:
+ *   one normative parent source -> every ACTIVE sibling formula.
+ * P2 semantics:
+ *   one historical case -> every structured case-formula encounter/visit in the same case lineage.
+ *
+ * P2 is never promoted to normative prescription authority. It is authoritative only for the historical fact
+ * "this source case used this prescription at this visit". Delivery/execution clearance remains independent.
  */
 
 function isActiveFormula(entityStatus: string | undefined): boolean {
@@ -40,21 +44,25 @@ export interface HydrateSourceFormulaSetOptions {
   exclusions?: Record<string, { reason: string; evidenceRefs?: string[] }>;
 }
 
-export function hydrateSourceFormulaSet(
-  docs: KnowledgeDoc[],
-  selectedCandidateRef: string,
-  options: HydrateSourceFormulaSetOptions = {},
+function hydrateP1(
+  parent: KnowledgeDoc,
+  selectedFormulaId: string | undefined,
+  options: HydrateSourceFormulaSetOptions,
 ): SourceFormulaSet | null {
-  const [sourceId, selectedFormulaId] = selectedCandidateRef.split('::');
-  if (!sourceId || !selectedFormulaId) return null;
-
-  const parent = docs.find((d) => d.id === sourceId && d.sourceTier === 'P1');
-  if (!parent) return null;
-
-  // SOURCE MEMBERSHIP: composition completeness must never decide whether an ACTIVE product exists.
+  const sourceId = parent.id;
   const activeFormulas = parent.formulas.filter((f) => isActiveFormula(f.entityStatus));
   if (activeFormulas.length === 0) return null;
-  if (!activeFormulas.some((f) => f.id === selectedFormulaId)) return null;
+  // Source-node selection (no explicit formula) defaults to the first active product.
+  // An explicitly requested product that is absent from the parent is a fail-closed identity miss,
+  // never a silent substitution — this keeps intent fidelity without re-parsing candidate syntax.
+  let primaryFormulaId: string;
+  if (selectedFormulaId === undefined) {
+    primaryFormulaId = activeFormulas[0]!.id;
+  } else if (activeFormulas.some((f) => f.id === selectedFormulaId)) {
+    primaryFormulaId = selectedFormulaId;
+  } else {
+    return null;
+  }
 
   const shared = normalizeTextList(parent.sourceModifications);
   const formulas: SourceFormulaEntry[] = activeFormulas.map((f) => {
@@ -62,7 +70,7 @@ export function hydrateSourceFormulaSet(
     let relation: FormulaAdoptionState = 'SOURCE_ALTERNATIVE';
     let exclusionReason: string | undefined;
     let exclusionEvidenceRefs: string[] | undefined;
-    if (f.id === selectedFormulaId) {
+    if (f.id === primaryFormulaId) {
       relation = 'PRIMARY_SELECTED';
     } else {
       const exclusion = options.exclusions?.[formulaRef];
@@ -74,8 +82,6 @@ export function hydrateSourceFormulaSet(
     }
 
     const local = normalizeTextList(f.sourceModifications);
-    // Legacy compatibility only: when a single product source has shared rules, expose them locally too.
-    // Authoritative product facts still keep formula-local and source-shared scopes separate.
     const legacyLocal = local.presence === 'PRESENT'
       ? local.values
       : (activeFormulas.length === 1 && shared.presence === 'PRESENT' ? shared.values : []);
@@ -108,6 +114,8 @@ export function hydrateSourceFormulaSet(
 
   return {
     parentRecordRef: sourceId,
+    sourceKind: 'P1_NORMATIVE_SOURCE',
+    sourceAuthority: 'P1',
     disease: parent.disease,
     syndrome: parent.syndrome,
     treatmentMethod: parent.treatment,
@@ -116,6 +124,133 @@ export function hydrateSourceFormulaSet(
     sourceLevelModificationPresence: shared.presence,
     formulas,
   };
+}
+
+function p2CaseRef(doc: KnowledgeDoc): string {
+  return doc.caseId ? `P2:${doc.caseId}` : doc.id;
+}
+
+function p2VisitRef(doc: KnowledgeDoc): string {
+  return doc.id.startsWith('P2:') ? doc.id.slice(3) : doc.id;
+}
+
+function p2FormulaId(doc: KnowledgeDoc): string {
+  return `P2_CASE_FORMULA::${p2CaseRef(doc)}::${p2VisitRef(doc)}::1`;
+}
+
+function hydrateP2Case(
+  docs: KnowledgeDoc[],
+  selectedEncounter: KnowledgeDoc,
+  options: HydrateSourceFormulaSetOptions,
+): SourceFormulaSet | null {
+  if (selectedEncounter.kind !== 'case-formula' || !selectedEncounter.composition?.trim()) return null;
+  const caseRef = p2CaseRef(selectedEncounter);
+  const caseId = selectedEncounter.caseId;
+  const encounters = docs.filter((doc) =>
+    doc.sourceTier === 'P2'
+    && doc.kind === 'case-formula'
+    && Boolean(doc.composition?.trim())
+    && (caseId ? doc.caseId === caseId : doc.id === selectedEncounter.id),
+  );
+  if (encounters.length === 0) return null;
+
+  // Preserve source order when possible; visit text is display metadata, not identity authority.
+  const formulas: SourceFormulaEntry[] = encounters.map((doc) => {
+    const formulaRef = `${doc.id}::formula`;
+    let relation: FormulaAdoptionState = doc.id === selectedEncounter.id ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE';
+    let exclusionReason: string | undefined;
+    let exclusionEvidenceRefs: string[] | undefined;
+    const exclusion = options.exclusions?.[formulaRef];
+    if (relation !== 'PRIMARY_SELECTED' && exclusion) {
+      relation = 'CLINICALLY_EXCLUDED';
+      exclusionReason = exclusion.reason;
+      exclusionEvidenceRefs = exclusion.evidenceRefs;
+    }
+    return {
+      formulaRef,
+      formulaId: p2FormulaId(doc),
+      formulaName: doc.formulaName?.trim() || `病例方${doc.visit ? `（${doc.visit}）` : '（原案无正式方名）'}`,
+      composition: doc.composition ?? '',
+      compositionPresence: doc.composition?.trim() ? 'PRESENT' : 'UNKNOWN',
+      sourceModifications: [],
+      formulaLocalModificationPresence: 'UNKNOWN',
+      modificationStatus: 'UNKNOWN',
+      preparationPresence: 'UNKNOWN',
+      usagePresence: 'UNKNOWN',
+      relation,
+      exclusionReason,
+      exclusionEvidenceRefs,
+      caseContext: {
+        sourceRef: doc.id,
+        visit: doc.visit,
+        patient: doc.patient,
+        symptoms: doc.symptoms,
+        disease: doc.disease,
+        syndrome: doc.syndrome,
+        treatment: doc.treatment,
+      },
+      applicableModifications: [],
+    };
+  });
+
+  return {
+    parentRecordRef: caseRef,
+    sourceKind: 'P2_CASE_SOURCE',
+    sourceAuthority: 'P2_CASE_DERIVED',
+    sourceCaseRef: caseRef,
+    disease: selectedEncounter.disease,
+    syndrome: selectedEncounter.syndrome,
+    treatmentMethod: selectedEncounter.treatment,
+    completeness: 'COMPLETE',
+    sourceLevelModifications: [],
+    sourceLevelModificationPresence: 'UNKNOWN',
+    formulas,
+  };
+}
+
+/**
+ * Hydrate the complete membership set for the selected treatment source.
+ * A selectable P2 case candidate therefore has a legal deterministic end state instead of becoming a dead candidate.
+ */
+export function hydrateSourceFormulaSetForCandidate(
+  docs: KnowledgeDoc[],
+  candidate: Pick<CandidateReference, 'id' | 'sourceId' | 'formulaId' | 'sourceKind' | 'sourceAuthority'>,
+  options: HydrateSourceFormulaSetOptions = {},
+): SourceFormulaSet | null {
+  const sourceId = candidate.sourceId;
+  if (!sourceId) return null;
+  const source = docs.find((d) => d.id === sourceId);
+  if (!source) return null;
+  if (source.sourceTier === 'P1') return hydrateP1(source, candidate.formulaId, options);
+  if (source.sourceTier === 'P2') return hydrateP2Case(docs, source, options);
+  return null;
+}
+
+/** Migration compatibility for historical candidate refs. New selection code hydrates from CandidateReference. */
+export function hydrateSourceFormulaSet(
+  docs: KnowledgeDoc[],
+  selectedCandidateRef: string,
+  options: HydrateSourceFormulaSetOptions = {},
+): SourceFormulaSet | null {
+  let sourceId: string | undefined;
+  let formulaId: string | undefined;
+  if (selectedCandidateRef.startsWith('source-node:')) {
+    sourceId = selectedCandidateRef.slice('source-node:'.length);
+  } else if (selectedCandidateRef.startsWith('case-visit:')) {
+    sourceId = selectedCandidateRef.slice('case-visit:'.length);
+  } else {
+    [sourceId, formulaId] = selectedCandidateRef.split('::');
+  }
+  if (!sourceId) return null;
+  const source = docs.find((d) => d.id === sourceId);
+  if (!source) return null;
+  return hydrateSourceFormulaSetForCandidate(docs, {
+    id: selectedCandidateRef,
+    sourceId,
+    formulaId,
+    sourceKind: source.sourceTier === 'P1' ? 'P1_NORMATIVE_SOURCE' : 'P2_CASE_SOURCE',
+    sourceAuthority: source.sourceTier === 'P1' ? 'P1' : 'P2_CASE_DERIVED',
+  }, options);
 }
 
 export function countPrimarySelected(set: SourceFormulaSet): number {

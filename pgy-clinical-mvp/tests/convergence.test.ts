@@ -86,15 +86,19 @@ test('只有 frontier candidate 进入 coverage 与 comparison matrix', () => {
   assert.equal(matrix.rows[0].candidateRef, 'c1');
 });
 
-test('batch deliberation 一次记录多个 assessment / exclusion / focus', () => {
+test('batch deliberation 一次记录多个 assessment / exclusion（frontier 由 focus_candidates 独占）', () => {
   const ws = createClinicalWorkspace();
   const store = new ClinicalWorkspaceStore(ws, 'run-1');
   presentCandidate(store, 'c1');
   presentCandidate(store, 'c2');
   store.append('hypothesis.presented', { id: 'h1', label: 'h1', supportingEvidenceRefs: ['P1:x'] });
 
+  // frontier 由 workspace.focus_candidates 独占写入
+  for (const d of workspaceEventsForTool('workspace.focus_candidates', { candidateRefs: ['c1', 'c2'] }, undefined)) {
+    store.append(d.type, d.payload);
+  }
+
   const drafts = workspaceEventsForTool('workspace.record_deliberation', {
-    focusedCandidates: ['c1', 'c2'],
     assessments: [
       { candidateRef: 'c1', hypothesisRef: 'h1', supportingEvidenceRefs: ['P1:x'], contradictingEvidenceRefs: [], unresolvedQuestions: [], assessmentSummary: 'A', assessmentEvidenceRefs: ['P1:x'] },
       { candidateRef: 'c2', hypothesisRef: 'h1', supportingEvidenceRefs: ['P1:x'], contradictingEvidenceRefs: [], unresolvedQuestions: [], assessmentSummary: 'B', assessmentEvidenceRefs: ['P1:x'] },
@@ -102,8 +106,6 @@ test('batch deliberation 一次记录多个 assessment / exclusion / focus', () 
     exclusions: [],
   }, undefined);
 
-  const types = drafts.map((d) => d.type);
-  assert.ok(types.includes('candidate.focused'));
   assert.equal(drafts.filter((d) => d.type === 'candidate.assessed').length, 2);
 
   for (const d of drafts) store.append(d.type, d.payload);

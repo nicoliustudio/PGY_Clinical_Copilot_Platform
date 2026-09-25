@@ -100,7 +100,12 @@ export function effectiveRequestedOutcomesV21(
     if (outcome.startsWith('modality:') && explicitRequiredModalities.length > 0 && !explicitRequiredModalities.includes(outcome)) return false;
     return true;
   });
-  return [...new Set([...effectiveBaseline, ...ir.outcomes.required])];
+  // REQUIRED open-world mentions that cannot be represented by the registry still belong to the
+  // user contract, but they are terminal semantic shortfalls rather than executable provider work.
+  // Keeping them in the contract is what allows final status to be BLOCKED/NOT_DELIVERABLE without
+  // manufacturing an Agent action that can never succeed.
+  const unresolvedRequired = [...new Set(ir.outcomes.unresolved ?? [])].map((name) => `unresolved:${name}`);
+  return [...new Set([...effectiveBaseline, ...ir.outcomes.required, ...unresolvedRequired])];
 }
 
 export function buildObligationGraphV21(
@@ -127,6 +132,25 @@ export function buildObligationGraphV21(
     }
     const node: ObligationNodeV21 = {
       id: nodeId(target), source, target, required: true, dependsOn: [], allowedEffects: [], status: 'BLOCKED',
+      rootOutcomes: [rootOutcome], blocker,
+    };
+    nodes.push(node); byTarget.set(key, node); return node.id;
+  };
+
+  const addNotDeliverable = (
+    target: ArtifactTarget,
+    blocker: ObligationNodeV21['blocker'],
+    source: ObligationNodeV21['source'],
+    rootOutcome: string,
+  ): string => {
+    const key = canonicalArtifactKey(target);
+    const existing = byTarget.get(key);
+    if (existing) {
+      if (!existing.rootOutcomes.includes(rootOutcome)) existing.rootOutcomes.push(rootOutcome);
+      return existing.id;
+    }
+    const node: ObligationNodeV21 = {
+      id: nodeId(target), source, target, required: true, dependsOn: [], allowedEffects: [], status: 'NOT_DELIVERABLE',
       rootOutcomes: [rootOutcome], blocker,
     };
     nodes.push(node); byTarget.set(key, node); return node.id;
@@ -217,23 +241,27 @@ export function buildObligationGraphV21(
     return node.id;
   };
 
-  // Unknown user-requested semantics are preserved as explicit typed blockers. This prevents
-  // the request compiler from silently coercing an unsupported modality to a nearby provider.
+  // Unknown REQUIRED user semantics are terminal semantic shortfalls, not runnable blockers.
+  // The system must report them, but the Agent must never be asked to "adopt" an identity that the
+  // registry cannot represent. This separates open-world request meaning from closed-world execution.
   for (const unresolved of [...new Set(ir.outcomes.unresolved ?? [])]) {
     const outcome = `unresolved:${unresolved}`;
     const target = blockedOutcomeTarget(outcome);
     const message = `requested outcome is not represented in the enabled semantic registry: ${unresolved}`;
     issues.push({ type: 'UNSUPPORTED_OUTCOME', outcome, target, message });
-    addBlocked(target, { type: 'UNSUPPORTED_OUTCOME', question: message, details: { requested: unresolved } }, 'request', outcome);
+    addNotDeliverable(target, { type: 'UNSUPPORTED_OUTCOME', question: message, details: { requested: unresolved } }, 'request', outcome);
   }
 
   const requestedOutcomes = effectiveRequestedOutcomesV21(ir, policy);
   for (const outcome of requestedOutcomes) {
+    // Open-world unresolved requirements were materialized above as terminal semantic shortfalls.
+    // Do not feed them back into the closed-world provider resolver or duplicate planning issues.
+    if (outcome.startsWith('unresolved:')) continue;
     const resolution = resolveOutcomeProvider(outcome, capabilities);
     if (resolution.status === 'UNSUPPORTED') {
       const target = blockedOutcomeTarget(outcome);
       issues.push({ type: 'UNSUPPORTED_OUTCOME', outcome, target, message: `no enabled rule provides requested outcome ${outcome}` });
-      addBlocked(target, { type: 'UNSUPPORTED_OUTCOME', question: `No enabled provider for ${outcome}` }, 'request', outcome);
+      addNotDeliverable(target, { type: 'UNSUPPORTED_OUTCOME', question: `No enabled provider for ${outcome}` }, 'request', outcome);
       continue;
     }
     if (resolution.status === 'AMBIGUOUS') {
@@ -260,6 +288,28 @@ export function buildObligationGraphV21(
     expandRule({ capability, rule, bindings, target }, 'request', outcome);
   }
 
+  // Structural BLOCKED is terminal and must propagate through prerequisite edges. Otherwise a
+  // parent can remain OPEN forever while every legal action is impossible because one dependency is
+  // already structurally blocked. Propagation is domain-neutral: only graph topology is inspected.
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodes) {
+      if (node.status !== 'OPEN') continue;
+      const blockedDependency = node.dependsOn.map((id) => byId.get(id)).find((dependency) => dependency?.status === 'BLOCKED');
+      if (!blockedDependency) continue;
+      node.status = 'BLOCKED';
+      node.allowedEffects = [];
+      node.blocker = {
+        type: 'UNSUPPORTED_DEPENDENCY',
+        question: `dependency ${canonicalArtifactKey(blockedDependency.target)} is structurally blocked`,
+        details: { dependencyId: blockedDependency.id },
+      };
+      changed = true;
+    }
+  }
+
   return { version: 2, nodes, issues };
 }
 
@@ -272,5 +322,6 @@ export function runnableObligationsV21(graph: ObligationGraphV21): ObligationNod
 }
 
 export function graphCompleteV21(graph: ObligationGraphV21): boolean {
-  return graph.nodes.filter((node) => node.required).every((node) => node.status === 'SATISFIED' || node.status === 'NOT_DELIVERABLE');
+  // "Complete" means terminal, not successful. Satisfaction is a separate CommitLedger question.
+  return graph.nodes.filter((node) => node.required).every((node) => node.status !== 'OPEN');
 }

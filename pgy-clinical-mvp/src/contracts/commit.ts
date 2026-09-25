@@ -17,6 +17,9 @@ export type DeliveryStatus = 'DELIVERED' | 'NOT_DELIVERABLE';
  */
 export type ExecutionClearance = 'CLEARED' | 'REVIEW_REQUIRED' | 'BLOCKED';
 
+/** Clinical timing/applicability is independent from source membership and product delivery. */
+export type ClinicalApplicability = 'CURRENTLY_SUITABLE' | 'DEFERRED' | 'CURRENTLY_NOT_SUITABLE';
+
 /** 来源字段的存在性状态。UNKNOWN ≠ KNOWN_EMPTY。 */
 export type FieldPresence = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN';
 
@@ -38,6 +41,8 @@ export interface CommittedSourceProduct {
   name: string;
   payload: Readonly<Record<string, unknown>>;
   qualification: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
+  /** Optional patient timing/applicability. This never changes source membership. */
+  clinicalApplicability?: ClinicalApplicability;
   exclusionReason?: string;
 }
 
@@ -57,6 +62,7 @@ export interface CommitRecord {
   providerId: string;
   deliveryStatus: DeliveryStatus;
   executionClearance: ExecutionClearance;
+  clinicalApplicability?: ClinicalApplicability;
   provenance: Provenance;
   sourceBundle?: CommittedSourceBundle;
   product: Readonly<Record<string, unknown>>;

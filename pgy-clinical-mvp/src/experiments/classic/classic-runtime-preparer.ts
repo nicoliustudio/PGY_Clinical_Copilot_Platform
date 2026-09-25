@@ -9,6 +9,7 @@ import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../../platform/
 import { ClassicSemanticNeedResolver } from './semantic-need-resolver.js';
 import { emptyClinicalStrategy } from '../../contracts/clinical-strategy.js';
 import { CommitLedger } from '../../platform/commit/commit-ledger.js';
+import type { ModelExecutionReceipt } from '../../model/model-registry.js';
 
 export interface ClassicRuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
@@ -17,6 +18,7 @@ export interface ClassicRuntimePreparerDependencies {
   skills: SkillRegistry;
   tools: ToolRegistry;
   model: ModelProfile;
+  modelExecution?: ModelExecutionReceipt;
   baselineToolIds: string[];
   baselineKnowledgeScopes: string[];
 }
@@ -50,6 +52,7 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
       tools: this.deps.baselineToolIds.map((id) => this.deps.tools.require(id)),
       safety,
       model: this.deps.model,
+      modelExecution: this.deps.modelExecution,
       trace: { runId, startedAt: new Date().toISOString() },
       harness: undefined as unknown as RuntimeContext['harness'],
       workspace,

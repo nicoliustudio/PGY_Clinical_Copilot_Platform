@@ -113,5 +113,5 @@ test('H15.2.3: evidence-insufficient 空 spine 仍被 Clinical Core 保护', () 
   const ws = createClinicalWorkspace();
   const core = checkClinicalCoreCompletion(ws);
   assert.equal(core.ok, false);
-  assert.deepEqual(core.missing, ['clinicalQuestion', 'diseaseAssessment', 'formalHypotheses', 'patternAssessment']);
+  assert.deepEqual(core.missing, ['clinicalQuestion', 'diseaseAssessment', 'patternAssessment', 'treatmentPlan']);
 });

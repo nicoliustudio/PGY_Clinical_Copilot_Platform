@@ -787,7 +787,14 @@ async function send() {
     const res = await fetch('/api/run/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text }),
+      body: JSON.stringify({
+        input: text,
+        ...(modelCatalog?.active ? {
+          modelOptionId: modelCatalog.active.optionId,
+          thinking: Boolean(modelCatalog.active.thinking),
+          budget: modelCatalog.active.budget || 'off',
+        } : {}),
+      }),
     });
     if (res.status === 401) { window.location.replace('/login'); return; }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -800,7 +807,6 @@ async function send() {
 
     const handle = (event, data) => {
       if (event === 'meta') {
-        $('#modelState').textContent = data.model || '';
         if (data.asrEnabled === false) $('#mic').classList.add('hidden');
       } else if (event === 'tool') {
         state.liveEvents.push({ type: 'tool', data });
@@ -893,13 +899,15 @@ async function loadHealth() {
     const h = await api('/api/health');
     $('#healthCards').innerHTML = `
       <div class="stat-card"><span>运行时模式</span><strong>${esc(h.runtimeMode)}</strong></div>
-      <div class="stat-card"><span>Deep 模型</span><strong style="font-size:14px">${esc(h.llm.deep)}</strong></div>
+      <div class="stat-card"><span>活动模型</span><strong style="font-size:14px">${esc(h.llm.label)}</strong><em>${esc(h.llm.channelLabel)} · ${esc(llmThinkingText(h.llm))}</em></div>
       <div class="stat-card"><span>知识索引</span><strong>${h.knowledge.ok ? esc(h.knowledge.docCount) : '—'}</strong><em>${h.knowledge.ok ? esc(h.knowledge.version) : esc(h.knowledge.error)}</em></div>
       <div class="stat-card"><span>语音 ASR</span><strong>${h.asr.enabled ? '可用' : '未配置'}</strong></div>`;
     $('#healthList').innerHTML = `
       <div class="health-row"><span>知识索引</span><b><span class="status-badge ${h.knowledge.ok ? 'ok' : 'bad'}">${h.knowledge.ok ? 'OK' : 'ERROR'}</span></b></div>
-      <div class="health-row"><span>LLM（Deep）</span><b>${esc(h.llm.deep)}</b></div>
-      <div class="health-row"><span>LLM（Fast）</span><b>${esc(h.llm.fast)}</b></div>
+      <div class="health-row"><span>活动模型（渠道 / 模型）</span><b>${esc(h.llm.channelLabel)} / ${esc(h.llm.modelId)}</b></div>
+      <div class="health-row"><span>推理思考</span><b>${esc(llmThinkingText(h.llm))}</b></div>
+      <div class="health-row"><span>思考预算</span><b>${esc(llmBudgetText(h.llm))}</b></div>
+      <div class="health-row"><span>模型选择来源</span><b>${esc(h.llm.optionId)}</b></div>
       <div class="health-row"><span>ASR</span><b><span class="status-badge ${h.asr.enabled ? 'ok' : 'warn'}">${h.asr.enabled ? 'ENABLED' : 'DISABLED'}</span></b></div>`;
     $('#capSkillList').innerHTML = `
       <div class="wp-section-title">Capabilities</div>
@@ -991,6 +999,162 @@ $('#logoutBtn').addEventListener('click', async () => {
   window.location.replace('/login');
 });
 
+/* ---------- 右上角：模型 / 推理开关（真实热切换） ----------
+ * 切换是服务端事务：POST 后以后端返回的目录快照为准重新渲染，
+ * 因此不存在「本地改了、后端没变」的假切换；不可用的模型/开关直接置灰，也不存在死按钮。 */
+let modelCatalog = null;
+let modelBusy = false;
+
+const THINKING_HINT = {
+  toggle: { label: '推理', title: '可开关：关闭后模型直接生成回复' },
+  always: { label: '总是思考', title: '该模型无法关闭推理（实测参数无效或会被拒绝）' },
+  none: { label: '无推理', title: '该模型不产生推理过程' },
+};
+
+/** 健康页展示用：把推理三态翻译成一句人话。 */
+function llmThinkingText(active) {
+  if (!active) return '—';
+  if (active.thinkingMode === 'toggle') return active.thinking ? '开（可关）' : '关（可开）';
+  return (THINKING_HINT[active.thinkingMode] || THINKING_HINT.none).label;
+}
+
+function thinkingSuffix(option) {
+  if (!option.available) return '';
+  if (option.thinking === 'none') return ' · 非推理';
+  if (option.thinking === 'always') return ' · 总是思考';
+  return ' · 可开关推理';
+}
+
+/** 思考预算的人话描述：只描述**本次请求真实会发生什么**。 */
+function llmBudgetText(active) {
+  if (!active) return '—';
+  if (!active.budgetSupported) return '该模型忽略此参数';
+  if (!active.thinking) return '推理已关（不发送）';
+  return active.effectiveBudgetTokens ? `上限 ${active.effectiveBudgetTokens} tok` : '不限制';
+}
+
+/**
+ * 渲染思考预算档位。
+ * 只有「模型实测生效」且「推理已开启」时才可点——其余情况一律禁用并写明原因，
+ * 因此不存在「能拖但请求里没有这个参数」的假旋钮。
+ */
+function renderBudgetControl(catalog) {
+  const active = catalog.active;
+  const field = $('#budgetField');
+  const sel = $('#budgetSelect');
+
+  sel.textContent = '';
+  for (const level of catalog.budgetLevels || []) {
+    const el = document.createElement('option');
+    el.value = level.value;
+    el.textContent = level.label;
+    sel.appendChild(el);
+  }
+  sel.value = active.budget || 'off';
+
+  const enabled = Boolean(active.budgetSupported) && Boolean(active.thinking);
+  sel.disabled = !enabled;
+  field.classList.toggle('disabled', !enabled);
+
+  let title;
+  if (!active.budgetSupported) {
+    title = '该模型实测会忽略 thinking_budget（请求已发送/未发送均无效果），故不可调';
+  } else if (!active.thinking) {
+    title = '推理已关闭：本次请求不发送思考预算。开启推理后本档位生效';
+  } else if (active.effectiveBudgetTokens) {
+    title = `本次请求将发送 thinking_budget=${active.effectiveBudgetTokens}（思考超长即截断）`;
+  } else {
+    title = '不限制思考长度：本次请求不发送 thinking_budget';
+  }
+  field.title = title;
+  sel.title = title;
+}
+
+function renderModelControl(catalog) {
+  modelCatalog = catalog;
+  const sel = $('#modelSelect');
+  const groups = new Map();
+  for (const option of catalog.options) {
+    if (!groups.has(option.channelLabel)) groups.set(option.channelLabel, []);
+    groups.get(option.channelLabel).push(option);
+  }
+  sel.textContent = '';
+  for (const [groupLabel, options] of groups) {
+    const group = document.createElement('optgroup');
+    group.label = groupLabel;
+    for (const option of options) {
+      const el = document.createElement('option');
+      el.value = option.id;
+      el.textContent = `${option.label}${thinkingSuffix(option)}${option.available ? '' : '（未配置密钥）'}`;
+      el.disabled = !option.available;
+      if (option.measured) el.title = option.measured;
+      group.appendChild(el);
+    }
+    sel.appendChild(group);
+  }
+  sel.value = catalog.active.optionId;
+
+  const hint = THINKING_HINT[catalog.active.thinkingMode] || THINKING_HINT.none;
+  const togglable = catalog.active.thinkingMode === 'toggle';
+  const input = $('#thinkingInput');
+  const wrap = $('#thinkingSwitch');
+  input.checked = Boolean(catalog.active.thinking);
+  input.disabled = !togglable;
+  wrap.classList.toggle('disabled', !togglable);
+  wrap.title = hint.title;
+  $('#thinkingLabel').textContent = hint.label;
+
+  renderBudgetControl(catalog);
+
+  sel.title = [
+    `${catalog.active.channelLabel} · ${catalog.active.modelId}`,
+    `推理：${hint.label}`,
+    `思考预算：${llmBudgetText(catalog.active)}`,
+    catalog.active.measured || '',
+  ].filter(Boolean).join('\n');
+}
+
+async function applyModelChange(payload) {
+  if (modelBusy) return;
+  modelBusy = true;
+  $('#modelControl').classList.add('busy');
+  try {
+    const catalog = await api('/api/models/select', { method: 'POST', body: JSON.stringify(payload) });
+    renderModelControl(catalog);
+    const hint = THINKING_HINT[catalog.active.thinkingMode] || THINKING_HINT.none;
+    const thinkingText = catalog.active.thinkingMode === 'toggle'
+      ? `推理${catalog.active.thinking ? '开' : '关'}`
+      : hint.label;
+    const budgetText = catalog.active.effectiveBudgetTokens ? `｜预算${catalog.active.effectiveBudgetTokens}` : '';
+    toast(`已切换：${catalog.active.channelLabel}/${catalog.active.label}｜${thinkingText}${budgetText}`);
+  } catch (e) {
+    toast(e.message || '模型切换失败');
+    // 回滚为后端确认的状态，避免界面与后端不一致。
+    if (modelCatalog) renderModelControl(modelCatalog);
+  } finally {
+    modelBusy = false;
+    $('#modelControl').classList.remove('busy');
+  }
+}
+
+// 换模型时不携带 thinking / budget：让新模型使用它自己的默认值，避免把上一个模型的设置带过去。
+$('#modelSelect').addEventListener('change', (e) => applyModelChange({ optionId: e.target.value }));
+// 开关推理时带上当前预算档位，使档位在关-开之间被保留（关闭期间不发送，重新开启即生效）。
+$('#thinkingInput').addEventListener('change', (e) => applyModelChange({
+  optionId: $('#modelSelect').value,
+  thinking: e.target.checked,
+  budget: $('#budgetSelect').value,
+}));
+$('#budgetSelect').addEventListener('change', (e) => applyModelChange({ optionId: $('#modelSelect').value, budget: e.target.value }));
+
+async function loadModels() {
+  try {
+    renderModelControl(await api('/api/models'));
+  } catch {
+    $('#modelSelect').title = '后端未连接';
+  }
+}
+
 /* ---------- 启动 ---------- */
 (async function boot() {
   try {
@@ -1001,9 +1165,7 @@ $('#logoutBtn').addEventListener('click', async () => {
   }
   try {
     const h = await api('/api/health');
-    $('#modelState').textContent = h.llm?.deep || '';
     if (!h.asr?.enabled) $('#mic').classList.add('hidden');
-  } catch (e) {
-    $('#modelState').textContent = '后端未连接';
-  }
+  } catch { /* 健康探针失败不阻塞；模型目录单独加载并自行提示 */ }
+  await loadModels();
 })();

@@ -14,6 +14,7 @@ export interface ProjectedDelivery {
   provider_id: string;
   delivery_status: string;
   execution_clearance: string;
+  clinical_applicability?: CommitRecord['clinicalApplicability'];
   provenance: CommitRecord['provenance'];
   source_bundle?: CommitRecord['sourceBundle'];
   product: CommitRecord['product'];
@@ -40,6 +41,7 @@ export function projectClinicalResult(
       provider_id: record.providerId,
       delivery_status: record.deliveryStatus,
       execution_clearance: record.executionClearance,
+      ...(record.clinicalApplicability ? { clinical_applicability: record.clinicalApplicability } : {}),
       provenance: record.provenance,
       ...(record.sourceBundle ? { source_bundle: record.sourceBundle } : {}),
       product: record.product,

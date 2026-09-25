@@ -62,6 +62,9 @@ test('buildResultView：deterministic formula_set / treatment_deliveries 不得�
         formula_ref: 'P1:a::f1', formula_id: 'f1', name: '先期汤', composition: '生地黄',
         source_ref: 'P1:a', modification_rules: [], modification_status: 'KNOWN_EMPTY',
         modification_text: '无加减', relation: 'PRIMARY_SELECTED',
+        formula_local_modification_text: '无加减',
+        source_shared_modification_text: '无加减',
+        patient_specific_modification_text: 'UNKNOWN',
       },
     ],
     treatment_deliveries: [
@@ -97,14 +100,17 @@ test('buildResultView：source products N→N 且三态/三类 modification fact
       {
         formula_ref: 'P1:a::f1', formula_id: 'f1', name: '方一', composition: '药A 10g', source_ref: 'P1:a',
         modification_rules: ['加味A'], modification_status: 'PRESENT', modification_text: '加味A', relation: 'PRIMARY_SELECTED', facts: mkFacts('PRESENT'),
+        formula_local_modification_text: '加味A', source_shared_modification_text: '共享加减', patient_specific_modification_text: 'UNKNOWN',
       },
       {
         formula_ref: 'P1:a::f2', formula_id: 'f2', name: '方二', composition: '药B 10g', source_ref: 'P1:a',
         modification_rules: [], modification_status: 'KNOWN_EMPTY', modification_text: '无加减', relation: 'SOURCE_ALTERNATIVE', facts: mkFacts('KNOWN_EMPTY'),
+        formula_local_modification_text: '无加减', source_shared_modification_text: '共享加减', patient_specific_modification_text: 'UNKNOWN',
       },
       {
         formula_ref: 'P1:a::f3', formula_id: 'f3', name: '方三', composition: '药C 10g', source_ref: 'P1:a',
         modification_rules: [], modification_status: 'UNKNOWN', modification_text: 'UNKNOWN', relation: 'CLINICALLY_EXCLUDED', facts: mkFacts('UNKNOWN'),
+        formula_local_modification_text: 'UNKNOWN', source_shared_modification_text: '共享加减', patient_specific_modification_text: 'UNKNOWN',
       },
     ],
   }));

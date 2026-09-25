@@ -1,5 +1,4 @@
-import { ToolLoopAgent, isStepCount, generateText, type ToolSet, type ModelMessage } from 'ai';
-import { llmModel } from '../../model/adapter.js';
+import { ToolLoopAgent, isStepCount, generateText, type ToolSet, type ModelMessage, type LanguageModel } from 'ai';
 import { config } from '../../config.js';
 import { extractJson } from '../../util/json.js';
 import { agentResultSchema, type AgentResult, type ProposalSubmitInput } from '../../contracts/result.js';
@@ -41,6 +40,7 @@ import {
 } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { EffectTerm } from '../../control-plane-v21/types.js';
 import { formulaFrontierPending } from '../../platform/control-plane/artifact-bridge.js';
+import { formulaSelectionReady } from '../../clinical/formula-selection.js';
 import { evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
@@ -108,6 +108,7 @@ function isStatefulLedgerTool(id: string): boolean {
     || id === 'formula.search_normative'
     || id === 'formula.search_candidates'
     || id === 'formula.get_modification_evidence'
+    || id === 'formula.select'
     || id === 'proposal.submit'
     || id === 'delivery.commit'
     || id === 'delivery.adopt'
@@ -240,29 +241,12 @@ export function projectControlPlaneV21Surface(context: RuntimeContext, internalT
     for (const toolId of declared) if (!open.has(toolId)) closedSet.add(toolId);
   }
 
-  // Formula evidence follows the same progress rule: discovery is useful only until concrete
-  // candidates exist. Once they do, the only state-advancing retrieval is candidate hydration.
-  const currentFormulaEvidence = runnableObligations(state)
-    .find((node) => node.target.type === 'artifact:formula-evidence');
-  if (currentFormulaEvidence) {
-    const formulaCandidates = context.workspace.candidates.filter((candidate) => candidate.kind === 'formula');
-    if (formulaCandidates.length === 0) {
-      closedSet.add('formula.get_evidence');
-      closedSet.add('formula.validate');
-    } else {
-      closedSet.add('formula.search_candidates');
-      closedSet.add('formula.search_normative');
-    }
-  }
+  // Formula workflow stages are expressed by the obligation graph itself.
+  // search_candidates atomically materializes CandidateSet+evidence; formula.select atomically commits
+  // the closed-world clinical decision. No candidate-count/frontier/deliberation hidden scheduler lives here.
 
-  // P0-3 No-progress terminal: when required obligations are BLOCKED and none remain OPEN, no
-  // legal effect can change satisfaction state. proposal.submit must leave the legal surface —
-  // otherwise the model re-submits the same not-ready proposal indefinitely (false completion loop).
-  const blockedRequired = state.graph.nodes.filter((n) => n.required && n.status === 'BLOCKED');
-  const openRequired = state.graph.nodes.filter((n) => n.required && n.status === 'OPEN');
-  if (blockedRequired.length > 0 && openRequired.length === 0) {
-    closedSet.add('proposal.submit');
-  }
+  // BLOCKED / NOT_DELIVERABLE are terminal. A terminal shortfall is finalized and reported; it is
+  // never a reason to hide proposal.submit and force a recovery loop with no legal transition.
 
   return internalToolIds.filter((id) => !closedSet.has(id));
 }
@@ -376,9 +360,6 @@ type RecoveryState = { kind: 'submit' } | { kind: 'completion'; missing: string[
 export function completionContractFor(context: RuntimeContext): { requiredArtifacts: string[]; missingArtifacts: string[]; ok: boolean } {
   const readiness = evaluateProposalReadiness(context);
   const missing = [...readiness.missingArtifacts];
-  // unresolved hypothesis 不是“缺少 formalHypotheses”，但 recovery 需要一个现有 artifact key
-  // 来选择 hypothesis-resolution 工具面；对外 readiness 仍保留独立 blocker 语义。
-  if (readiness.unresolvedHypotheses.length > 0 && !missing.includes('formalHypotheses')) missing.push('formalHypotheses');
   for (const core of readiness.coreMissing) {
     if (core !== 'clinicalQuestion' && !missing.includes(core)) missing.push(core);
   }
@@ -419,10 +400,8 @@ function buildRecentActions(ledger?: ToolCallLedger): RecentAction[] {
     'knowledge.search',
     'knowledge.get_source',
     'formula.search_normative',
-    'workspace.focus_candidates',
+    'workspace.commit_clinical_model',
     'workspace.record_deliberation',
-    'workspace.record_candidate_assessment',
-    'workspace.record_candidate_exclusion',
   ]);
   return ledger.entries()
     .filter((e) => useful.has(e.toolName))
@@ -438,11 +417,12 @@ const ACTION_PRINCIPLE = `## Action Principle
 - When existing evidence supports the required product draft, stop broad retrieval. If delivery.commit is available, commit the exact required outcome before proposal.submit.
 - Reuse before retrieving. Before another retrieval, name the unresolved decision it could change (disease framing / syndrome judgment / treatment method / formula selection / safety disposition). If the workspace already has sufficient evidence for that decision, reuse existing evidence instead of retrieving again.
 - Do not retrieve merely to increase confidence or completeness. Do not continue broad retrieval after a viable canonical candidate exists unless new evidence could materially change the decision.
-- Commit workspace cognition atomically: when one clinical decision includes candidate focus, candidate assessment, hypothesis update, and uncertainty resolution, commit them together in one workspace.record_deliberation. Do not split one cognitive decision into multiple workspace writes unless later information genuinely changes the decision. Do not repeat workspace mutations that are already persisted.
-- Choose the clinical action you need. Do not manually fabricate canonical identity/source binding. For SOURCE_BOUND treatment outcomes, retrieve the exact asset with knowledge.get_asset, record that hydrated asset id in treatmentPlan.treatmentDeliveries[].sourceAssetRefs, and keep source-owned product facts out of the reasoning draft. The Kernel binds and validates the canonical asset when you call delivery.commit.
+- Commit the clinical model atomically with workspace.commit_clinical_model: diseaseAssessment + patternAssessment + treatmentPlan in one durable write. Do not create a separate hypothesis bookkeeping loop for ordinary cases.
+- Choose the clinical action you need. Do not manually fabricate canonical identity/source binding. For SOURCE_BOUND outcomes: retrieve the exact asset with knowledge.get_asset, then call source.bind(outcome, assetRefs). source.bind owns the complete deterministic adoption+delivery transaction; do not call delivery.commit afterward. Keep source-owned product facts out of the reasoning draft. Never put canonical asset membership or source-owned execution facts into treatmentPlan.
+- Formula treatment is transaction-oriented: formula.search_candidates creates the immutable, canonically hydrated CandidateSet. Then call formula.select once with one disposition for every candidate plus the selected candidate. Never copy hidden evidence ids, never refocus a subset, and never write formulaSelection through a workspace deliberation tool.
 - Reuse already activated capabilities, validated candidates, and existing deterministic results when still valid. Do not repeat execution chores that do not change the business objective.
 - When the clinical decision is sufficiently complete, commit every runnable required delivery with delivery.commit; only then submit the proposal. Do not repeat deterministic Kernel work.
-- Establish patient hypotheses explicitly with workspace.consider_hypotheses (leading or alternative). Once established, every alternative must be resolved before submit: selected, rejected with basis, or preserved as uncertainty.`;
+- Put review-level alternatives directly in PatternAssessment.secondary / uncertainty. Ordinary workflow does not require a separate hypothesis lifecycle.`;
 
 /** Diagnostic Pattern Set Spike：domain-general epistemic rules（仅开关 ON 时注入）。 */
 const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence
@@ -465,7 +445,9 @@ const DIAGNOSTIC_PATTERN_PRINCIPLE = `## Diagnostic Pattern Evidence
 function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
   const state = context.controlPlaneV21;
   if (!state || state.compileStatus !== 'COMPILED') return '';
-  const required = effectiveRequiredOutcomesV21(state);
+  // Terminal semantic shortfalls (`unresolved:*`) are part of contract accounting, not legal
+  // Agent work. Do not put them back into the model's action vocabulary.
+  const required = effectiveRequiredOutcomesV21(state).filter((outcome) => !outcome.startsWith('unresolved:'));
   if (required.length === 0) return '';
   const pending = [...new Set(state.graph.nodes
     .filter((node) => node.required
@@ -478,12 +460,12 @@ function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
     lines.push(
       '',
       `Treatment-form deliveries still unrecorded: ${pending.join(', ')}`,
-      'Record each one with workspace.record_deliberation → treatmentPlan.treatmentDeliveries[]. `outcome` must be copied exactly '
+      'Record each one with workspace.commit_clinical_model → treatmentPlan.treatmentDeliveries[]. `outcome` must be copied exactly '
       + 'from the list above; one delivery closes only its own outcome obligation. '
       + 'Use treatmentPlan.treatmentFormDecision only when exactly one delivery exists.',
       'A delivery must implement the very treatment form its `outcome` names. Never let a neighbouring or auxiliary technique '
       + 'stand in for the requested form. For reasoning-derived products, draft completeness is manifest-driven. For SOURCE_BOUND '
-      + 'products, the draft carries identity/qualification plus sourceAssetRefs; source-owned content is validated and frozen from the hydrated canonical asset at delivery.commit.',
+      + 'products, the draft carries only patient qualification/applicability and supporting evidence; canonical membership and delivery come exclusively from source.bind, and source-owned content is frozen from the bound canonical asset inside that transaction.',
     );
     for (const outcome of pending) {
       const capability = context.capabilities.find((c) => c.provides?.includes(outcome));
@@ -493,7 +475,7 @@ function controlPlaneOutcomeGuidance(context: RuntimeContext): string {
       if (fields.length > 0) lines.push(`- ${outcome} required draft fields: ${fields.join(', ')}`);
       if (obligation.materialization === 'SOURCE_BOUND') {
         const sourceFields = [...new Set([...(obligation.sourceRequiredFields ?? []), ...(obligation.sourceRequiredFieldsByOutcome?.[outcome] ?? [])])];
-        lines.push(`- ${outcome} is SOURCE_BOUND: hydrate the selected canonical asset and set sourceAssetRefs; do not rewrite its source-owned facts in the draft.`);
+        lines.push(`- ${outcome} is SOURCE_BOUND: hydrate the selected canonical asset, call source.bind with its asset id; that transaction also commits the delivery. Do not rewrite source-owned facts in the reasoning draft.`);
         if (sourceFields.length > 0) lines.push(`  Kernel source fields: ${sourceFields.join(', ')}`);
       }
     }
@@ -511,11 +493,11 @@ function pendingObligationHints(context: RuntimeContext): string {
   if (!state || state.compileStatus !== 'COMPILED') return '';
   const hints: string[] = [];
   if (formulaFrontierPending(context.workspace)) {
-    hints.push(
-      'Formula evidence has been hydrated but the deliberation frontier is empty, so the formula-evidence '
-      + 'obligation cannot close. Call workspace.focus_candidates with the candidates you actually consider, '
-      + 'then continue with selection.',
-    );
+    hints.push('Candidate evidence exists without a CandidateSetReceipt. Re-run formula.search_candidates to repair the deterministic Runtime transaction; do not manually focus or hydrate candidates.');
+  }
+  if (formulaSelectionReady(context.workspace) && !context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef) {
+    const refs = context.workspace.candidateSetReceipt?.candidateRefs ?? [];
+    hints.push(`The Kernel CandidateSet is complete. Make one formula.select decision that accounts for every candidate exactly once: ${refs.join(', ')}.`);
   }
   return hints.length > 0 ? `\n\n## Pending Obligation Hints\n${hints.map((h) => `- ${h}`).join('\n')}\n` : '';
 }
@@ -603,6 +585,7 @@ export function classifyExecutionRole(toolName: string): ExecutionRole {
     toolName === 'workspace.focus_candidates' ||
     toolName === 'workspace.record_candidate_assessment' ||
     toolName === 'workspace.record_candidate_exclusion' ||
+    toolName === 'workspace.commit_clinical_model' ||
     toolName === 'workspace.record_deliberation'
   ) {
     return 'COGNITIVE_MUTATION';
@@ -662,7 +645,7 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
     '',
     mode === 'harness'
       ? context.controlPlaneV21?.compileStatus === 'COMPILED'
-        ? 'Control Plane 已确定性解析并激活 required providers；不要重新 discover/activate。若临床推理形成了原 contract 之外、且未被 excluded/exclusive 禁止的明确产品意图，先用 delivery.adopt(explicit canonical outcome) 扩展 effective contract；adopt 只创建义务，不等于交付。随后完成 PREPARED reasoning/draft；当 delivery.commit 出现在合法工具面时，提交对应 exact outcome。所有 required delivery 均已 commit 后再调用 proposal.submit。'
+        ? 'Control Plane 已在 run 开始时一次性编译 required outcomes 并确定性激活 providers；不要重新 discover/activate，也不要在推理过程中扩展合同。完成 clinical model 与 required delivery draft；SOURCE_BOUND outcome 由 source.bind 一次完成 adoption+commit；MODEL_DERIVED delivery 仅在 delivery.commit 合法时提交对应 exact outcome。所有仍可交付的 required delivery 已 terminal 后调用 proposal.submit。'
         : '你拥有 capability.discover / capability.activate / proposal.submit。需要业务扩展时先发现再激活；探索充分后调用 proposal.submit 提交最终 Proposal。'
       : 'Classic A/B：Capability 已由 legacy resolver 预装配；不要调用 Harness capability controls。',
     mode === 'harness'
@@ -675,6 +658,8 @@ function buildContextPrompt(context: RuntimeContext, mode: 'harness' | 'classic'
 
 export interface AiSdkPrimaryAgentOptions {
   instructions: string;
+  /** Run-scoped immutable clinical model resolver. */
+  resolveModel?: () => LanguageModel;
   maxSteps?: number;
   totalTimeoutMs?: number;
   toolBindings?: AiSdkToolBindings;
@@ -699,6 +684,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
   constructor(private readonly options: AiSdkPrimaryAgentOptions) {}
 
   async run(context: RuntimeContext, onEvent?: (event: AgentStreamEvent) => void): Promise<PrimaryAgentOutput> {
+    const resolveModel = this.options.resolveModel;
+    if (!resolveModel) throw new Error('AiSdkPrimaryAgent requires a run-scoped resolveModel');
     const bindings = this.options.toolBindings ?? DEFAULT_AI_SDK_TOOL_BINDINGS;
     const mode = this.options.mode ?? 'harness';
     const ledger = new ToolCallLedger();
@@ -879,7 +866,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     const controlPlaneSteps: ControlPlaneTraceV21['steps'] = [];
 
     const buildLoopAgent = (maxSteps: number, rec: RecoveryState | null) => new ToolLoopAgent({
-      model: llmModel,
+      // 每轮按当前活动模型解析：前端切换模型后下一轮即生效。
+      model: this.options.resolveModel!(),
       tools: buildTools(context, bindings, ledger),
       instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
       toolChoice: rec ? 'required' : undefined,
@@ -904,7 +892,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         if (rec) {
           const recoverHeader = rec.kind === 'submit'
             ? 'Your structured clinical task now has all required durable artifacts. Call proposal.submit immediately to submit the final proposal. Do not end in free text.'
-            : `${RECOVERY_INSTRUCTION}\n\nMissing durable artifacts: ${rec.missing.join(', ')}.\nUse workspace.record_deliberation to write the missing clinical decisions or prepared delivery draft. When delivery.commit becomes available, commit each required exact outcome. Only after all required delivery commits are terminal should you call proposal.submit.`;
+            : `${RECOVERY_INSTRUCTION}\n\nMissing durable artifacts: ${rec.missing.join(', ')}.\nAdvance the current runnable obligation using the available tools. If formula selection is required, call formula.select once with a disposition for every member of the current CandidateSet. If a bound source or selected formula is ready, use delivery.commit. Only after every required delivery commit is terminal should you call proposal.submit.`;
           instructions = `${recoverHeader}\n\n${baseInstructions}`;
         }
         return {
@@ -1204,7 +1192,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         }
         if (executionRole === 'COGNITIVE_MUTATION') {
           metrics.cognitiveMutationCalls += 1;
-          if (internalName === 'workspace.record_deliberation') metrics.deliberationCommitCount += 1;
+          if (internalName === 'workspace.commit_clinical_model' || internalName === 'workspace.record_deliberation') metrics.deliberationCommitCount += 1;
           const effective = !reused && batchResult !== undefined && batchResult.written > 0;
           if (effective) metrics.effectiveMutationCalls += 1;
           else metrics.noopMutationCalls += 1;
@@ -1468,7 +1456,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     const prompt = buildMinimalFinalizationPrompt(context, draft, decisionState);
 
     let result = await generateText({
-      model: llmModel,
+      model: this.options.resolveModel!(),
       system: this.options.instructions,
       prompt,
       timeout: { totalMs: 120_000 },
@@ -1499,7 +1487,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     // bounded retry：仅一次，最小上下文 + 错误摘要。
     commitReliability.proposalRetryCount += 1;
     const retryResult = await generateText({
-      model: llmModel,
+      model: this.options.resolveModel!(),
       system: this.options.instructions,
       prompt: buildRetryPrompt(draft, parsed.error),
       timeout: { totalMs: 120_000 },

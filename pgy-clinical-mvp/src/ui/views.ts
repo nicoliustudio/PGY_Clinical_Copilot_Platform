@@ -202,6 +202,8 @@ export interface TraceView {
   commits?: RunTrace['commits'];
   snapshot: {
     modelProfileId?: string;
+    modelRoles?: RunTrace['modelRoles'];
+    modelExecution?: RunTrace['modelExecution'];
     promptHash?: string;
     capabilities?: string[];
     skills?: string[];
@@ -227,6 +229,8 @@ export function buildTraceView(trace: RunTrace): TraceView {
     commits: trace.commits,
     snapshot: {
       modelProfileId: trace.modelProfileId,
+      modelRoles: trace.modelRoles,
+      modelExecution: trace.modelExecution,
       promptHash: trace.promptHash,
       capabilities: trace.capabilities,
       skills: trace.skills,

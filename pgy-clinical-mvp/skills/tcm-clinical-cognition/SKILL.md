@@ -91,7 +91,7 @@ When multiple plausible hypotheses exist, compare:
 - what facts support B,
 - what actually discriminates A from B.
 
-Discriminating evidence outweighs symptom count. If the strongest alternative still has sufficient current patient evidence, it must not silently disappear just because a leading hypothesis has already formed. Before finalizing, resolve every formal alternative you raised — adopt it as primary, record it as a secondary / accompanying pattern, reject it with basis, or preserve it as uncertainty. Uncertainty is an acceptable outcome; do not force a single answer. Do not derive a syndrome from a single symptom, nor a formula from a syndrome label alone.
+Discriminating evidence outweighs symptom count. If the strongest alternative still has sufficient current patient evidence, it must not silently disappear just because a leading interpretation has formed. Record meaningful alternatives directly in PatternAssessment.secondary or uncertainty inside the same clinical-model transaction; ordinary cases do not require a separate durable hypothesis lifecycle. Uncertainty is an acceptable outcome; do not force a single answer. Do not derive a syndrome from a single symptom, nor a formula from a syndrome label alone.
 
 ## Tongue and Pulse
 
@@ -101,21 +101,22 @@ Use tongue and pulse to support, refute, calibrate, and detect when the current 
 
 ## Retrieval vs Patient Hypothesis
 
-A source's syndrome/disease label describes the knowledge source, not the patient. Retrieved labels are knowledge metadata; they do not diagnose the patient. A hypothesis-conditioned search provides knowledge about that hypothesis but does not independently prove the patient has it. Establish patient hypotheses explicitly (workspace.consider_hypotheses); do not let retrieval labels silently become patient hypotheses.
+A source's syndrome/disease label describes the knowledge source, not the patient. Retrieved labels are knowledge metadata; they do not diagnose the patient. A hypothesis-conditioned search provides knowledge about that hypothesis but does not independently prove the patient has it. Commit the patient-level disease/pattern/treatment model atomically through workspace.commit_clinical_model; do not let retrieval labels silently become patient conclusions.
 
 ## Knowledge Use
 
 - `NORMATIVE_TREATMENT` (P1) is core treatment knowledge.
 - Use `DIAGNOSTIC_DIFFERENTIAL` (S1) only when syndrome divergence would change treatment.
 - Use `DIAGNOSTIC_STANDARD` only when disease boundary / diagnostic basis is materially uncertain.
-- `CLINICAL_CASE` (P2): P1 usable → skip P2; P1 insufficient → fall back to P2.
-- There is no fixed S1 → Standard → P1 → P2 pipeline; choose the path the current decision requires.
+- `NORMATIVE_TREATMENT` (P1) and `CLINICAL_CASE` (P2) are independent retrieval lanes with different source roles. P2 remains historical case truth and never becomes normative merely because it is similar.
+- Retrieval should preserve both relevant source roles when available; source-role comparison belongs to clinical selection, not to a P1-or-P2 fallback switch.
+- There is no fixed S1 → Standard → P1 → P2 pipeline; choose evidence according to the current decision while preserving source authority.
 
 ## Clinical Reasoning Dependencies
 
 Clinical treatment is organized around professional dependencies:
 
-patient presentation and treatment purpose → disease assessment → formal pattern hypotheses → patient-level pattern structure → treatment principle and target → formula/modality evidence → selection → individualized modification → review.
+patient presentation and treatment purpose → atomic patient-level clinical model (disease + pattern structure + treatment principle/target) → formula/modality evidence → selection → individualized modification → review.
 
 These are dependencies between clinical decisions, not fixed medical answers. Multiple patterns may remain active when evidence is insufficient. Treatment evidence must not create a patient syndrome merely because a formula, case, or modality is associated with that syndrome.
 
@@ -182,8 +183,8 @@ An auxiliary or adjacent technique never stands in for a specifically requested 
 
 Some treatment modalities (external therapy / acupuncture, gaofang, preparation) deliver a canonical knowledge asset as their product, not a model-authored summary. For these, retrieval and citation are evidence, not adoption:
 
-- When you hydrate a canonical treatment asset via `knowledge.get_asset` and decide it is the product you will deliver, record its exact asset id in `treatmentPlan.treatmentDeliveries[].sourceAssetRefs` (for gaofang, in `treatmentFormDecision.sourceAssetRefs`) before calling `delivery.commit`.
-- `sourceEvidenceRefs` only means "referenced during reasoning"; it never makes an asset the product. Only an explicit `sourceAssetRefs` selection binds the hydrated canonical asset as the SOURCE_BOUND product at commit.
+- When you hydrate a canonical treatment asset via `knowledge.get_asset` and decide it is the product you will deliver, call `source.bind` with the exact requested `outcome` and hydrated `assetRefs`. Runtime validates provider ownership, hydration receipt, identity, and content hash, writes a `SourceBindingReceipt`, and deterministically commits that SOURCE_BOUND delivery in the same transaction.
+- `sourceEvidenceRefs` only means "referenced during reasoning"; it never makes an asset the product. Only a successful Kernel `source.bind` transaction creates SOURCE_BOUND product membership and delivery; do not follow it with a separate `delivery.commit`.
 - Do not rewrite the asset's source-owned fields (acupuncture points/technique/regimens, gaofang composition/preparation/usage, source patient, provenance) into the reasoning draft. `delivery.commit` binds the hydrated asset verbatim; reasoning only adds qualification, disposition, and patient-specific adaptation.
 
 <!-- H14:START -->

@@ -12,7 +12,7 @@ import { treatmentDeliveryArtifacts, treatmentDeliveryCompleteness } from '../..
 import { getCanonicalFormula, validateNormativeFormula } from '../../clinical/formula.js';
 import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { loadIndex } from '../../knowledge/build.js';
-import { CandidateHandleRegistry } from './candidate-handle-registry.js';
+import { CandidateHandleRegistry, type CandidateTruth } from './candidate-handle-registry.js';
 import { CommitCoordinator, type CommitEnvironment } from './commit-coordinator.js';
 import { materializeSourceBoundProduct } from './source-bound-materializer.js';
 
@@ -48,6 +48,7 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
         composition: fact(compositionPresence, compositionPresence === 'PRESENT' ? formula.composition : undefined, [set.parentRecordRef]),
         preparation: fact(preparationPresence, preparationPresence === 'PRESENT' ? formula.preparation : undefined, [set.parentRecordRef]),
         usage: fact(usagePresence, usagePresence === 'PRESENT' ? formula.usage : undefined, [set.parentRecordRef]),
+        ...(formula.caseContext ? { caseContext: Object.freeze({ ...formula.caseContext }) } : {}),
         modifications: {
           formulaLocal: fact(localPresence, localPresence === 'PRESENT' ? formula.sourceModifications : undefined, [formula.formulaRef]),
           sourceShared: fact(sharedPresence, sharedPresence === 'PRESENT' ? set.sourceLevelModifications : undefined, [set.parentRecordRef]),
@@ -79,7 +80,36 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
       syndrome: set.syndrome,
       treatmentMethod: set.treatmentMethod,
       membershipCompleteness: set.completeness,
+      sourceKind: set.sourceKind ?? 'P1_NORMATIVE_SOURCE',
+      sourceAuthority: set.sourceAuthority ?? 'P1',
+      ...(set.sourceCaseRef ? { sourceCaseRef: set.sourceCaseRef } : {}),
     },
+  };
+}
+
+/**
+ * Convert durable SourceFormulaSet truth into the exact canonical product identity used at commit.
+ *
+ * Retrieval/selection candidate identities are intentionally NOT parsed here. A SOURCE_NODE candidate
+ * and a formula product are different identities; only the Kernel-materialized SourceFormulaSet may
+ * choose the primary product that crosses the commit boundary.
+ */
+export function canonicalCandidateTruthFromSourceFormulaSet(set: SourceFormulaSet): CandidateTruth | undefined {
+  if (set.completeness !== 'COMPLETE') return undefined;
+  const primary = set.formulas.find((formula) => formula.relation === 'PRIMARY_SELECTED');
+  if (!primary || primary.compositionPresence !== 'PRESENT' || !primary.composition.trim()) return undefined;
+  const sourceId = set.sourceAuthority === 'P2_CASE_DERIVED'
+    ? primary.caseContext?.sourceRef
+    : set.parentRecordRef;
+  if (!sourceId) return undefined;
+
+  return {
+    kind: 'formula',
+    canonicalKey: `${sourceId}::${primary.formulaId}`,
+    sourceId,
+    productId: primary.formulaId,
+    composition: primary.composition,
+    provenanceKind: set.sourceAuthority === 'P2_CASE_DERIVED' ? 'CASE_DERIVED' : 'CANONICAL_SOURCE',
   };
 }
 
@@ -138,8 +168,15 @@ function buildCommitEnvironment(context: RuntimeContext): CommitEnvironment {
       const canonical = await getCanonicalFormula(sourceId, formulaId, context.runId);
       if (!canonical) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
       if (typeof truth.composition === 'string' && truth.composition.trim().length > 0) {
-        const validation = await validateNormativeFormula({ sourceId, formulaId, composition: truth.composition });
-        if (!validation.valid) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+        if (canonical.sourceAuthority === 'P1') {
+          const validation = await validateNormativeFormula({ sourceId, formulaId: canonical.formulaId, composition: truth.composition });
+          if (!validation.valid) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+        } else {
+          const normalize = (value: string) => value.replace(/[\s，。、,.;；:：()（）\[\]【】{}《》<>'"“”‘’\-_]/g, '');
+          if (normalize(truth.composition) !== normalize(canonical.composition)) {
+            return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+          }
+        }
       }
 
       let set: SourceFormulaSet | null = null;
@@ -171,7 +208,9 @@ function buildCommitEnvironment(context: RuntimeContext): CommitEnvironment {
         providerId: provider.id,
         product: selectedProduct.payload,
         sourceBundle,
-        sourceRefs: [sourceId],
+        sourceRefs: set.sourceAuthority === 'P2_CASE_DERIVED'
+          ? [...new Set([set.parentRecordRef, ...set.formulas.map((formula) => formula.formulaRef.split('::')[0] ?? '')].filter(Boolean))]
+          : [sourceId],
       };
     },
   };
@@ -195,19 +234,19 @@ export async function commitDeliveryOutcome(context: RuntimeContext, outcome: st
   }
 
   if (owner.obligation.materialization === 'CANONICAL_CANDIDATE') {
-    const ref = context.workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
-    if (!ref) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
-    const candidate = context.workspace.candidates.find((item) => item.kind === 'formula' && item.id === ref);
-    if (!candidate?.sourceId || !candidate.formulaId) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+    // Commit from durable selection/source truth, not from retrieval-card display metadata.
+    // A P1 source-node candidate may carry a representative formula only for display; the authoritative
+    // primary product is the one materialized in SourceFormulaSet by the Kernel selection transaction.
+    const selection = context.workspace.clinicalDecisionSpine.formulaSelection;
+    const set = context.workspace.sourceFormulaSet;
+    if (!selection?.selectedCandidateRef || !set || set.completeness !== 'COMPLETE') {
+      return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+    }
+    const truth = canonicalCandidateTruthFromSourceFormulaSet(set);
+    if (!truth) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+
     const registry = new CandidateHandleRegistry();
-    const handle = registry.issue({
-      kind: candidate.kind,
-      canonicalKey: `${candidate.sourceId}::${candidate.formulaId}`,
-      sourceId: candidate.sourceId,
-      productId: candidate.formulaId,
-      composition: candidate.composition?.join(''),
-      provenanceKind: 'CANONICAL_SOURCE',
-    });
+    const handle = registry.issue(truth);
     const canonicalCoordinator = new CommitCoordinator(registry, context.commitLedger);
     return canonicalCoordinator.commit({ outcome, candidateHandle: handle }, env);
   }

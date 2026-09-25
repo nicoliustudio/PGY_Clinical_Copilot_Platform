@@ -30,6 +30,23 @@ export function resolveWorkItemRef(
   return item;
 }
 
+
+/**
+ * Durable hypothesis identity is workflow-owned, not wording-owned.
+ * - A new `leading` wording updates the already-active leading hypothesis instead of creating a sibling obligation.
+ * - Exact repeated alternatives reuse their existing ref.
+ * - A genuinely new alternative may still be created; Core does not attempt medical synonym matching.
+ */
+export function resolveHypothesisRef(
+  workspace: ClinicalWorkspace,
+  input: { label: string; role: 'leading' | 'alternative' },
+): string | undefined {
+  if (input.role === 'leading') {
+    return workspace.hypothesisState.hypotheses.find((hypothesis) => hypothesis.status === 'active')?.id;
+  }
+  return workspace.hypothesisState.hypotheses.find((hypothesis) => hypothesis.label.trim() === input.label.trim())?.id;
+}
+
 /** Agent-facing hypothesis coverage: leading + active alternatives + open promotion work items + information gaps. */
 export function buildHypothesisProjection(workspace: ClinicalWorkspace): HypothesisProjection {
   const hypotheses = workspace.hypothesisState.hypotheses;

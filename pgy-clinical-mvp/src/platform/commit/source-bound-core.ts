@@ -1,5 +1,5 @@
 import type { CapabilityDeliveryObligation } from '../../contracts/capability.js';
-import type { CommittedSourceBundle, CommittedSourceProduct } from '../../contracts/commit.js';
+import type { ClinicalApplicability, CommittedSourceBundle, CommittedSourceProduct } from '../../contracts/commit.js';
 import type { TreatmentFormDecision } from '../../contracts/workspace.js';
 
 function readPath(value: unknown, path: string): unknown {
@@ -34,12 +34,19 @@ function assetName(asset: Record<string, unknown>, ref: string): string {
   return ref;
 }
 
+function clinicalApplicability(decision: TreatmentFormDecision): ClinicalApplicability {
+  if (decision.disposition === 'TREAT_FIRST_THEN_FORM') return 'DEFERRED';
+  if (decision.disposition === 'CURRENTLY_NOT_SUITABLE') return 'CURRENTLY_NOT_SUITABLE';
+  return 'CURRENTLY_SUITABLE';
+}
+
 export type SourceBoundCoreResult =
   | {
       ok: true;
       product: Readonly<Record<string, unknown>>;
       sourceBundle: CommittedSourceBundle;
       sourceRefs: readonly string[];
+      clinicalApplicability: ClinicalApplicability;
     }
   | {
       ok: false;
@@ -52,6 +59,8 @@ export function materializeSourceBoundAssets(input: {
   obligation: CapabilityDeliveryObligation;
   outcome: string;
   decision: TreatmentFormDecision;
+  /** Kernel SourceBindingReceipt membership; never a model-authored DTO field. */
+  boundRefs: readonly string[];
   hydratedRefs: ReadonlySet<string>;
   resolveAsset: (ref: string) => Record<string, unknown> | null;
 }): SourceBoundCoreResult {
@@ -62,26 +71,19 @@ export function materializeSourceBoundAssets(input: {
   const missingDraft = requiredDraft.filter((path) => !meaningful(readPath(input.decision, path)));
   if (missingDraft.length > 0) return { ok: false, code: 'MISSING_REQUIRED_FIELDS', details: missingDraft };
 
-  const refs = [...new Set((input.decision.sourceAssetRefs ?? []).filter(Boolean))];
-  // Retrieval/hydration and citation are evidence, not adoption. SOURCE_BOUND always requires an
-  // explicit selection written to sourceAssetRefs; sourceEvidenceRefs can never silently promote
-  // a merely-seen asset into product truth.
+  const refs = [...new Set(input.boundRefs.filter(Boolean))];
   if (refs.length === 0) {
-    return {
-      ok: false,
-      code: 'SOURCE_BINDING_MISMATCH',
-      details: ['SOURCE_BOUND delivery requires explicit sourceAssetRefs selection'],
-    };
+    return { ok: false, code: 'SOURCE_BINDING_MISMATCH', details: ['SOURCE_BOUND delivery requires a Kernel SourceBindingReceipt'] };
   }
 
+  const applicability = clinicalApplicability(input.decision);
   const products: CommittedSourceProduct[] = [];
   const missing: string[] = [];
   for (const [index, ref] of refs.entries()) {
     if (!input.hydratedRefs.has(ref)) return { ok: false, code: 'SOURCE_BINDING_MISMATCH', details: [`unhydrated source asset: ${ref}`] };
     const resolved = input.resolveAsset(ref);
     if (!resolved) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED', details: [`asset unavailable: ${ref}`] };
-    // Commit owns an immutable snapshot, never the Runtime Catalog/cache object itself. CommitLedger
-    // deep-freezes records; cloning here prevents that freeze from mutating shared catalog state.
+    // Commit owns an immutable snapshot, never the Runtime Catalog/cache object itself.
     const asset = structuredClone(resolved) as Record<string, unknown>;
     if (typeof asset.asset_id === 'string' && asset.asset_id !== ref) {
       return { ok: false, code: 'SOURCE_BINDING_MISMATCH', details: [`asset identity mismatch: requested=${ref}, hydrated=${asset.asset_id}`] };
@@ -93,10 +95,9 @@ export function materializeSourceBoundAssets(input: {
       productId: ref,
       name: assetName(asset, ref),
       payload: asset,
-      qualification: input.decision.disposition === 'CURRENTLY_NOT_SUITABLE'
-        ? 'CLINICALLY_EXCLUDED'
-        : (index === 0 ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE'),
-      ...(input.decision.disposition === 'CURRENTLY_NOT_SUITABLE' ? { exclusionReason: input.decision.statement } : {}),
+      // membership/selection and patient applicability are separate axes.
+      qualification: index === 0 ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE',
+      clinicalApplicability: applicability,
     });
   }
   if (missing.length > 0) return { ok: false, code: 'MISSING_REQUIRED_FIELDS', details: missing };
@@ -104,6 +105,7 @@ export function materializeSourceBoundAssets(input: {
   return {
     ok: true,
     sourceRefs: refs,
+    clinicalApplicability: applicability,
     sourceBundle: {
       sourceId: refs.length === 1 ? refs[0] : `runtime-assets:${refs.join('+')}`,
       products,
@@ -111,9 +113,6 @@ export function materializeSourceBoundAssets(input: {
         kind: 'RUNTIME_CATALOG_SOURCE_BOUND',
         assetRefs: refs,
         memberCount: products.length,
-        // These are exact immutable snapshots for the explicitly adopted atomic assets. Do not
-        // over-claim that a Runtime Catalog asset id represents every possible sibling in some
-        // broader bibliographic collection; sibling completeness must be declared by that resolver.
         membershipCompleteness: 'COMPLETE_FOR_ADOPTED_ASSETS',
         contentHashes: Object.fromEntries(products.flatMap((product) => {
           const hash = product.payload.content_hash;
@@ -121,12 +120,13 @@ export function materializeSourceBoundAssets(input: {
         })),
       },
     },
+    // Keep source-owned execution facts exclusively inside sourceBundle.payload. The reasoning
+    // statement remains in Workspace for clinical rationale but is not a competing product truth.
     product: {
       outcome: input.outcome,
       form: input.decision.form,
-      disposition: input.decision.disposition,
-      statement: input.decision.statement,
-      sourceAssetRefs: refs,
+      clinicalApplicability: applicability,
+      sourceBindingRefs: refs,
       sourceEvidenceRefs: [...input.decision.sourceEvidenceRefs],
     },
   };

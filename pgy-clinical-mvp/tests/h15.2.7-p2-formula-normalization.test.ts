@@ -77,7 +77,7 @@ test('H15.2.7 C: 无正式方名 → 稳定 identity，不得用 case title 作 
   assert.equal(c.formulaName, '病例方（原案无正式方名）');
   assert.notEqual(c.formulaName, '肺系病证-咳嗽｜张某,女,42岁｜初诊');
   assert.equal(c.formulaId, p2FormulaIdentity('P2:C_cough001', 'E_v1'));
-  assert.ok(c.candidateRef.startsWith('P2:E_v1::'));
+  assert.ok(c.candidateRef.startsWith('case-visit:P2:E_v1'));
 });
 
 // === D：不升级 authority ===
@@ -147,9 +147,9 @@ test('H15.2.7 E: formula.search_candidates 只产生 presented，不自动 selec
   assert.ok(!types.includes('formula.selection.recorded'));
 });
 
-// === F：P1 applicable 优先，不进入 P2 fallback ===
+// === F：typed builder preserves source role boundaries ===
 
-test('H15.2.7 F: P1 hit 不形成 P2 candidate（P1 优先，不混入 P2 fallback）', () => {
+test('H15.2.7 F: P1 hit 不会被 P2 builder 误标成 CASE_ANALOG', () => {
   const p1Hit = encounterHit({ sourceId: 'P1:norm_1', authority: 'P1', sourceTier: 'P1', kind: undefined });
   assert.deepEqual(buildP2CandidateCards([p1Hit]), []);
 });

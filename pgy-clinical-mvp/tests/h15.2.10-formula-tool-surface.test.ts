@@ -33,11 +33,17 @@ function encounterHit(overrides: Record<string, unknown> = {}): any {
 
 // === D：Tool Surface 收敛 ===
 
-test('H15.2.10 D: baseline 不含 legacy search_normative，保留 search_candidates + get_evidence', () => {
+test('H15.2.10 D: baseline 暴露事务型 search_candidates + select，不暴露细粒度 formula bookkeeping', () => {
   assert.ok(BASELINE_TOOL_IDS.includes('formula.search_candidates'));
-  assert.ok(BASELINE_TOOL_IDS.includes('formula.get_evidence'));
-  assert.ok(BASELINE_TOOL_IDS.includes('formula.validate'));
+  assert.ok(BASELINE_TOOL_IDS.includes('formula.select'));
+  assert.ok(!BASELINE_TOOL_IDS.includes('formula.get_evidence'));
+  assert.ok(!BASELINE_TOOL_IDS.includes('formula.validate'));
+  assert.ok(!BASELINE_TOOL_IDS.includes('workspace.focus_candidates'));
+  assert.ok(!BASELINE_TOOL_IDS.includes('workspace.record_candidate_assessment'));
+  assert.ok(!BASELINE_TOOL_IDS.includes('workspace.record_candidate_exclusion'));
   assert.ok(!BASELINE_TOOL_IDS.includes('formula.search_normative'), 'legacy search_normative 不应在基础临床 baseline');
+  assert.ok(!BASELINE_TOOL_IDS.includes('delivery.adopt'), 'baseline request contract is immutable after run start');
+  assert.ok(!BASELINE_TOOL_IDS.includes('workspace.consider_hypotheses'), 'baseline Clinical Model should not require a second hypothesis bookkeeping loop');
 });
 
 test('H15.2.10 D2: tcm.core 不再引用 search_normative；gaofang 仍保留', async () => {
@@ -50,19 +56,20 @@ test('H15.2.10 D2: tcm.core 不再引用 search_normative；gaofang 仍保留', 
   assert.ok(gaofang.toolIds.includes('formula.search_normative'), 'gaofang 保留 search_normative（膏方基础方 P1 检索）');
 });
 
-// === A/B/C：search_candidates 的 P1 优先 / P2 fallback / provenance ===
+// === A/B/C：typed source roles / independent lanes / provenance ===
 
-test('H15.2.10 A: applicable P1 → 不被 P2 fallback 冒充（disease 核心匹配）', () => {
+test('H15.2.10 A: applicable P1 disease identity remains symmetric（disease 核心匹配）', () => {
   assert.equal(isApplicableDisease('脾胃肠系病证-胃痛', ['胃痛']), true);
   assert.equal(diseaseCoreName('脾胃肠系病证-胃痛'), '胃痛');
 });
 
-test('H15.2.10 B: 无 applicable P1 场景下 P2 fallback 形成 formula-level candidate', () => {
+test('H15.2.10 B: P2 case lane forms typed formula-level candidate independent of P1 fallback', () => {
   const cards = buildP2CandidateCards([encounterHit()]);
   assert.equal(cards.length, 1);
   const c = cards[0];
   assert.equal(c.sourceAuthority, 'P2_CASE_DERIVED');
-  assert.equal(c.fallbackReason, 'NO_APPLICABLE_P1');
+  assert.equal(c.retrievalLane, 'CASE_ANALOG');
+  assert.equal(c.fallbackReason, undefined);
   assert.equal(c.formulaId, p2FormulaIdentity('P2:C_stomach001', 'E_v1'));
 });
 
@@ -70,7 +77,7 @@ test('H15.2.10 C: P1/P2 provenance 保持（P2 不升权、candidateRef 可被 g
   const c = buildP2CandidateCards([encounterHit()])[0];
   assert.equal(c.sourceAuthority, 'P2_CASE_DERIVED');
   assert.equal(c.sourceTier, 'P2');
-  assert.ok(c.candidateRef.split('::')[0] === 'P2:E_v1', 'candidateRef 保留 sourceId 前缀供 get_evidence 解析');
+  assert.equal(c.candidateRef, 'case-visit:P2:E_v1', 'P2 candidate 使用稳定 case-visit identity，不复用 formula pointer');
   assert.equal(c.sourceCaseRef, 'P2:C_stomach001');
 });
 

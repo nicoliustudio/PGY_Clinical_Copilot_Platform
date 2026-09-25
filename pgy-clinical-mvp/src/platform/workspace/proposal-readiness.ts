@@ -16,14 +16,13 @@ import { refreshControlPlaneV21, requiredArtifactsFromGraphV21 } from '../contro
  * 这里不做任何医学判断，只合并已经存在的闭世界约束：
  * - Minimum Clinical Core
  * - Planner / Capability / Agent Completion Contract
- * - Formal hypothesis disposition integrity
+ * - Clinical-model minimum spine (open alternatives remain review uncertainty)
  * - mode-specific clinical closure（只影响 clarification/conversation）
  *
  * Agent loop、recovery 与 proposal.submit 都应读取这一个投影，避免“双重口径”。
  */
 export type ProposalReadinessBlockerCode =
   | 'CLINICAL_CLOSURE_REQUIRED'
-  | 'UNRESOLVED_HYPOTHESES'
   | 'CLINICAL_CORE_INCOMPLETE'
   | 'FORMULA_SELECTION_INCOMPLETE'
   | 'CLINICAL_DECISION_INCOMPLETE';
@@ -41,6 +40,8 @@ export interface ProposalReadiness {
   missingArtifacts: string[];
   coreMissing: string[];
   unresolvedHypotheses: Array<{ ref: string; label: string }>;
+  /** Terminal contract shortfalls: auditable/finalizable, but there is no legal Agent action left. */
+  terminalShortfalls: string[];
   blockers: ProposalReadinessBlocker[];
 }
 
@@ -61,14 +62,10 @@ export function evaluateProposalReadiness(
     }
   }
 
+  // Open alternatives are observable uncertainty, not a workflow blocker. The durable PatternAssessment
+  // and TreatmentPlan define the active clinical model; alternatives may remain for review without
+  // starving retrieval/selection or forcing the model through bookkeeping-only disposition loops.
   const unresolved = findUnresolvedFormalHypotheses(context.workspace).map((h) => ({ ref: h.id, label: h.label }));
-  if (unresolved.length > 0) {
-    blockers.push({
-      code: 'UNRESOLVED_HYPOTHESES',
-      message: 'proposal not ready: unresolved decision-changing hypothesis exists. Resolve it as selected / rejected with basis / preserved as uncertainty.',
-      unresolvedHypotheses: unresolved,
-    });
-  }
 
   const core = context.understanding?.interaction?.mode === 'clinical'
     ? checkClinicalCoreCompletion(context.workspace)
@@ -88,17 +85,11 @@ export function evaluateProposalReadiness(
     // 因此 planner 的 provisional 预判不会再把「用户明确只要针灸」强行要求成 formulaSelection。
     refreshControlPlaneV21(context);
     const blockedRequired = controlState.graph.nodes.filter((n) => n.required && n.status === 'BLOCKED');
-    if (blockedRequired.length > 0) {
-      // typed planning blocker（unsupported / ambiguous / cycle）：闭世界下不可交付，必须阻断提交，
-      // 不允许用「模型自拟」绕过，也不允许静默降级为可提交。
-      blockers.push({
-        code: 'CLINICAL_DECISION_INCOMPLETE',
-        message: `control plane blocked: ${blockedRequired
-          .map((n) => n.blocker?.question ?? n.target.type)
-          .join(' | ')}`,
-        missing: [...new Set(blockedRequired.map((n) => n.target.type))],
-      });
-    }
+    const notDeliverableRequired = controlState.graph.nodes.filter((n) => n.required && n.status === 'NOT_DELIVERABLE');
+    // BLOCKED / NOT_DELIVERABLE are terminal states. They must remain visible in the final result,
+    // but they are not "missing work" for the Agent. Only OPEN obligations can justify recovery.
+    const terminalShortfalls = [...new Set([...blockedRequired, ...notDeliverableRequired]
+      .map((n) => n.blocker?.question ?? n.target.type))];
     const graphRequired = requiredArtifactsFromGraphV21(controlState);
     const completion = checkCompletionAgainst(context.workspace, graphRequired);
     // requiredArtifacts 只覆盖「可映射为 workspace artifact key」的义务；证据类义务没有对应 key。
@@ -107,13 +98,11 @@ export function evaluateProposalReadiness(
     const describeNode = (node: ObligationNodeV21): string =>
       `${node.target.type}${typeof node.target.qualifiers.outcome === 'string' ? `(${node.target.qualifiers.outcome})` : ''}`;
     const unmetGraphNodes = controlState.graph.nodes.filter((n) => n.required && n.status === 'OPEN');
-    // V2.1.1/V2.1.2 单一真源：缺失集 =「workspace 缺 key」∪「图里未 terminal 的义务」（OPEN 与 BLOCKED 都算）。
-    // 否则会出现 artifact 已写入（key 已满足）但其 prerequisite 义务仍未 terminal 的情况：
-    // 图说 2 个义务未完成，readiness 却说 missing=[]，recovery/final 消息因此给出空缺失集。
+    // Missing work contains only genuinely actionable OPEN obligations. Terminal shortfalls are
+    // reported separately so recovery never loops on a state with no legal transition.
     const missingArtifacts = [...new Set([
       ...completion.missingArtifacts,
       ...unmetGraphNodes.map(describeNode),
-      ...blockedRequired.map(describeNode),
     ])];
     if (!completion.ok) {
       blockers.push({
@@ -136,6 +125,7 @@ export function evaluateProposalReadiness(
       missingArtifacts,
       coreMissing: core.missing,
       unresolvedHypotheses: unresolved,
+      terminalShortfalls,
       blockers,
     };
   }
@@ -162,6 +152,7 @@ export function evaluateProposalReadiness(
     missingArtifacts: completion.missingArtifacts,
     coreMissing: core.missing,
     unresolvedHypotheses: unresolved,
+    terminalShortfalls: [],
     blockers,
   };
 }

@@ -57,9 +57,22 @@ export const clinicalResultSchema = z.object({
     modification_rules: z.array(z.string()),
     modification_status: z.enum(['PRESENT', 'KNOWN_EMPTY', 'UNKNOWN', 'UNATTRIBUTED_SOURCE_RULES']),
     modification_text: z.string(),
+    /** Fixed three-namespace modification frame; never infer one namespace from another. */
+    formula_local_modification_text: z.string(),
+    source_shared_modification_text: z.string(),
+    patient_specific_modification_text: z.string(),
     source_level_modification_rules: z.array(z.string()).optional(),
     usage: z.string().optional(),
     relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
+    case_context: z.object({
+      sourceRef: z.string(),
+      visit: z.string().optional(),
+      patient: z.string().optional(),
+      symptoms: z.string().optional(),
+      disease: z.string().optional(),
+      syndrome: z.string().optional(),
+      treatment: z.string().optional(),
+    }).optional(),
     facts: z.object({
       composition: projectedFactSchema,
       preparation: projectedFactSchema,
@@ -79,6 +92,7 @@ export const clinicalResultSchema = z.object({
     provider_id: z.string(),
     delivery_status: z.string(),
     execution_clearance: z.string(),
+    clinical_applicability: z.enum(['CURRENTLY_SUITABLE', 'DEFERRED', 'CURRENTLY_NOT_SUITABLE']).optional(),
     provenance: z.object({
       kind: z.enum(['CANONICAL_SOURCE', 'CASE_DERIVED', 'MODEL_DERIVED']),
       sourceRefs: z.array(z.string()),
@@ -95,6 +109,7 @@ export const clinicalResultSchema = z.object({
         name: z.string(),
         payload: z.record(z.string(), z.unknown()),
         qualification: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
+        clinicalApplicability: z.enum(['CURRENTLY_SUITABLE', 'DEFERRED', 'CURRENTLY_NOT_SUITABLE']).optional(),
         exclusionReason: z.string().optional(),
       })),
       sourceFacts: z.record(z.string(), z.unknown()),

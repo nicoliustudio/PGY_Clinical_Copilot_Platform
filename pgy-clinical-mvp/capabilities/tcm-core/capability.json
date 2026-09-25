@@ -51,9 +51,7 @@
   ],
   "toolIds": [
     "knowledge.search",
-    "formula.search_candidates",
-    "formula.get_evidence",
-    "formula.validate"
+    "formula.search_candidates"
   ],
   "controlPlaneV21": {
     "rules": [

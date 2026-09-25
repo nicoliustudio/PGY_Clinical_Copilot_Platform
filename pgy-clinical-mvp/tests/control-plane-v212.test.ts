@@ -107,6 +107,7 @@ function satisfyClinicalCore(context: RuntimeContext): void {
   spine.diseaseAssessment = { statement: 'd', evidenceRefs: ['P1:x'], version: 1 };
   spine.patternHypothesisRefs = ['h1'];
   spine.patternAssessmentRef = 'h1';
+  spine.treatmentPlan = { primaryPrinciple: '治法', treatmentTarget: '靶点', evidenceRefs: ['P1:x'], version: 1 };
 }
 
 function satisfyFormulaEvidence(context: RuntimeContext): void {
@@ -300,7 +301,7 @@ test('V2.1.2 invariant: 声明别名/字面命中不得被误判为家族顶替'
 // 6. V2.1.3 Outcome Commitment（REQUIRED / PREFERRED / ALLOWED / EXCLUDED）
 // ---------------------------------------------------------------------------
 
-test('V2.1.3 invariant: REQUIRED + unsupported → BLOCKED，且不阻断其他 required outcome', async () => {
+test('V2.1.3 invariant: REQUIRED + unsupported → NOT_DELIVERABLE，且不阻断其他 required outcome', async () => {
   const context = await prepareContext(request(['modality:acupuncture'], {
     mentions: [
       { name: '针灸', commitment: 'REQUIRED' },
@@ -315,11 +316,11 @@ test('V2.1.3 invariant: REQUIRED + unsupported → BLOCKED，且不阻断其他 
   const blocked = context.controlPlaneV21!.graph.nodes.find(
     (n) => n.target.qualifiers.outcome === 'unresolved:拔罐',
   );
-  assert(blocked !== undefined, 'REQUIRED 且不可表示必须产生 typed blocker');
-  assert.equal(blocked!.status, 'BLOCKED');
+  assert(blocked !== undefined, 'REQUIRED 且不可表示必须产生 terminal shortfall');
+  assert.equal(blocked!.status, 'NOT_DELIVERABLE');
   assert.equal(blocked!.blocker?.type, 'UNSUPPORTED_OUTCOME');
 
-  // required 的针灸仍有 provider 义务，且没有被拔罐的 blocker 传播为 BLOCKED。
+  // required 的针灸仍有 provider 义务，且没有被拔罐的 shortfall 传播为 BLOCKED。
   const acupuncture = nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture');
   assert(acupuncture !== undefined);
   assert.notEqual(acupuncture!.status, 'BLOCKED');
@@ -398,24 +399,24 @@ test('V2.1.3 invariant: EXCLUDED 不产生 delivery obligation', async () => {
 // 5. frontier mutation 必须受 runnable obligation 控制
 // ---------------------------------------------------------------------------
 
-test('V2.1.2 invariant: frontier/assessment mutation 由 obligation graph 决定可见性', async () => {
+test('V2.1.2 invariant: formula workflow exposes transactions, not hidden candidate bookkeeping stages', async () => {
   const context = await prepareContext(request(['modality:herbal-formula']));
 
-  // clinical-core 未完成 → formula-evidence 不可执行 → frontier mutation 必须不可见。
   let surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
-  assert(!surface.includes('workspace.focus_candidates'), '上游义务未终态时 frontier mutation 不得可见');
+  assert(!surface.includes('workspace.focus_candidates'));
   assert(!surface.includes('workspace.record_candidate_assessment'));
+  assert(!surface.includes('workspace.record_candidate_exclusion'));
+  assert(!surface.includes('formula.select'), '上游 clinical/evidence 义务未满足时 selection 不可见');
 
   satisfyClinicalCore(context);
   satisfyFormulaEvidence(context);
   refreshControlPlaneV21(context);
 
-  // formula-evidence 已终态 → 推进到 selection：frontier mutation 收口，候选评估开放。
   surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
-  assert(!surface.includes('workspace.focus_candidates'), 'formula-evidence 终态后 discovery/frontier 应推进');
-  assert(surface.includes('workspace.record_candidate_assessment'), 'selection 义务可执行时候选评估应开放');
-  assert(surface.includes('workspace.record_candidate_exclusion'));
-  assert(surface.includes('workspace.record_deliberation'));
+  assert(!surface.includes('workspace.focus_candidates'));
+  assert(!surface.includes('workspace.record_candidate_assessment'));
+  assert(!surface.includes('workspace.record_candidate_exclusion'));
+  assert(surface.includes('formula.select'), 'CandidateSet+evidence 完成后应直接开放闭世界 formula.select 事务');
 });
 
 // ---------------------------------------------------------------------------
@@ -475,14 +476,15 @@ test('V2.1.3 invariant: semantic identity 稳定（display surface 归一化到 
   assert.equal(resolveMention(ontology, '膏方（以膏代煎）').term, 'modality:gaofang');
 });
 
-test('V2.1.3 invariant: no-progress terminal —— blocked required + open=0 时 proposal.submit 移除', async () => {
+test('V2.1.3 invariant: no-progress terminal —— NOT_DELIVERABLE required 是终态且 proposal.submit 保持可见', async () => {
   const context = await prepareContext(request(['modality:no-such-modality']));
   satisfyClinicalCore(context);
   context.workspace.evidenceState.evidenceItems.push({
     id: 'E1', sourceRef: 'P1:std', sourceType: 'knowledge', relatedCandidates: [], supportingSignals: [], contradictingSignals: [],
   });
   refreshControlPlaneV21(context);
-  // blocked required > 0 且 open = 0：无任何 legal effect 能改善 satisfaction。
+  // NOT_DELIVERABLE required 且 open = 0：无任何 legal effect 能改善 satisfaction，
+  // 但 proposal.submit 必须保持可见以终结 run（终态被报告，而不是被隐藏制造 recovery 死循环）。
   const surface = projectControlPlaneV21Surface(context, ['proposal.submit']);
-  assert.deepEqual(surface, [], 'blocked required + open=0 时 proposal.submit 必须从 legal surface 消失');
+  assert.deepEqual(surface, ['proposal.submit'], 'NOT_DELIVERABLE required + open=0 时 proposal.submit 必须保持可见以终结 run');
 });

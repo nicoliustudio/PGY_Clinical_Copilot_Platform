@@ -22,18 +22,20 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
   { id: 'formula.search_normative', description: '检索当前 scope 的 P1 规范方', risk: 'low', treatmentSpecific: true, effects: ['formula:discover'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
   { id: 'formula.search_candidates', description: '两阶段方剂检索第一阶段：召回少量基础方候选卡', risk: 'low', treatmentSpecific: true, effects: ['formula:discover'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
   { id: 'formula.get_evidence', description: '两阶段方剂检索第二阶段：展开完整方剂证据', risk: 'low', treatmentSpecific: true, effects: ['formula:hydrate'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
+  { id: 'formula.select', description: 'Kernel 闭世界选方事务：一次提交完整 CandidateSet disposition + 最终选择；Runtime 拥有 evidence/source identity 并水合同源全部产品', risk: 'low', treatmentSpecific: true, effects: ['formula:select'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:formula-selection' } }] },
   { id: 'formula.get_modification_evidence', description: '基础方已选后检索随证 ADD 加味证据（ADVISORY）', risk: 'low', treatmentSpecific: true, effects: ['formula:hydrate'], effectPatternsV21: [{ op: 'retrieve', target: { type: 'artifact:formula-evidence' } }] },
   { id: 'formula.validate', description: '验证 source/formula/composition 同源绑定', risk: 'low', effects: ['formula:validate'], effectPatternsV21: [{ op: 'validate', target: { type: 'artifact:formula-evidence' } }] },
-  { id: 'delivery.adopt', description: '显式扩展 effective delivery contract；只创建义务，不产生产品或 DELIVERED', risk: 'low', effects: ['delivery:adopt-contract'] },
+  { id: 'source.bind', description: 'Kernel SOURCE_BOUND transaction：验证 hydration/identity/hash，生成 SourceBindingReceipt，并在同一 Runtime 事务中确定性 commit delivery', risk: 'low', effects: ['source:bind'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:treatment-delivery' } }] },
+  { id: 'delivery.adopt', description: '[legacy/specialist] 显式扩展 effective delivery contract；baseline run 的请求契约在 run 起点冻结，不暴露该工具', risk: 'low', effects: ['delivery:adopt-contract'] },
   { id: 'delivery.commit', description: '将当前 exact outcome 的 PREPARED 交付提交到 Kernel CommitLedger；只有成功 CommitRecord 才算 DELIVERED', risk: 'low', effects: ['delivery:kernel-commit'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:treatment-delivery' } }] },
   // V2.1.1: durable clinical mutations also participate in the effect surface.
-  // Fine-grained payload legality is checked again inside workspace.record_deliberation, so a broad
+  // Fine-grained payload legality is checked again inside the workspace clinical-model transaction, so a broad
   // multi-artifact mutation tool cannot write a future artifact merely because one commit effect is runnable.
   //
   // V2.1.2: the fine-grained deliberation mutations are governed too, so the progression
   // discovery → frontier → hydration → assessment → selection is driven by the obligation graph
   // instead of the model's free choice. They declare exactly the same structural effects as
-  // workspace.record_deliberation (which is the same durable mutation, batched).
+  // the legacy workspace deliberation mutation.
   { id: 'workspace.focus_candidates', description: '选择进入 Deliberation Frontier 的候选', risk: 'low', effects: ['state:write-formula-selection'], effectPatternsV21: [
     { op: 'commit', target: { type: 'artifact:formula-evidence' } },
   ] },
@@ -43,20 +45,40 @@ export const PLATFORM_TOOLS: RuntimeToolDescriptor[] = [
   { id: 'workspace.record_candidate_exclusion', description: '记录 candidate 被有意排除的原因', risk: 'low', effects: ['state:write-formula-selection'], effectPatternsV21: [
     { op: 'commit', target: { type: 'artifact:formula-selection' } },
   ] },
-  { id: 'workspace.record_deliberation', description: '批量提交 reasoning / prepared delivery draft（非权威交付）', risk: 'low', effects: ['state:write-clinical-core', 'state:write-formula-selection', 'state:write-treatment-delivery'], effectPatternsV21: [
+  { id: 'workspace.commit_clinical_model', description: 'Baseline Clinical Model 事务：一次提交 diseaseAssessment + patternAssessment + treatmentPlan；Runtime/Kernel 拥有 durable identity 与 source-owned facts', risk: 'low', effects: ['state:write-clinical-core', 'state:write-treatment-delivery'], effectPatternsV21: [
     { op: 'commit', target: { type: 'artifact:clinical-core' } },
-    { op: 'commit', target: { type: 'artifact:formula-selection' } },
     { op: 'commit', target: { type: 'artifact:treatment-draft' } },
   ] },
-  { id: 'workspace.consider_hypotheses', description: '显式认领 patient-level hypothesis（leading/alternative）', risk: 'low', effects: ['state:write-clinical-core'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:clinical-core' } }] },
+  { id: 'workspace.record_deliberation', description: '[legacy/specialist] 宽口径 deliberation mutation；baseline 使用 workspace.commit_clinical_model', risk: 'low', effects: ['state:write-clinical-core', 'state:write-treatment-delivery'], effectPatternsV21: [
+    { op: 'commit', target: { type: 'artifact:clinical-core' } },
+    { op: 'commit', target: { type: 'artifact:treatment-draft' } },
+  ] },
+  { id: 'workspace.consider_hypotheses', description: '[legacy/specialist] 显式认领 patient-level hypothesis；baseline Clinical Model 直接由 workspace.commit_clinical_model 原子提交', risk: 'low', effects: ['state:write-clinical-core'], effectPatternsV21: [{ op: 'commit', target: { type: 'artifact:clinical-core' } }] },
   ...EXPERIMENTAL_TOOLS,
   ...STANDARD_RUNTIME_TOOLS,
 ];
+const LEGACY_FORMULA_BOOKKEEPING_TOOLS = new Set([
+  'formula.search_normative',
+  'formula.get_evidence',
+  'formula.validate',
+  'workspace.focus_candidates',
+  'workspace.record_candidate_assessment',
+  'workspace.record_candidate_exclusion',
+]);
+
+const NON_BASELINE_ORCHESTRATION_TOOLS = new Set([
+  // Request semantics are compiled once per run. Baseline execution must not let the model reopen
+  // the contract ad hoc or maintain a second hypothesis bookkeeping loop.
+  'delivery.adopt',
+  'workspace.consider_hypotheses',
+  'workspace.record_deliberation',
+]);
+
 export const BASELINE_TOOL_IDS: string[] = PLATFORM_TOOLS.map((t) => t.id)
-  // H15.2.10：formula.search_normative 不再是基础临床的 Agent-visible primary search entry。
-  // 统一由 formula.search_candidates（applicable P1 → P2 fallback）承担；
-  // search_normative 保留为 gaofang 能力（膏方基础方 P1 检索）专用工具。
-  .filter((id) => id !== 'formula.search_normative');
+  // General herbal workflow is transaction-oriented: search_candidates materializes CandidateSet+evidence;
+  // formula.select performs the complete semantic decision. Fine-grained tools remain available only to
+  // explicitly declared specialist/legacy capabilities (e.g. gaofang validate), not to the baseline Agent.
+  .filter((id) => !LEGACY_FORMULA_BOOKKEEPING_TOOLS.has(id) && !NON_BASELINE_ORCHESTRATION_TOOLS.has(id));
 export const CLASSIC_BASELINE_TOOL_IDS: string[] = BASELINE_TOOL_IDS.filter((id) => id !== 'knowledge.get_source' && id !== 'delivery.commit' && id !== 'delivery.adopt');
 export const BASELINE_KNOWLEDGE_SCOPES: string[] = ['general'];
 

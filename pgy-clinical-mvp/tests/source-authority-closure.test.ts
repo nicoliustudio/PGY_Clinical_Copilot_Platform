@@ -99,9 +99,10 @@ describe('Truth Genesis / Source Authority closure', () => {
       outcome: 'modality:acupuncture',
       decision: {
         outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: '适合针灸',
-        sourceEvidenceRefs: ['AC-049', 'P1:diagnostic-support'], sourceAssetRefs: ['AC-049'],
+        sourceEvidenceRefs: ['AC-049', 'P1:diagnostic-support'],
         details: { patientSpecificNote: '经前介入' },
       },
+      boundRefs: ['AC-049'],
       hydratedRefs: new Set(['AC-049']),
       resolveAsset: (ref) => ref === 'AC-049' ? ac049 : null,
     });
@@ -116,7 +117,7 @@ describe('Truth Genesis / Source Authority closure', () => {
     assert.match(payload.protocol.regimens[1], /子宫、交感、生殖区穴/);
     assert.equal((result.product as any).protocol, undefined, 'source-owned execution facts must not leak into reasoning-owned envelope');
     assert.equal((result.product as any).patientSpecificDetails, undefined, 'untyped reasoning details must not become a second authoritative execution namespace');
-    assert.deepEqual((result.product as any).sourceAssetRefs, ['AC-049']);
+    assert.deepEqual((result.product as any).sourceBindingRefs, ['AC-049']);
   });
 
   it('binds GF-001 complete source case instead of a reasoning-authored advisory substitute', () => {
@@ -125,9 +126,10 @@ describe('Truth Genesis / Source Authority closure', () => {
       outcome: 'modality:gaofang',
       decision: {
         outcome: 'modality:gaofang', form: '膏方（以膏代煎）', disposition: 'TREAT_FIRST_THEN_FORM', statement: '需医生审阅',
-        sourceEvidenceRefs: ['GF-001', 'P1:other-support'], sourceAssetRefs: ['GF-001'],
+        sourceEvidenceRefs: ['GF-001', 'P1:other-support'],
         advisoryComposition: ['模型不应把这行当 source truth'], preparation: '模型草稿', usage: '模型草稿',
       },
+      boundRefs: ['GF-001'],
       hydratedRefs: new Set(['GF-001']),
       resolveAsset: (ref) => ref === 'GF-001' ? gf001 : null,
     });
@@ -144,7 +146,8 @@ describe('Truth Genesis / Source Authority closure', () => {
     const result = materializeSourceBoundAssets({
       obligation: sourceBoundObligation,
       outcome: 'modality:acupuncture',
-      decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'], sourceAssetRefs: ['AC-049'] },
+      decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'] },
+      boundRefs: ['AC-049'],
       hydratedRefs: new Set(),
       resolveAsset: () => ac049,
     });
@@ -156,10 +159,11 @@ describe('Truth Genesis / Source Authority closure', () => {
       obligation: sourceBoundObligation,
       outcome: 'modality:acupuncture',
       decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'] },
+      boundRefs: [],
       hydratedRefs: new Set(['AC-049']),
       resolveAsset: () => ac049,
     });
-    assert.deepEqual(result, { ok: false, code: 'SOURCE_BINDING_MISMATCH', details: ['SOURCE_BOUND delivery requires explicit sourceAssetRefs selection'] });
+    assert.deepEqual(result, { ok: false, code: 'SOURCE_BINDING_MISMATCH', details: ['SOURCE_BOUND delivery requires a Kernel SourceBindingReceipt'] });
   });
 
   it('fails closed when canonical source cannot satisfy provider-declared source fields', () => {
@@ -167,7 +171,8 @@ describe('Truth Genesis / Source Authority closure', () => {
     const result = materializeSourceBoundAssets({
       obligation: sourceBoundObligation,
       outcome: 'modality:acupuncture',
-      decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'], sourceAssetRefs: ['AC-049'] },
+      decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'] },
+      boundRefs: ['AC-049'],
       hydratedRefs: new Set(['AC-049']),
       resolveAsset: () => broken,
     });
@@ -182,7 +187,8 @@ describe('Truth Genesis / Source Authority closure', () => {
     const core = materializeSourceBoundAssets({
       obligation: sourceBoundObligation,
       outcome: 'modality:acupuncture',
-      decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'], sourceAssetRefs: ['AC-049'] },
+      decision: { outcome: 'modality:acupuncture', form: '针灸', disposition: 'CURRENTLY_SUITABLE', statement: 'x', sourceEvidenceRefs: ['AC-049'] },
+      boundRefs: ['AC-049'],
       hydratedRefs: new Set(['AC-049']),
       resolveAsset: () => ac049,
     });

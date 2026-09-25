@@ -30,6 +30,45 @@ function modificationText(value: unknown): string {
   return '';
 }
 
+
+export interface InlineModificationSplit {
+  composition: string;
+  modifications: string[];
+  presence: 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN';
+}
+
+/**
+ * Split formula-local inline modification text from a complete raw composition.
+ *
+ * This is source normalization, not clinical inference: we only recognize an explicit `加减:` / `加减：`
+ * delimiter that already exists in the source text. When a complete raw composition is available and no
+ * inline delimiter exists, formula-local modification is KNOWN_EMPTY for that composition field. When the
+ * raw field itself is unavailable, the state remains UNKNOWN.
+ */
+export function splitInlineFormulaModification(rawComposition: unknown): InlineModificationSplit {
+  if (typeof rawComposition !== 'string') {
+    return { composition: '', modifications: [], presence: 'UNKNOWN' };
+  }
+  const raw = rawComposition.trim();
+  if (!raw) return { composition: '', modifications: [], presence: 'KNOWN_EMPTY' };
+
+  const match = /(?:^|[。；;\n])\s*加减\s*[:：]\s*/.exec(raw);
+  if (!match || match.index === undefined) {
+    return { composition: raw.replace(/[。；;\s]+$/g, ''), modifications: [], presence: 'KNOWN_EMPTY' };
+  }
+
+  const delimiterStart = match.index;
+  const delimiterEnd = delimiterStart + match[0].length;
+  const composition = raw.slice(0, delimiterStart).replace(/[。；;\s]+$/g, '').trim();
+  const modificationText = raw.slice(delimiterEnd).replace(/[。；;\s]+$/g, '').trim();
+  const modifications = normalizeSourceModificationList(modificationText);
+  return {
+    composition,
+    modifications,
+    presence: modifications.length > 0 ? 'PRESENT' : 'KNOWN_EMPTY',
+  };
+}
+
 /** Preserve source-authored modification statements without model rewriting or semantic inference. */
 export function normalizeSourceModificationList(...values: unknown[]): string[] {
   const out: string[] = [];

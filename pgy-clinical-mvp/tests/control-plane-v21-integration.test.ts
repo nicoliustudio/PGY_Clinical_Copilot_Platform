@@ -106,6 +106,7 @@ function satisfyClinicalCore(context: RuntimeContext): void {
   spine.diseaseAssessment = { statement: 'd', evidenceRefs: ['P1:x'], version: 1 };
   spine.patternHypothesisRefs = ['h1'];
   spine.patternAssessmentRef = 'h1';
+  spine.treatmentPlan = { primaryPrinciple: '治法', treatmentTarget: '靶点', evidenceRefs: ['P1:x'], version: 1 };
 }
 
 /** 产生一条诊断知识证据（关闭 diagnostic-evidence 义务）。 */
@@ -118,6 +119,28 @@ function satisfyDiagnosticEvidence(context: RuntimeContext): void {
     supportingSignals: [],
     contradictingSignals: [],
   });
+}
+
+function satisfyFormulaEvidence(context: RuntimeContext): void {
+  context.workspace.candidates.push({
+    id: 'source-node:P1:x', kind: 'formula', formulaId: 'F1', sourceId: 'P1:x',
+    sourceAuthority: 'P1', sourceKind: 'P1_NORMATIVE_SOURCE', selectionUnit: 'SOURCE_NODE',
+  });
+  context.workspace.evidenceState.evidenceItems.push({
+    id: 'formula-evidence:source-node:P1:x',
+    sourceRef: 'P1:x', sourceType: 'P1', relatedCandidates: ['source-node:P1:x'],
+    supportingSignals: [], contradictingSignals: [],
+  });
+  context.workspace.deliberationState.frontier = ['source-node:P1:x'];
+  context.workspace.candidateSetReceipt = {
+    candidateRefs: ['source-node:P1:x'],
+    evidenceBindings: [{
+      candidateRef: 'source-node:P1:x',
+      evidenceRefs: ['formula-evidence:source-node:P1:x'],
+      sourceRefs: ['P1:x'],
+    }],
+    workspaceVersion: 1,
+  };
 }
 
 function nodeOf(context: RuntimeContext, type: string, outcome?: string): ObligationNodeV21 | undefined {
@@ -429,7 +452,7 @@ test('V2.1.1 typed blocker 只增加定向取证义务，不得移除父义务�
   // blocker 生效：父义务仍然可执行（commit 面保留），同时定向检索打开。
   assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'OPEN');
   const surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
-  assert(surface.includes('workspace.record_deliberation'), 'typed blocker 不得删除父义务自身的 commit effect');
+  assert(surface.includes('workspace.commit_clinical_model'), 'typed blocker 不得删除父义务自身的 commit effect');
   assert(surface.includes('knowledge.search'), 'typed blocker 应同时重开定向检索');
   assert.equal(runnableObligations(context.controlPlaneV21!).some((n) => n.target.type === 'artifact:evidence-gap'), true);
   // 未放宽提交约束：义务未 terminal 时 readiness 仍阻断。
@@ -484,9 +507,11 @@ test('V2.1.1 声明契约外的 delivery outcome 必须 fail-closed（不得静�
   const context = await prepareContext(request(['modality:acupuncture'], { exclusive: true }));
   satisfyDiagnosticEvidence(context);
   refreshControlPlaneV21(context);
-  const factory = DEFAULT_AI_SDK_TOOL_BINDINGS['workspace.record_deliberation'];
+  const factory = DEFAULT_AI_SDK_TOOL_BINDINGS['workspace.commit_clinical_model'];
   const tool = factory(context) as unknown as { execute: (input: unknown) => Promise<unknown> };
   await assert.rejects(() => tool.execute({
+    diseaseAssessment: { statement: 'd', evidenceRefs: ['P1:x'] },
+    patternAssessment: { primary: { statement: 'p', supportingEvidenceRefs: ['E1'] } },
     treatmentPlan: {
       primaryPrinciple: 'p',
       treatmentTarget: 't',
@@ -564,48 +589,49 @@ test('typed planning blocker 阻断提交：未安装 provider 的 outcome 不�
   const context = await prepareContext(request(['modality:not-installed']));
   const graph = context.controlPlaneV21!.graph;
   assert(graph.issues.some((i) => i.type === 'UNSUPPORTED_OUTCOME'));
-  const blocked = graph.nodes.filter((n) => n.required && n.status === 'BLOCKED');
-  assert.equal(blocked.length, 1);
+  const notDeliverable = graph.nodes.filter((n) => n.required && n.status === 'NOT_DELIVERABLE');
+  assert.equal(notDeliverable.length, 1);
   const readiness = evaluateProposalReadiness(context);
   assert.equal(readiness.ready, false);
-  assert(readiness.blockers.some((b) => b.message.startsWith('control plane blocked')));
+  assert(readiness.terminalShortfalls.length > 0, 'terminal shortfall 必须在 readiness 中被显式报告');
 });
 
-test('V2.1.1 formula discovery 产生候选后关闭重复 search_candidates，推进到 hydrate', async () => {
+test('V2.1.1 formula retrieval is atomic: search_candidates remains the only baseline evidence action until CandidateSet receipt closes', async () => {
   const context = await prepareContext(request(['modality:herbal-formula']));
   satisfyClinicalCore(context);
   satisfyDiagnosticEvidence(context);
   let surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
   assert(surface.includes('formula.search_candidates'));
   assert(!surface.includes('formula.get_evidence'));
-  context.workspace.candidates.push({ id: 'C1', kind: 'formula', formulaId: 'F1', sourceId: 'P1:x' });
+
+  satisfyFormulaEvidence(context);
+  refreshControlPlaneV21(context);
   surface = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
   assert(!surface.includes('formula.search_candidates'));
-  assert(surface.includes('formula.get_evidence'));
+  assert(!surface.includes('formula.get_evidence'));
+  assert(surface.includes('formula.select'));
 });
 
-test('formula-evidence 不会因任意证据出现而提前关闭', async () => {
+test('formula-evidence closes only from a complete CandidateSet/evidence receipt, not from arbitrary evidence', async () => {
   const context = await prepareContext(request(['modality:herbal-formula']));
   satisfyClinicalCore(context);
-  // 存在「与候选关联」的证据，但候选未聚焦 → 方剂证据仍未取得，检索保持开放。
-  context.workspace.candidates.push({ id: 'C1', kind: 'formula', formulaId: 'F1', sourceId: 'P1:x' });
+  context.workspace.candidates.push({ id: 'source-node:P1:x', kind: 'formula', formulaId: 'F1', sourceId: 'P1:x' });
   context.workspace.evidenceState.evidenceItems.push({
-    id: 'E2', sourceRef: 'P1:x', sourceType: 'knowledge', relatedCandidates: ['C1'], supportingSignals: [], contradictingSignals: [],
+    id: 'E2', sourceRef: 'P1:x', sourceType: 'knowledge', relatedCandidates: ['source-node:P1:x'], supportingSignals: [], contradictingSignals: [],
   });
   refreshControlPlaneV21(context);
   assert.equal(nodeOf(context, 'artifact:formula-evidence', 'modality:herbal-formula')!.status, 'OPEN');
-  // V2.1.1：已有 candidate → 关闭重复 candidate discovery，推进到 hydrate/validate。
-  const internals = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
-  assert(!internals.includes('formula.search_candidates'));
-  assert(internals.includes('formula.get_evidence'));
-  // 聚焦后证据视为完成 → 方剂检索收口，选择义务开放。
-  context.workspace.deliberationState.frontier = ['C1'];
+  const surfaceBeforeReceipt = projectControlPlaneV21Surface(context, ALL_INTERNAL_TOOLS);
+  assert(surfaceBeforeReceipt.includes('formula.search_candidates'));
+  assert(!surfaceBeforeReceipt.includes('formula.get_evidence'));
+
+  satisfyFormulaEvidence(context);
   refreshControlPlaneV21(context);
   assert.equal(nodeOf(context, 'artifact:formula-evidence', 'modality:herbal-formula')!.status, 'SATISFIED');
   assert.equal(nodeOf(context, 'artifact:formula-selection', 'modality:herbal-formula')!.status, 'OPEN');
 });
 
-test('V2.1.1 H12 disposition 纳入 clinical-core truth：未决 alternative 时 graph 不得 complete', async () => {
+test('V2.1.1 open alternative hypothesis remains review uncertainty and does not reopen a completed clinical core', async () => {
   const context = await prepareContext(request([]));
   satisfyClinicalCore(context);
   satisfyDiagnosticEvidence(context);
@@ -613,9 +639,6 @@ test('V2.1.1 H12 disposition 纳入 clinical-core truth：未决 alternative 时
     id: 'h1', label: 'alt', supportingEvidenceRefs: [], contradictingEvidenceRefs: [], missingEvidence: [],
     status: 'alternative', origin: 'agent_reasoning',
   });
-  refreshControlPlaneV21(context);
-  assert.equal(nodeOf(context, 'artifact:clinical-core')!.status, 'OPEN');
-  context.workspace.hypothesisState.hypotheses[0].status = 'rejected';
   refreshControlPlaneV21(context);
   assert.equal(nodeOf(context, 'artifact:clinical-core')!.status, 'SATISFIED');
 });
@@ -625,7 +648,7 @@ test('V2.1.1 未知显式 modality 保留为 typed unsupported，不得吸附到
   ir.outcomes.unresolved = ['拔罐'];
   const context = await prepareContext(ir);
   assert(context.controlPlaneV21!.graph.issues.some((issue) => issue.type === 'UNSUPPORTED_OUTCOME' && issue.message.includes('拔罐')));
-  assert(context.controlPlaneV21!.graph.nodes.some((node) => node.status === 'BLOCKED' && node.target.qualifiers.outcome === 'unresolved:拔罐'));
+  assert(context.controlPlaneV21!.graph.nodes.some((node) => node.status === 'NOT_DELIVERABLE' && node.target.qualifiers.outcome === 'unresolved:拔罐'));
 });
 
 // ---------------------------------------------------------------------------

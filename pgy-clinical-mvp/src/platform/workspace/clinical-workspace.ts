@@ -180,6 +180,12 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     if (event.type === 'treatment.plan.recorded') {
       return this.applyTreatmentPlan(event.payload);
     }
+    if (event.type === 'source.binding.recorded') {
+      return this.applySourceBinding(event.payload);
+    }
+    if (event.type === 'candidate.frontier.set') {
+      return this.applyCandidateFrontierSet(event.payload);
+    }
     if (event.type === 'formula.selection.recorded') {
       return this.applyFormulaSelection(event.payload);
     }
@@ -288,6 +294,13 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         composition: asStringArray(payload.composition),
         name: asString(payload.name),
         sourceAuthority: asString(payload.sourceAuthority) as 'P1' | 'P2_CASE_DERIVED' | undefined,
+        sourceKind: asString(payload.sourceKind) as 'P1_NORMATIVE_SOURCE' | 'P2_CASE_SOURCE' | undefined,
+        retrievalRank: typeof payload.retrievalRank === 'number' ? payload.retrievalRank : undefined,
+        retrievalScore: typeof payload.retrievalScore === 'number' ? payload.retrievalScore : undefined,
+        selectionUnit: asString(payload.selectionUnit) as 'SOURCE_NODE' | 'CASE_VISIT' | undefined,
+        sourceProductRefs: asStringArray(payload.sourceProductRefs),
+        sourceProductNames: asStringArray(payload.sourceProductNames),
+        sourceProductCount: typeof payload.sourceProductCount === 'number' ? payload.sourceProductCount : undefined,
         sourceCaseRef: asString(payload.sourceCaseRef),
         sourceEvidenceRef: asString(payload.sourceEvidenceRef),
         visitRef: asString(payload.visitRef),
@@ -389,6 +402,30 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     coverage.assessmentStatus = 'intentionally_excluded';
     coverage.exclusionReason = reason;
     return true;
+  }
+
+  private applyCandidateFrontierSet(payload: Record<string, unknown>): boolean {
+    const refs = [...new Set(asStringArray(payload.candidateRefs))]
+      .filter((ref) => this.workspace.candidates.some((candidate) => candidate.kind === 'formula' && candidate.id === ref));
+    const before = this.workspace.deliberationState.frontier;
+    const changed = !sameStringArray(before, refs);
+    this.workspace.deliberationState.frontier = refs;
+    // Coverage is a projection of the active selection universe. Assessments remain durable history,
+    // but candidates outside the current Kernel receipt may not stay silently selectable.
+    this.workspace.deliberationState.coverage = this.workspace.deliberationState.coverage
+      .filter((coverage) => refs.includes(coverage.candidateRef));
+    for (const ref of refs) this.ensureDeliberationCoverage(ref);
+    const evidenceBindings = refs.map((candidateRef) => {
+      const evidence = this.workspace.evidenceState.evidenceItems
+        .filter((item) => item.relatedCandidates.includes(candidateRef));
+      return {
+        candidateRef,
+        evidenceRefs: [...new Set(evidence.map((item) => item.id))],
+        sourceRefs: [...new Set(evidence.map((item) => item.sourceRef).filter(Boolean))],
+      };
+    });
+    this.workspace.candidateSetReceipt = { candidateRefs: refs, evidenceBindings, workspaceVersion: this.version };
+    return changed || refs.length > 0;
   }
 
   private applyCandidateFocused(id: string): boolean {
@@ -565,7 +602,6 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         disposition: disposition as TreatmentFormDisposition,
         statement,
         sourceEvidenceRefs: asStringArray(x.sourceEvidenceRefs),
-        sourceAssetRefs: asStringArray(x.sourceAssetRefs),
         advisoryComposition: asStringArray(x.advisoryComposition),
         preparation: asString(x.preparation),
         usage: asString(x.usage),
@@ -618,9 +654,48 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     return true;
   }
 
+  private applySourceBinding(payload: Record<string, unknown>): boolean {
+    const outcome = asString(payload.outcome);
+    const capabilityId = asString(payload.capabilityId);
+    const assetRefs = asStringArray(payload.assetRefs);
+    if (!outcome || !capabilityId || assetRefs.length === 0) return false;
+    const rawHashes = payload.contentHashes && typeof payload.contentHashes === 'object' && !Array.isArray(payload.contentHashes)
+      ? payload.contentHashes as Record<string, unknown>
+      : {};
+    const contentHashes = Object.fromEntries(Object.entries(rawHashes)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+    const receipt = {
+      outcome,
+      capabilityId,
+      assetRefs: [...new Set(assetRefs)],
+      contentHashes,
+      workspaceVersion: typeof payload.workspaceVersion === 'number' ? payload.workspaceVersion : this.events.length + 1,
+    };
+    const receipts = (this.workspace.sourceBindingReceipts ??= {});
+    const existing = receipts[outcome];
+    if (existing && sameValue(existing, receipt)) return false;
+    receipts[outcome] = receipt;
+    return true;
+  }
+
   private applyFormulaSelection(payload: Record<string, unknown>): boolean {
+    const candidateDecisions = Array.isArray(payload.candidateDecisions)
+      ? payload.candidateDecisions
+          .map((raw) => {
+            if (!raw || typeof raw !== 'object') return undefined;
+            const item = raw as Record<string, unknown>;
+            const candidateRef = asString(item.candidateRef);
+            const disposition = asString(item.disposition);
+            if (!candidateRef || !['CONSIDERED', 'EXCLUDED'].includes(disposition ?? '')) return undefined;
+            return { candidateRef, disposition: disposition as 'CONSIDERED' | 'EXCLUDED', rationale: asString(item.rationale) };
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== undefined)
+      : [];
     const next = {
       selectedCandidateRef: asString(payload.selectedCandidateRef),
+      selectedSourceRef: asString(payload.selectedSourceRef),
+      primaryFormulaRef: asString(payload.primaryFormulaRef),
+      candidateDecisions,
       rationale: asString(payload.rationale),
       supportingEvidenceRefs: asStringArray(payload.supportingEvidenceRefs),
       contradictingEvidenceRefs: asStringArray(payload.contradictingEvidenceRefs),
@@ -628,10 +703,19 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const existing = this.workspace.clinicalDecisionSpine.formulaSelection;
     if (existing && sameValue({
       selectedCandidateRef: existing.selectedCandidateRef,
+      selectedSourceRef: existing.selectedSourceRef,
+      primaryFormulaRef: existing.primaryFormulaRef,
+      candidateDecisions: existing.candidateDecisions ?? [],
       rationale: existing.rationale,
       supportingEvidenceRefs: existing.supportingEvidenceRefs,
       contradictingEvidenceRefs: existing.contradictingEvidenceRefs,
     }, next)) return false;
+
+    for (const decision of candidateDecisions) {
+      const coverage = this.ensureDeliberationCoverage(decision.candidateRef);
+      coverage.assessmentStatus = decision.disposition === 'EXCLUDED' ? 'intentionally_excluded' : 'assessed';
+      coverage.exclusionReason = decision.disposition === 'EXCLUDED' ? decision.rationale : undefined;
+    }
     this.workspace.clinicalDecisionSpine.formulaSelection = { ...next, version: this.events.length + 1 };
     return true;
   }
@@ -859,7 +943,7 @@ export function validatePatternAssessmentRefs(
     if (claim.hypothesisRef && !workspace.hypothesisState.hypotheses.some((h) => h.id === claim.hypothesisRef)) {
       errors.push(`unknown hypothesisRef in ${label}: ${claim.hypothesisRef}`);
     }
-    for (const ref of [...claim.supportingEvidenceRefs, ...(claim.contradictingEvidenceRefs ?? [])]) {
+    for (const ref of [...(claim.supportingEvidenceRefs ?? []), ...(claim.contradictingEvidenceRefs ?? [])]) {
       if (!evidenceIds.has(ref)) errors.push(`unknown evidenceRef in ${label}: ${ref}`);
     }
   };
@@ -909,7 +993,7 @@ function collectPatternDispositionedHypothesisRefs(workspace: ClinicalWorkspace)
 /**
  * H15 Treatment Retrieval Gate —— 结构性门禁，不做医学判断。
  * treatmentSpecific 检索必须已具备：clinical question / disease assessment /
- * formal pattern hypotheses / pattern assessment / treatment plan。
+ * pattern assessment / treatment plan。Formal hypothesis bookkeeping is not a retrieval prerequisite.
  * 版本校验只验证 ref/version 是否为当前，不验证医学内容。
  */
 export interface TreatmentRetrievalGateResult {
@@ -925,7 +1009,6 @@ export function checkTreatmentRetrievalContext(
   const missing: string[] = [];
   if (!spine.clinicalQuestion?.statement) missing.push('clinical question');
   if (!spine.diseaseAssessment) missing.push('disease assessment');
-  if (spine.patternHypothesisRefs.length === 0) missing.push('formal pattern hypotheses');
   if (!spine.patternAssessmentRef) missing.push('pattern assessment');
   if (!spine.treatmentPlan) missing.push('treatment plan');
   if (missing.length > 0) return { ok: false, missing };
@@ -1026,9 +1109,9 @@ export function checkCompletionAgainst(workspace: ClinicalWorkspace, requiredArt
 
 /**
  * H15.2 Minimum Clinical Core Completion —— 关闭 Empty-Spine Submit。
- * clinical case 模式下，提交至少需要：clinicalQuestion / diseaseAssessment /
- * formal hypotheses / pattern assessment。不要求 formulaSelection（不破坏只辨证/针灸/膏方）。
- * Runtime 只检查结构，不判断医学答案。
+ * clinical-core 是 treatment retrieval 所需的最小 structured clinical model：clinicalQuestion /
+ * diseaseAssessment / patternAssessment / treatmentPlan。它不要求把所有 alternative hypothesis
+ * 强制终结；review-level uncertainty 可以继续存在并随最终结果输出。Runtime 只检查结构。
  */
 export interface ClinicalCoreResult {
   ok: boolean;
@@ -1040,11 +1123,11 @@ export function checkClinicalCoreCompletion(workspace: ClinicalWorkspace): Clini
   const missing: string[] = [];
   if (!spine.clinicalQuestion?.statement) missing.push('clinicalQuestion');
   if (!spine.diseaseAssessment) missing.push('diseaseAssessment');
-  if (spine.patternHypothesisRefs.length === 0) missing.push('formalHypotheses');
   if (!spine.patternAssessmentRef) missing.push('patternAssessment');
-  // V2.1.1: H12 disposition is part of the clinical-core truth, not a second completion universe.
-  // This prevents graphComplete=true while proposal readiness still rejects unresolved alternatives.
-  if (findUnresolvedFormalHypotheses(workspace).length > 0) missing.push('hypothesisDisposition');
+  if (!spine.treatmentPlan) missing.push('treatmentPlan');
+  // Clinical core means "enough structured clinical meaning to retrieve treatment knowledge".
+  // Alternative hypotheses may remain as review uncertainty; forcing every alternative into a terminal
+  // bookkeeping status before retrieval couples open-world reasoning to deterministic workflow liveness.
   return { ok: missing.length === 0, missing };
 }
 

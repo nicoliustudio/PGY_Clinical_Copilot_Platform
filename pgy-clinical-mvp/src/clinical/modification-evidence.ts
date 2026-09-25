@@ -11,8 +11,9 @@ import type { ClinicalWorkspace, ModificationEvidenceCandidate, ModificationEvid
  *
  * 强制边界：
  * - 只读资产，不做 rule engine、不做 runtime LLM matcher、不做 embedding threshold。
- * - auto_apply_default 一律不执行；所有命中均 ADVISORY + 显式患者证据。
- * - 检索到 ≠ 采用；Agent 自行决定是否写入已有 ModificationPlan。
+ * - auto_apply_default 不作为自由执行开关；所有命中都必须有显式患者证据。
+ * - 本模块只发现 curated ADD rule evidence；是否形成 durable patient-specific modification
+ *   由 Kernel 的 formula.select transaction 在完成 canonical selection 时确定性物化，LLM 无直接写权。
  * - 症状 trigger 必须与规则所属知识上下文（当前 adopted disease/parent）共同成立。
  * - 仅 current + present 的患者症状事实可触发；无/既往/术后症状绝不触发。
  */
@@ -34,8 +35,9 @@ export interface ModificationRule {
 }
 
 export interface ModificationEvidenceResult {
-  result: 'FOUND' | 'NONE';
+  result: 'FOUND' | 'NONE' | 'UNAVAILABLE';
   candidates: ModificationEvidenceCandidate[];
+  reason?: string;
 }
 
 let rulesCache: ModificationRule[] | null = null;
@@ -181,15 +183,23 @@ export function matchModificationEvidence(
   return candidates.length > 0 ? { result: 'FOUND', candidates } : { result: 'NONE', candidates: [] };
 }
 
-/** 从磁盘加载规则并执行确定性匹配（保持既有调用签名不变）。 */
+/**
+ * Availability-aware deterministic rule scan.
+ * Missing rule storage is UNKNOWN/UNAVAILABLE, never equivalent to "searched and no matching rule".
+ */
 export function searchModificationEvidence(workspace: ClinicalWorkspace, topK = 3): ModificationEvidenceResult {
+  const p = join(config.kb.releaseDir, 'medication_rules.json');
+  if (!existsSync(p)) {
+    return { result: 'UNAVAILABLE', candidates: [], reason: `modification rule store unavailable: ${p}` };
+  }
   return matchModificationEvidence(workspace, loadRules(), topK);
 }
 
 /**
  * H15.6 加减证据闭环（Runtime 完成义务，非模型自觉）。
- * 基础方已选后，确定性扫描全部 ADD 规则，形成 FOUND / SEARCHED_NONE / NOT_APPLICABLE 状态。
- * 状态只表达「是否查过、是否命中」，不表达「是否采用」。
+ * 基础方已选后，确定性扫描全部 ADD 规则，形成 FOUND / SEARCHED_NONE / UNAVAILABLE / NOT_APPLICABLE。
+ * 状态只表达「是否真的查过、规则库是否可用、是否命中」；UNAVAILABLE 绝不能冒充 SEARCHED_NONE。
+ * Durable patient-specific plan 由 formula.select transaction 从同一次规则扫描结果物化。
  */
 export function computeModificationEvidenceClosure(
   workspace: ClinicalWorkspace,
@@ -206,11 +216,11 @@ export function computeModificationEvidenceClosure(
   }
 
   // 用足够大的 topK 收集全部命中规则（不因 topK 截断而漏报 matched rule refs）。
-  const result = matchModificationEvidence(workspace, loadRules(), Number.MAX_SAFE_INTEGER);
+  const result = searchModificationEvidence(workspace, Number.MAX_SAFE_INTEGER);
   const matchedRuleRefs = result.candidates.map((c) => c.modificationEvidenceRef).filter(Boolean);
 
   return {
-    status: result.result === 'FOUND' ? 'FOUND' : 'SEARCHED_NONE',
+    status: result.result === 'UNAVAILABLE' ? 'UNAVAILABLE' : result.result === 'FOUND' ? 'FOUND' : 'SEARCHED_NONE',
     baseCandidateRef,
     parentSourceId,
     matchedRuleRefs,

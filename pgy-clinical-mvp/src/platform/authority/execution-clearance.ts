@@ -1,4 +1,4 @@
-import type { ExecutionClearance } from '../../contracts/commit.js';
+import type { ClinicalApplicability, ExecutionClearance } from '../../contracts/commit.js';
 
 export interface CanonicalSafetyDecision {
   status: 'PASS' | 'CAUTION' | 'BLOCK';
@@ -7,11 +7,18 @@ export interface CanonicalSafetyDecision {
 }
 
 /**
- * Safety is independent of formula/product authority.
- * CAUTION 不得被静默塌缩为 PASS；reviewRequired 必须显式产生 REVIEW_REQUIRED。
+ * Execution clearance is a separate axis from product delivery.
+ *
+ * - Safety BLOCK always blocks execution.
+ * - CURRENTLY_NOT_SUITABLE blocks execution but does not erase/deliver-gate the canonical product.
+ * - DEFERRED (e.g. TREAT_FIRST_THEN_FORM) requires clinician review/timing before execution.
+ * - Otherwise canonical safety controls clearance.
  */
-export function executionClearance(safety: CanonicalSafetyDecision): ExecutionClearance {
-  if (safety.status === 'BLOCK') return 'BLOCKED';
-  if (safety.status === 'CAUTION' || safety.reviewRequired) return 'REVIEW_REQUIRED';
+export function executionClearance(
+  safety: CanonicalSafetyDecision,
+  applicability: ClinicalApplicability = 'CURRENTLY_SUITABLE',
+): ExecutionClearance {
+  if (safety.status === 'BLOCK' || applicability === 'CURRENTLY_NOT_SUITABLE') return 'BLOCKED';
+  if (applicability === 'DEFERRED' || safety.status === 'CAUTION' || safety.reviewRequired) return 'REVIEW_REQUIRED';
   return 'CLEARED';
 }

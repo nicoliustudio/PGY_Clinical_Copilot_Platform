@@ -1,22 +1,22 @@
 import { tool, jsonSchema, type ToolSet, type JSONSchema7 } from 'ai';
 import { z } from 'zod';
 import { searchWithDiagnostics, getSource } from '../../knowledge/search.js';
-import { loadIndex } from '../../knowledge/build.js';
 import { searchRuntimeCards, getRuntimeAsset, getRuntimeAssetScope } from '../../knowledge/runtime-catalog.js';
 import { getDiagnosticPatterns } from '../../knowledge/diagnostic-patterns.js';
 import { getDiseaseStandard, getSyndromeStandard, getDiseaseStandards } from '../../knowledge/standard-runtime.js';
 import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
-import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
 import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
+import { bindCanonicalSources } from '../../clinical/source-binding.js';
+import { selectCanonicalFormula } from '../../clinical/formula-selection-transaction.js';
 import { recordSearchReceipt, recordHydrationReceipt, evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import type { EvidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
-import { resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure } from '../../platform/workspace/clinical-workspace.js';
+import { resolveHypothesisRef, resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
+import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure, checkClinicalCoreCompletion } from '../../platform/workspace/clinical-workspace.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
 import { admissibleEffects, effectiveRequestIRV21, effectiveRequiredOutcomesV21, refreshControlPlaneV21, requiredArtifactsFromGraphV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
@@ -112,7 +112,10 @@ function assertDeclaredDeliveryOutcomes(context: RuntimeContext, treatmentPlan?:
   const state = context.controlPlaneV21;
   if (!state || state.compileStatus !== 'COMPILED') return;
   const effectiveIR = effectiveRequestIRV21(state);
-  const contract = [...new Set([...effectiveRequiredOutcomesV21(state), ...effectiveIR.outcomes.preferred])];
+  const contract = [...new Set([
+    ...effectiveRequiredOutcomesV21(state).filter((outcome) => !outcome.startsWith('unresolved:')),
+    ...effectiveIR.outcomes.preferred,
+  ])];
   if (!treatmentPlan) return;
   const declared: unknown[] = [];
   const deliveries = treatmentPlan.treatmentDeliveries;
@@ -134,7 +137,7 @@ function assertDeclaredDeliveryOutcomes(context: RuntimeContext, treatmentPlan?:
             received: value,
             expected: contract,
             outcome: value,
-            allowedNextActions: ['call delivery.adopt with this exact outcome, then retry the deliberation unchanged'],
+            allowedNextActions: ['use one of the exact outcomes already present in the immutable request contract'],
           },
         );
       }
@@ -147,10 +150,78 @@ function assertDeclaredDeliveryOutcomes(context: RuntimeContext, treatmentPlan?:
           path: 'treatmentPlan.treatmentDeliveries[].outcome',
           received: value,
           expected: contract,
-          allowedNextActions: ['copy an exact canonical outcome from the active contract', 'use delivery.adopt only with an exact registered outcome'],
+          allowedNextActions: ['copy an exact canonical outcome from the active contract'],
         },
       );
     }
+  }
+}
+
+export function sourceBoundOutcomes(context: RuntimeContext): Set<string> {
+  const outcomes = new Set<string>();
+  for (const capability of context.capabilities) {
+    for (const obligation of capability.deliveryObligations ?? []) {
+      if (obligation.materialization !== 'SOURCE_BOUND') continue;
+      for (const outcome of capability.provides ?? []) outcomes.add(outcome);
+    }
+  }
+  return outcomes;
+}
+
+/**
+ * SOURCE_BOUND drafts may express patient qualification/applicability, but canonical execution
+ * facts belong exclusively to the hydrated source asset. Strip those model-authored mirrors before
+ * the Workspace can persist them, so there is physically only one durable owner of the protocol.
+ */
+export function normalizeTreatmentPlanFactOwnership(
+  context: RuntimeContext,
+  plan: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!plan) return undefined;
+  const bound = sourceBoundOutcomes(context);
+  const strip = (value: unknown): unknown => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const delivery = { ...(value as Record<string, unknown>) };
+    const outcome = typeof delivery.outcome === 'string' ? delivery.outcome : undefined;
+    if (outcome && bound.has(outcome)) {
+      delete delivery.advisoryComposition;
+      delete delivery.preparation;
+      delete delivery.usage;
+      delete delivery.details;
+      delete delivery.sourceAssetRefs;
+    }
+    return delivery;
+  };
+  const next: Record<string, unknown> = { ...plan };
+  if (Array.isArray(next.treatmentDeliveries)) next.treatmentDeliveries = next.treatmentDeliveries.map(strip);
+  if (next.treatmentFormDecision) next.treatmentFormDecision = strip(next.treatmentFormDecision);
+  return next;
+}
+
+/** Baseline Clinical Core is one semantic transaction, not three model bookkeeping steps. */
+export function assertAtomicClinicalModel(
+  context: RuntimeContext,
+  input: { diseaseAssessment?: unknown; patternAssessment?: unknown; treatmentPlan?: unknown },
+): void {
+  if (context.understanding?.interaction?.mode !== 'clinical') return;
+  const current = checkClinicalCoreCompletion(context.workspace);
+  if (current.ok) return;
+  const touchesCore = Boolean(input.diseaseAssessment || input.patternAssessment || input.treatmentPlan);
+  if (!touchesCore) return;
+  const missingPayload = [
+    !input.diseaseAssessment ? 'diseaseAssessment' : '',
+    !input.patternAssessment ? 'patternAssessment' : '',
+    !input.treatmentPlan ? 'treatmentPlan' : '',
+  ].filter(Boolean);
+  if (missingPayload.length > 0) {
+    throw toolContractError(
+      'CLINICAL_MODEL_INCOMPLETE',
+      `clinical model must be committed atomically; missing payload fields: ${missingPayload.join(', ')}`,
+      {
+        expected: ['diseaseAssessment', 'patternAssessment', 'treatmentPlan'],
+        allowedNextActions: ['submit one workspace.commit_clinical_model call containing the complete clinical model'],
+      },
+    );
   }
 }
 
@@ -172,7 +243,6 @@ function assertV21DeliberationLegality(
   context: RuntimeContext,
   input: {
     diseaseAssessment?: unknown;
-    formulaSelection?: unknown;
     patternAssessment?: unknown;
     hypothesisUpdates?: unknown[];
   },
@@ -182,9 +252,6 @@ function assertV21DeliberationLegality(
   const changesCore = Boolean(input.diseaseAssessment || input.patternAssessment || (input.hypothesisUpdates?.length ?? 0) > 0);
   if (changesCore && !allowed.has('artifact:clinical-core')) {
     throw toolContractError('ILLEGAL_MUTATION_PHASE', 'V2.1 illegal mutation: clinical-core is not currently runnable', { artifact: 'artifact:clinical-core', allowedNextActions: ['advance a currently runnable obligation', 'submit when the canonical graph is complete'] });
-  }
-  if (input.formulaSelection && !allowed.has('artifact:formula-selection')) {
-    throw toolContractError('ILLEGAL_MUTATION_PHASE', 'V2.1 illegal mutation: formula-selection is not currently runnable', { artifact: 'artifact:formula-selection', allowedNextActions: ['satisfy the formula evidence obligation first'] });
   }
 }
 
@@ -202,6 +269,30 @@ function buildRetrievalContext(context: RuntimeContext) {
 type CandidateSearchCacheEntry = { signature: string; candidates: unknown[]; projection: unknown };
 const candidateSearchCache = new Map<string, CandidateSearchCacheEntry>();
 const formulaEvidenceCache = new Map<string, unknown>();
+
+async function hydrateCandidateSetEvidence(
+  context: RuntimeContext,
+  candidateRefs: string[],
+): Promise<Array<{ candidateRef: string; evidence: NonNullable<Awaited<ReturnType<typeof getFormulaEvidence>>> }>> {
+  const hydrated: Array<{ candidateRef: string; evidence: NonNullable<Awaited<ReturnType<typeof getFormulaEvidence>>> }> = [];
+  for (const candidateRef of [...new Set(candidateRefs)]) {
+    const cacheKey = `${context.runId}::${candidateRef}`;
+    let evidence = formulaEvidenceCache.get(cacheKey) as Awaited<ReturnType<typeof getFormulaEvidence>> | undefined;
+    if (evidence === undefined) {
+      evidence = await getFormulaEvidence(candidateRef, context.knowledgeScopes);
+      if (evidence) formulaEvidenceCache.set(cacheKey, evidence);
+    }
+    if (!evidence) {
+      throw toolContractError('CANONICAL_HYDRATION_FAILED', `unable to hydrate selectable formula candidate: ${candidateRef}`, {
+        path: 'candidateRefs',
+        received: candidateRef,
+        allowedNextActions: ['repair the source candidate or remove it before publishing the Kernel candidate set'],
+      });
+    }
+    hydrated.push({ candidateRef, evidence });
+  }
+  return hydrated;
+}
 
 /**
  * proposal.submit 的 DeepSeek 兼容 JSON Schema（H11 最小化）。
@@ -311,8 +402,6 @@ const treatmentPlanSchema = z.object({
     disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
     statement: z.string(),
     sourceEvidenceRefs: z.array(z.string()),
-    /** Canonical Runtime Catalog assets selected as product truth; do not mix generic citations here. */
-    sourceAssetRefs: z.array(z.string()).optional(),
     /** V2.1.1: exact Request Outcome delivered by this item. */
     outcome: z.string(),
     advisoryComposition: z.array(z.string()).optional(),
@@ -326,28 +415,12 @@ const treatmentPlanSchema = z.object({
     disposition: z.enum(['CURRENTLY_SUITABLE', 'TREAT_FIRST_THEN_FORM', 'CURRENTLY_NOT_SUITABLE']),
     statement: z.string(),
     sourceEvidenceRefs: z.array(z.string()),
-    sourceAssetRefs: z.array(z.string()).optional(),
     outcome: z.string().optional(),
     advisoryComposition: z.array(z.string()).optional(),
     preparation: z.string().optional(),
     usage: z.string().optional(),
     details: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
-});
-
-const formulaSelectionSchema = z.object({
-  selectedCandidateRef: z.string().optional(),
-  rationale: z.string().optional(),
-  supportingEvidenceRefs: z.array(z.string()).optional(),
-  contradictingEvidenceRefs: z.array(z.string()).optional(),
-});
-
-const modificationPlanSchema = z.object({
-  items: z.array(z.object({
-    statement: z.string(),
-    patientEvidenceRefs: z.array(z.string()).optional(),
-    sourceEvidenceRefs: z.array(z.string()).optional(),
-  })).optional(),
 });
 
 const formulaReviewSchema = z.object({
@@ -366,6 +439,34 @@ const completionObligationSchema = z.object({
 
 /** Adapter-owned bindings. Agent runtime consumes this registry generically. */
 export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
+  'workspace.commit_clinical_model': (context) => tool({
+    description: 'Baseline Clinical Model transaction. Commit diseaseAssessment + patternAssessment + treatmentPlan together. Submit clinical meaning only; Runtime/Kernel owns durable identities and strips SOURCE_BOUND execution facts before persistence.',
+    inputSchema: z.object({
+      diseaseAssessment: diseaseAssessmentSchema,
+      patternAssessment: patternAssessmentSchema,
+      treatmentPlan: treatmentPlanSchema,
+    }),
+    execute: async ({ diseaseAssessment, patternAssessment, treatmentPlan }) => {
+      assertAtomicClinicalModel(context, { diseaseAssessment, patternAssessment, treatmentPlan });
+      const canonicalTreatmentPlan = normalizeTreatmentPlanFactOwnership(
+        context,
+        treatmentPlan as Record<string, unknown>,
+      );
+      assertV21DeliberationLegality(context, { diseaseAssessment, patternAssessment });
+      assertDeclaredDeliveryOutcomes(context, canonicalTreatmentPlan);
+      const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
+      if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
+      return {
+        accepted: true,
+        updatedArtifacts: ['diseaseAssessment', 'patternAssessment', 'treatmentPlan'],
+        canonicalTreatmentPlan,
+        completionAuthority: context.controlPlaneV21?.compileStatus === 'COMPILED' ? 'CONTROL_PLANE_GRAPH' : 'WORKSPACE',
+        ...(context.controlPlaneV21?.compileStatus === 'COMPILED'
+          ? { canonicalRequiredArtifacts: requiredArtifactsFromGraphV21(context.controlPlaneV21) }
+          : {}),
+      };
+    },
+  }),
   'capability.discover': (context) => tool({
     description: '一次读取当前可发现的能力目录（含激活状态、语义描述与正反例），用于判断是否需要激活业务能力。目录不会改变，不要重复调用。',
     inputSchema: z.object({}),
@@ -405,7 +506,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         return {
           closureRequired: true,
           message:
-            'Clinical closure reached: core formed + non-urgent + candidate/evidence surface available. Broad knowledge.search is curtailed. Proceed to a clinical decision via formula.get_evidence / workspace.record_deliberation / proposal.submit; patient-specific unavailable investigations go to missing_information + reviewRequired (not clarification-only).',
+            'Clinical closure reached: core formed + non-urgent + candidate/evidence surface available. Broad knowledge.search is curtailed. Proceed to a clinical decision via formula.get_evidence / workspace.commit_clinical_model / proposal.submit; patient-specific unavailable investigations go to missing_information + reviewRequired (not clarification-only).',
           skippedQuery: query,
         };
       }
@@ -554,7 +655,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'formula.search_candidates': (context) => tool({
-    description: '两阶段方剂检索第一阶段：根据已完成临床判断（病 + 证 + 治法 projection）召回少量（Top 3~5）基础方候选卡。只返回轻量候选卡 + 知识关联（matched disease/syndrome/treatment principle），不给患者适配评分、不给证型评分。对真正值得比较的候选再调用 formula.get_evidence 展开完整证据。',
+    description: '事务型方剂候选检索：根据当前病 + 证 + 治法 projection 召回小型 CandidateSet，并由 Runtime 在同一事务内完成每个 selectable candidate 的 canonical evidence hydration。返回的是完整选择宇宙；不要再调用 get_evidence / focus 来缩小集合。',
     inputSchema: z.object({ topK: z.number().optional() }),
     execute: async ({ topK }) => {
       // H15.2：状态未变化时复用已有候选集，不重新检索。
@@ -572,7 +673,9 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           candidateRefs: (cached.candidates as { candidateRef?: string }[]).map((c) => c.candidateRef ?? '').filter(Boolean),
           retrievalContext: buildRetrievalContext(context),
         });
-        return { projection: cached.projection, candidates: cached.candidates, reused: 'REUSED_EXISTING_CANDIDATES' };
+        const refs = (cached.candidates as { candidateRef?: string }[]).map((c) => c.candidateRef ?? '').filter(Boolean);
+        const hydratedEvidence = await hydrateCandidateSetEvidence(context, refs);
+        return { projection: cached.projection, candidates: cached.candidates, hydratedEvidence, reused: 'REUSED_EXISTING_CANDIDATES' };
       }
       const { candidates, projection, diagnostics } = await searchFormulaCandidates(context.workspace, context.knowledgeScopes, topK ?? 5);
       candidateSearchCache.set(cacheKey, { signature, candidates, projection });
@@ -581,11 +684,12 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         candidateRefs: candidates.map((c) => c.candidateRef),
         retrievalContext: buildRetrievalContext(context),
       });
-      return { projection, candidates };
+      const hydratedEvidence = await hydrateCandidateSetEvidence(context, candidates.map((candidate) => candidate.candidateRef));
+      return { projection, candidates, hydratedEvidence };
     },
   }),
   'formula.get_evidence': (context) => tool({
-    description: '两阶段方剂检索第二阶段：展开一张 formula.search_candidates 候选卡的完整方剂证据（组成、适应证、来源原文、相关治法、已有 inline modification 文本）。只用于读取本轮检索过的候选，禁止凭模型记忆引用未检索候选。',
+    description: '[legacy/specialist] 展开单个 formula candidate 的 canonical evidence。基础临床主流程由 formula.search_candidates 原子完成 CandidateSet hydration，不应直接调用本工具。',
     inputSchema: z.object({ candidateRef: z.string() }),
     execute: async ({ candidateRef }) => {
       assertKnownCandidateRef(context, candidateRef);
@@ -636,7 +740,10 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     }),
     execute: async ({ sourceId, formulaId, composition, candidateId }) => {
       if (candidateId) {
-        const [sid, fid] = candidateId.split('::');
+        const typed = context.workspace.candidates.find((candidate) => candidate.kind === 'formula' && candidate.id === candidateId);
+        const legacy = candidateId.split('::');
+        const sid = typed?.sourceId ?? legacy[0];
+        const fid = typed?.formulaId ?? legacy[1];
         if (!sid || !fid) {
           recordFormulaValidation(context.runId);
           return { valid: false };
@@ -647,8 +754,17 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           return { valid: false };
         }
         recordFormulaValidation(context.runId, candidateId);
+        if (canonical.sourceAuthority === 'P2_CASE_DERIVED') {
+          return {
+            valid: true,
+            matchedFormulaId: canonical.formulaId,
+            matchedName: canonical.name,
+            matchedSourceId: canonical.sourceId,
+            sourceAuthority: 'P2_CASE_DERIVED',
+          };
+        }
         const { result } = await validateNormativeFormulaCached(
-          { sourceId: sid, formulaId: fid, composition: canonical.composition },
+          { sourceId: sid, formulaId: canonical.formulaId, composition: canonical.composition },
           context.runId,
         );
         return result;
@@ -663,15 +779,30 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.focus_candidates': (context) => tool({
-    description: '从已 present 的候选中，选择哪些候选值得进入正式比较（Deliberation Frontier）。present 只表示「搜索发现过」，不等于必须评估。只 focus 你认为真正值得比较的少数候选。',
-    inputSchema: z.object({ candidateRefs: z.array(z.string()) }),
+    description: '兼容性确认 Kernel-owned CandidateSet。Runtime 已在 formula.search_candidates 后冻结完整候选集合并自动展开 canonical evidence；这里不允许模型通过遗漏候选来改变 selection universe。需要移除候选时必须显式记录排除理由。',
+    inputSchema: z.object({ candidateRefs: z.array(z.string()).min(1) }),
     execute: async ({ candidateRefs }) => {
-      for (const ref of candidateRefs) assertKnownCandidateRef(context, ref);
-      return { candidateRefs };
+      const requested = [...new Set(candidateRefs as string[])];
+      for (const ref of requested) assertKnownCandidateRef(context, ref);
+      const receiptRefs = context.workspace.candidateSetReceipt?.candidateRefs
+        ?? context.workspace.candidates.filter((candidate) => candidate.kind === 'formula').map((candidate) => candidate.id);
+      const missing = receiptRefs.filter((ref) => !requested.includes(ref));
+      const foreign = requested.filter((ref) => !receiptRefs.includes(ref));
+      if (missing.length > 0 || foreign.length > 0) {
+        throw toolContractError('CANDIDATE_SET_IMMUTABLE', 'frontier membership is Kernel-owned; a retrieved selectable candidate may leave only through an explicit exclusion transaction', {
+          details: [
+            ...(missing.length ? [`silently omitted candidates: ${missing.join(', ')}`] : []),
+            ...(foreign.length ? [`unknown-to-receipt candidates: ${foreign.join(', ')}`] : []),
+          ],
+          allowedNextActions: ['use the complete Kernel candidate set or explicitly exclude a candidate with evidence'],
+        });
+      }
+      const hydratedEvidence = await hydrateCandidateSetEvidence(context, receiptRefs);
+      return { candidateRefs: receiptRefs, hydratedEvidence, reused: true };
     },
   }),
   'workspace.record_candidate_assessment': (context) => tool({
-    description: '记录一个 formula candidate 针对某个 hypothesis 的临床评估（candidate × hypothesis 关系）。只能引用 workspace 中真实存在的 candidateRef / hypothesisRef / evidenceRefs。禁止伪造 identity，禁止用数值评分代替临床判断。优先使用 workspace.record_deliberation 一次提交多个评估。',
+    description: '[legacy] 细粒度 candidate × hypothesis 评估。基础临床主流程不暴露；候选 disposition 与最终选择统一由 formula.select 闭世界事务提交。',
     inputSchema: z.object({
       candidateRef: z.string(),
       hypothesisRef: z.string(),
@@ -688,7 +819,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_candidate_exclusion': (context) => tool({
-    description: '记录一个 candidate 被有意排除（不做评估）的原因。优先使用 workspace.record_deliberation 一次提交多个排除。',
+    description: '[legacy] 单候选排除记录。基础临床主流程不暴露；候选 disposition 与最终选择统一由 formula.select 闭世界事务提交。',
     inputSchema: z.object({ candidateRef: z.string(), reason: z.string() }),
     execute: async ({ candidateRef, reason }) => {
       assertKnownCandidateRef(context, candidateRef);
@@ -696,19 +827,8 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'workspace.record_deliberation': (context) => tool({
-    description: '一次批量提交 Deliberation 与 Clinical Decision Spine 状态：focusedCandidates、assessments、exclusions、hypothesisUpdates、resolvedUncertaintyRefs、diseaseAssessment（辨病结果）、treatmentPlan（治法/治疗目标，若请求要求具体治疗形式交付则含 treatmentDeliveries[]；sourceEvidenceRefs 是普通支持证据，sourceAssetRefs 只放已通过 knowledge.get_asset 水合、准备绑定为产品真相的 canonical asset id；每项声明 form / disposition / statement / outcome）、formulaSelection（选方）、modificationPlan（加减）、formulaReview（方证复核）、patternAssessment（患者级辨证结构：primary/secondary/sharedMechanisms/rootBranch/currentDominantMechanism/treatmentTarget）。引用必须真实存在。治疗知识检索（formula/search_cards）需要 disease assessment + formal hypotheses + pattern assessment + treatment plan 已形成后才能执行；先完成辨证与治法，再检索方剂。',
+    description: '一次批量提交 clinical-model reasoning / prepared delivery draft：hypothesisUpdates、diseaseAssessment、treatmentPlan、formulaReview、patternAssessment。候选集合由 Runtime 建立；候选 disposition 与最终选方必须一次性提交给 formula.select。SOURCE_BOUND adoption 必须调用 source.bind。',
     inputSchema: z.object({
-      focusedCandidates: z.array(z.string()).optional(),
-      assessments: z.array(z.object({
-        candidateRef: z.string(),
-        hypothesisRef: z.string(),
-        supportingEvidenceRefs: z.array(z.string()).optional(),
-        contradictingEvidenceRefs: z.array(z.string()).optional(),
-        unresolvedQuestions: z.array(z.string()).optional(),
-        assessmentSummary: z.string().optional(),
-        assessmentEvidenceRefs: z.array(z.string()).optional(),
-      })).optional(),
-      exclusions: z.array(z.object({ candidateRef: z.string(), reason: z.string() })).optional(),
       hypothesisUpdates: z.array(z.object({
         hypothesisRef: z.string(),
         status: z.enum(['active', 'alternative', 'rejected', 'preserved_as_uncertainty']).optional(),
@@ -719,70 +839,41 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       remainingDecisionChangingUnknowns: z.array(z.string()).optional(),
       diseaseAssessment: diseaseAssessmentSchema.optional(),
       treatmentPlan: treatmentPlanSchema.optional(),
-      formulaSelection: formulaSelectionSchema.optional(),
-      modificationPlan: modificationPlanSchema.optional(),
       formulaReview: formulaReviewSchema.optional(),
       completionObligation: completionObligationSchema.optional(),
       patternAssessment: patternAssessmentSchema.optional(),
     }),
-    execute: async ({ focusedCandidates, assessments, exclusions, hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaSelection, modificationPlan, formulaReview, completionObligation, patternAssessment }) => {
+    execute: async ({ hypothesisUpdates, resolvedUncertaintyRefs, remainingDecisionChangingUnknowns, diseaseAssessment, treatmentPlan, formulaReview, completionObligation, patternAssessment }) => {
+      assertAtomicClinicalModel(context, { diseaseAssessment, patternAssessment, treatmentPlan });
+      const canonicalTreatmentPlan = normalizeTreatmentPlanFactOwnership(
+        context,
+        treatmentPlan as Record<string, unknown> | undefined,
+      );
       assertV21DeliberationLegality(context, {
         diseaseAssessment,
-        formulaSelection,
         patternAssessment,
         hypothesisUpdates,
       });
-      assertDeclaredDeliveryOutcomes(context, treatmentPlan as Record<string, unknown> | undefined);
-      for (const ref of focusedCandidates ?? []) assertKnownCandidateRef(context, ref);
-      for (const a of assessments ?? []) {
-        const errors = validateCandidateAssessmentRefs(context.workspace, {
-          candidateRef: a.candidateRef,
-          hypothesisRef: a.hypothesisRef,
-          supportingEvidenceRefs: a.supportingEvidenceRefs ?? [],
-          contradictingEvidenceRefs: a.contradictingEvidenceRefs ?? [],
-          assessmentEvidenceRefs: a.assessmentEvidenceRefs ?? [],
-        });
-        if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
-      }
-      for (const x of exclusions ?? []) assertKnownCandidateRef(context, x.candidateRef);
+      assertDeclaredDeliveryOutcomes(context, canonicalTreatmentPlan);
       for (const u of hypothesisUpdates ?? []) assertKnownHypothesisRef(context, u.hypothesisRef);
       if (patternAssessment) {
         const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
         if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
-      }
-      if (formulaSelection?.selectedCandidateRef) {
-        assertKnownCandidateRef(context, formulaSelection.selectedCandidateRef);
-        // SOURCE_SIBLING_COMPLETENESS must exist before proposal readiness, not only after submit.
-        // Otherwise AT_LEAST/source-completeness obligations can never close inside the agent loop.
-        const selected = context.workspace.candidates.find((c) => c.id === formulaSelection.selectedCandidateRef);
-        if (selected?.sourceId?.startsWith('P1:')) {
-          try {
-            const index = await loadIndex();
-            const set = hydrateSourceFormulaSet(index.docs, formulaSelection.selectedCandidateRef);
-            if (set) context.workspace.sourceFormulaSet = set;
-          } catch {
-            // Fail closed: no synthetic siblings. Readiness/cardinality remains unsatisfied when the canonical store is unavailable.
-          }
-        }
       }
       // H15.5 compact receipt：不回显完整 payload，只返回本次写入的 artifact 摘要 + 剩余未决项。
       const updatedArtifacts: string[] = [];
       if (diseaseAssessment) updatedArtifacts.push('diseaseAssessment');
       if (patternAssessment) updatedArtifacts.push('patternAssessment');
       if (treatmentPlan) updatedArtifacts.push('treatmentPlan');
-      if (formulaSelection) updatedArtifacts.push('formulaSelection');
-      if (modificationPlan) updatedArtifacts.push('modificationPlan');
       if (formulaReview) updatedArtifacts.push('formulaReview');
       const graphOwnsCompletion = context.controlPlaneV21?.compileStatus === 'COMPILED';
       if (completionObligation && !graphOwnsCompletion) updatedArtifacts.push('completionObligation');
-      if (focusedCandidates && focusedCandidates.length > 0) updatedArtifacts.push('focusedCandidates');
-      if (assessments && assessments.length > 0) updatedArtifacts.push('candidateAssessments');
-      if (exclusions && exclusions.length > 0) updatedArtifacts.push('candidateExclusions');
       if (hypothesisUpdates && hypothesisUpdates.length > 0) updatedArtifacts.push('hypotheses');
       if (resolvedUncertaintyRefs && resolvedUncertaintyRefs.length > 0) updatedArtifacts.push('resolvedUncertainty');
       return {
         accepted: true,
         updatedArtifacts,
+        ...(canonicalTreatmentPlan ? { canonicalTreatmentPlan } : {}),
         remainingDecisionChangingUnknowns: remainingDecisionChangingUnknowns ?? [],
         ...(graphOwnsCompletion ? {
           completionAuthority: 'CONTROL_PLANE_GRAPH',
@@ -806,7 +897,84 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       if (allowed && !allowed.has('artifact:clinical-core')) {
         throw toolContractError('ILLEGAL_MUTATION_PHASE', 'V2.1 illegal mutation: hypothesis creation is closed after clinical-core completion', { artifact: 'artifact:clinical-core', allowedNextActions: ['submit or advance a currently runnable delivery obligation'] });
       }
-      return input;
+      const resolved = input.hypotheses.map((hypothesis) => {
+        const hypothesisRef = resolveHypothesisRef(context.workspace, hypothesis);
+        return hypothesisRef ? { ...hypothesis, hypothesisRef } : hypothesis;
+      });
+      return { hypotheses: resolved };
+    },
+  }),
+  'formula.select': (context) => tool({
+    description: 'Closed-world clinical selection transaction. Choose one candidate from the Kernel CandidateSet and account for every candidate exactly once as CONSIDERED or EXCLUDED. Submit clinical rationale only; Runtime owns evidence/source identities, hydrates the complete source bundle, and commits durable selection.',
+    inputSchema: z.object({
+      candidateRef: z.string().min(1),
+      candidateDecisions: z.array(z.object({
+        candidateRef: z.string().min(1),
+        disposition: z.enum(['CONSIDERED', 'EXCLUDED']),
+        rationale: z.string().optional(),
+      })).min(1),
+      rationale: z.string().optional(),
+    }),
+    execute: async (input) => {
+      const allowed = v21AdmissibleCommitTypes(context);
+      if (allowed && !allowed.has('artifact:formula-selection')) {
+        return toolFailure('ILLEGAL_MUTATION_PHASE', 'formula selection is not currently runnable', {
+          artifact: 'artifact:formula-selection',
+          allowedNextActions: ['establish the Kernel CandidateSet with formula.search_candidates first'],
+        });
+      }
+      const result = await selectCanonicalFormula(context, input);
+      if (!result.ok) {
+        return toolFailure(result.code, `formula selection failed: ${result.code}`, {
+          details: result.details,
+          allowedNextActions: result.code === 'FORMULA_EVIDENCE_INCOMPLETE'
+            ? ['establish a complete CandidateSetReceipt before selecting']
+            : result.code === 'CANDIDATE_DELIBERATION_INCOMPLETE'
+              ? ['submit exactly one disposition for every candidate in the current CandidateSet']
+              : ['repair the deterministic selection precondition'],
+        });
+      }
+      refreshControlPlaneV21(context);
+      return result;
+    },
+  }),
+  'source.bind': (context) => tool({
+    description: 'Kernel SOURCE_BOUND transaction for one exact outcome. The model supplies hydrated asset ids; Runtime validates provider ownership, hydration receipts, identity and content hash, writes an immutable SourceBindingReceipt, and deterministically commits delivery in the same transaction.',
+    inputSchema: z.object({
+      outcome: z.string().min(1),
+      assetRefs: z.array(z.string().min(1)).min(1),
+    }),
+    execute: async ({ outcome, assetRefs }) => {
+      const result = bindCanonicalSources(context, outcome, assetRefs);
+      if (!result.ok) {
+        return toolFailure(result.code, `source binding failed for ${outcome}: ${result.code}`, {
+          outcome,
+          details: result.details,
+          allowedNextActions: result.code === 'SOURCE_BINDING_MISMATCH'
+            ? ['hydrate the exact canonical asset for this outcome with the provider-declared hydration tool, then call source.bind again']
+            : ['repair the deterministic source binding precondition'],
+        });
+      }
+      refreshControlPlaneV21(context);
+      // Phase 5：source binding 完成后，delivery.commit 是确定性的机械动作。
+      // Runtime 直接推进到 terminal delivery，不再让 LLM 记得"再调一次 delivery.commit"。
+      const commitResult = await commitDeliveryOutcome(context, outcome);
+      refreshControlPlaneV21(context);
+      if (!commitResult.ok) {
+        return toolFailure(commitResult.code, `delivery commit failed for ${outcome}: ${commitResult.code}`, {
+          outcome,
+          details: commitResult.details,
+          allowedNextActions: ['repair the deterministic commit precondition, then retry delivery.commit'],
+        });
+      }
+      return {
+        ok: true,
+        reused: result.reused,
+        receipt: result.receipt,
+        commitId: commitResult.record.commitId,
+        deliveryStatus: commitResult.record.deliveryStatus,
+        executionClearance: commitResult.record.executionClearance,
+      };
     },
   }),
   'delivery.adopt': (context) => tool({
@@ -893,9 +1061,9 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           allowedNextActions: result.code === 'MISSING_REQUIRED_FIELDS'
             ? ['complete the provider-declared required draft/source fields, then retry delivery.commit']
             : result.code === 'SOURCE_BINDING_MISMATCH'
-              ? ['select the intended hydrated canonical asset explicitly in treatmentPlan.treatmentDeliveries[].sourceAssetRefs, then retry delivery.commit']
+              ? ['call source.bind with the intended hydrated canonical asset id, then retry delivery.commit']
               : result.code === 'CANONICAL_HYDRATION_FAILED'
-                ? ['hydrate the selected canonical source with the provider-declared hydration tool, persist its asset id in sourceAssetRefs, then retry delivery.commit']
+                ? ['hydrate the selected canonical source with the provider-declared hydration tool, call source.bind, then retry delivery.commit']
                 : ['repair the deterministic commit precondition, then retry delivery.commit'],
         });
       }

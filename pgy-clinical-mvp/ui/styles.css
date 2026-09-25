@@ -70,8 +70,49 @@ img.brand-mark, img.empty-logo, img.bot-avatar { background: transparent; border
 .case-title { min-width: 0; }
 .case-title strong { display: block; font-size: 14px; }
 .case-title span { font-size: 11px; color: var(--muted); }
-.topbar-right { display: flex; gap: 8px; align-items: center; }
+.topbar-right { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .model-chip, .safety-chip { font-size: 11px; padding: 6px 10px; border-radius: 999px; background: #eef4f0; color: #4d5a52; }
+
+/* ---------- 右上角模型 / 推理开关（真实热切换，服务端确认后回写） ---------- */
+.model-control { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.model-control.busy { opacity: .6; pointer-events: none; }
+.model-select {
+  border: 1px solid var(--line); background: #fff; border-radius: 9px;
+  padding: 5px 8px; font-size: 11px; color: #33413a; max-width: 220px; min-width: 0;
+  text-overflow: ellipsis;
+}
+.model-select:focus { border-color: #9ebdad; box-shadow: 0 0 0 3px #edf5f0; }
+.thinking-switch { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #46514b; cursor: pointer; white-space: nowrap; }
+.thinking-switch.disabled { cursor: not-allowed; color: var(--muted); }
+.thinking-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.thinking-track {
+  width: 30px; height: 17px; border-radius: 999px; background: #d7ded9; position: relative;
+  transition: background .18s; flex: none;
+}
+.thinking-thumb {
+  position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%;
+  background: #fff; transition: transform .18s; box-shadow: 0 1px 2px rgba(0,0,0,.18);
+}
+.thinking-switch input:checked + .thinking-track { background: var(--accent-2); }
+.thinking-switch input:checked + .thinking-track .thinking-thumb { transform: translateX(13px); }
+.thinking-switch.disabled .thinking-track { background: #e6eae7; }
+.thinking-switch.disabled input:checked + .thinking-track { background: #b6c6bd; }
+
+/* 思考预算：实测被忽略的模型禁用整个控件（不是可点但无效的假旋钮） */
+.budget-field { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #46514b; white-space: nowrap; }
+.budget-field.disabled { color: var(--muted); cursor: not-allowed; }
+.budget-select {
+  border: 1px solid var(--line); background: #fff; border-radius: 9px;
+  padding: 5px 6px; font-size: 11px; color: #33413a; max-width: 120px;
+}
+.budget-select:focus { border-color: #9ebdad; box-shadow: 0 0 0 3px #edf5f0; }
+.budget-select:disabled { background: #f3f5f4; color: var(--muted); }
+
+@media (max-width: 860px) {
+  .model-select { max-width: 132px; }
+  .budget-label { display: none; }
+  .budget-select { max-width: 92px; }
+}
 .safety-chip.routine { background: #e8f5ed; color: #187448; }
 .safety-chip.uncertain { background: #fff3dc; color: #9a6a1b; }
 .safety-chip.urgent { background: #feeceb; color: #a83e3b; }

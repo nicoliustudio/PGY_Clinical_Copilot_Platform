@@ -1,5 +1,5 @@
-import { generateText } from 'ai';
-import { llmModel, fastModel } from '../../model/adapter.js';
+import { generateText, type LanguageModel } from 'ai';
+import { resolveLanguageModel } from '../../model/model-registry.js';
 import { extractJson } from '../../util/json.js';
 import type { ModelPort, StructuredRequest } from '../../ports/model.js';
 
@@ -62,12 +62,13 @@ export async function generateStructuredWithRetry<T>(
  * AI SDK 对 ModelPort 的实现。
  * 「from 'ai'」只允许出现在这里（以及 Agent Runtime 宿主），不进入 clinical/knowledge。
  */
-function createModelPort(model: typeof llmModel): ModelPort {
+export function createAiSdkModelPort(resolveModel: () => LanguageModel): ModelPort {
   return {
     async generateStructured<T>(request: StructuredRequest<T>) {
       return generateStructuredWithRetry(request, async ({ system, prompt }) => {
         const result = await generateText({
-          model,
+          // 每次调用按当前活动模型解析：前端切换模型后下一次调用即生效，无需重启。
+          model: resolveModel(),
           system,
           prompt,
           timeout: { totalMs: 180_000 },
@@ -78,7 +79,7 @@ function createModelPort(model: typeof llmModel): ModelPort {
   };
 }
 
-/** deep 模型端口：Primary Agent / Understanding 使用。 */
-export const aiSdkModelPort: ModelPort = createModelPort(llmModel);
-/** fast 模型端口：Clinical Planner 使用。 */
-export const aiSdkFastModelPort: ModelPort = createModelPort(fastModel);
+/** Legacy/global port. Production run composition uses run-scoped role-specific ports. */
+export const aiSdkModelPort: ModelPort = createAiSdkModelPort(resolveLanguageModel);
+/** Legacy/global fast port. Production run composition pins control vs clinical roles separately. */
+export const aiSdkFastModelPort: ModelPort = createAiSdkModelPort(resolveLanguageModel);

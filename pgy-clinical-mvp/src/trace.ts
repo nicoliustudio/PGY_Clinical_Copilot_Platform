@@ -41,6 +41,8 @@ export interface RunTrace {
   activeSkills?: string[];
   skillVersions?: SkillVersion[];
   skillPromptSections?: string[];
+  modelRoles?: RuntimeSnapshot['modelRoles'];
+  modelExecution?: RuntimeSnapshot['modelExecution'];
   modelProfileId?: string; promptHash?: string; capabilities?: string[]; skills?: string[]; knowledgeScopes?: string[];
   agentLoop?: AgentLoopTrace;
   clinicalStrategy?: ClinicalStrategy;
@@ -112,6 +114,8 @@ export function finishTrace(runId: string, args: {
   if (args.commits) trace.commits = [...args.commits];
   if (args.snapshot) {
     trace.modelProfileId = args.snapshot.modelProfileId; trace.promptHash = args.snapshot.promptHash;
+    trace.modelRoles = args.snapshot.modelRoles;
+    trace.modelExecution = args.snapshot.modelExecution;
     trace.capabilities = args.snapshot.capabilities; trace.skills = args.snapshot.skills;
     trace.knowledgeScopes = args.snapshot.knowledgeScopes;
     trace.activeSkills = args.snapshot.activeSkills;

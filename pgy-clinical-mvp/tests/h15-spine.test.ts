@@ -19,7 +19,6 @@ test('H15 gate: empty spine is incomplete', () => {
   assert.equal(result.ok, false);
   assert.ok(result.missing.includes('clinical question'));
   assert.ok(result.missing.includes('disease assessment'));
-  assert.ok(result.missing.includes('formal pattern hypotheses'));
   assert.ok(result.missing.includes('pattern assessment'));
   assert.ok(result.missing.includes('treatment plan'));
 });
@@ -94,18 +93,18 @@ test('H15.2 minimum core: empty spine is incomplete', () => {
   const ws = createClinicalWorkspace();
   const result = checkClinicalCoreCompletion(ws);
   assert.equal(result.ok, false);
-  assert.deepEqual(result.missing, ['clinicalQuestion', 'diseaseAssessment', 'formalHypotheses', 'patternAssessment']);
+  assert.deepEqual(result.missing, ['clinicalQuestion', 'diseaseAssessment', 'patternAssessment', 'treatmentPlan']);
 });
 
-test('H15.2 minimum core: only-differentiate spine passes without treatmentPlan', () => {
+test('H15.2 minimum core: structured clinical model requires treatmentPlan', () => {
   const ws = createClinicalWorkspace();
   const store = new ClinicalWorkspaceStore(ws, 'run_test');
   ws.clinicalDecisionSpine.clinicalQuestion = { statement: '当前应辨何证', version: 0 };
   store.append('disease.assessment.recorded', { statement: '痛经', evidenceRefs: ['CF_001'] });
   store.append('hypothesis.presented', { id: 'H_a', label: '气滞血瘀', origin: 'agent_reasoning' });
   store.append('pattern.assessment.recorded', { primary: { statement: '血瘀为主', hypothesisRef: 'H_a' } });
-  // 未写 treatmentPlan，但 minimum core 不要求 treatmentPlan。
-  assert.deepEqual(checkClinicalCoreCompletion(ws), { ok: true, missing: [] });
+  // 未写 treatmentPlan：clinical core 尚不完整（open alternative 是 review uncertainty，不是 workflow blocker）。
+  assert.deepEqual(checkClinicalCoreCompletion(ws), { ok: false, missing: ['treatmentPlan'] });
 });
 
 test('H15.2 readiness: primary without patient evidence is incomplete', () => {

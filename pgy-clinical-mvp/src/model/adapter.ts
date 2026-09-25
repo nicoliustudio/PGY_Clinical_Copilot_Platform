@@ -1,17 +1,9 @@
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { config } from '../config.js';
 
-const provider = createOpenAICompatible({
-  name: 'token-plan',
-  baseURL: config.llm.baseURL,
-  apiKey: config.llm.apiKey,
-});
-
-// AI SDK LanguageModel，供 ToolLoopAgent / generateText 使用
-export const llmModel = provider(config.llm.deepModel);
-
-// fast 模型：供 Clinical Planner 等轻量结构化调用使用，降低策划延迟与 token 开销
-export const fastModel = provider(config.llm.fastModel);
+/**
+ * 语言模型（chat/agent）不自在此处创建：它们由 `model/model-registry.ts` 按当前活动选择
+ * 在每次调用时解析，从而支持前端热切换。本模块只负责与模型选择无关的向量化 / 重排序。
+ */
 
 /**
  * 批量向量化。返回与输入等长的向量数组（每项维度 = EMBEDDING_DIMENSIONS）。

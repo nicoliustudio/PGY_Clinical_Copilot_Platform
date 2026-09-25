@@ -27,6 +27,7 @@ function coreCompleteWorkspace(): { ws: ClinicalWorkspace; store: ClinicalWorksp
   store.append('hypothesis.presented', { id: 'H_a', label: '气滞血瘀', origin: 'agent_reasoning' });
   store.append('hypothesis.selected', { id: 'H_a' });
   store.append('pattern.assessment.recorded', { primary: { statement: '血瘀为主', hypothesisRef: 'H_a' } });
+  store.append('treatment.plan.recorded', { primaryPrinciple: '活血化瘀', treatmentTarget: '止痛' });
   return { ws, store };
 }
 

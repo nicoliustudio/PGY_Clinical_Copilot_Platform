@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { config } from '../config.js';
-import { runCase } from '../composition/runtime.js';
+import { resetClinicalRuntimeCache, runCase } from '../composition/runtime.js';
+import { describeActiveModel, applyModelSelection, getModelCatalog, snapshotModelExecution, BUDGET_LEVELS, type ThinkingBudgetLevel, type RunModelRequest } from '../model/model-registry.js';
 import { discoverCapabilityManifests, loadSkills } from '../composition/load-assets.js';
 import { loadIndex } from '../knowledge/build.js';
 import { buildKnowledgeSourceView, buildSessionView, buildTraceView, type SessionView, type TraceView } from '../ui/views.js';
@@ -59,6 +60,15 @@ let runStore: RunStore | null = null;
 function runSummaryOf(record: RunRecord): Omit<RunRecord, 'session' | 'trace'> {
   const { session: _session, trace: _trace, ...rest } = record;
   return rest;
+}
+
+function runModelRequestFromBody(body: Record<string, unknown>): RunModelRequest | undefined {
+  if (typeof body.modelOptionId !== 'string') return undefined;
+  return {
+    optionId: body.modelOptionId,
+    ...(typeof body.thinking === 'boolean' ? { thinking: body.thinking } : {}),
+    ...(typeof body.budget === 'string' ? { budget: body.budget as ThinkingBudgetLevel } : {}),
+  };
 }
 
 /** 内存热态 + 落盘历史合并（按 runId 去重，内存优先，按开始时间倒序）。 */
@@ -166,6 +176,42 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: 
   res.end(content);
 }
 
+/** 模型目录 + 活动选择（前端右上角切换用）。 */
+function handleModels(res: ServerResponse): void {
+  noStore(res);
+  json(res, 200, getModelCatalog());
+}
+
+/**
+ * 应用模型 / 推理开关选择。
+ * 返回服务端**确认后**的完整目录快照，前端据此渲染，因此不存在「本地改了、服务端没变」的假切换。
+ */
+async function handleModelSelect(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(req);
+  } catch {
+    return json(res, 400, { detail: '请求体不是合法 JSON' });
+  }
+  const optionId = typeof body.optionId === 'string' ? body.optionId.trim() : '';
+  if (!optionId) return json(res, 400, { detail: '缺少 optionId' });
+  const thinking = typeof body.thinking === 'boolean' ? body.thinking : undefined;
+  const budgetRaw = typeof body.budget === 'string' ? body.budget.trim() : '';
+  if (budgetRaw && !BUDGET_LEVELS.some((level) => level.value === budgetRaw)) {
+    return json(res, 400, { detail: `未知思考预算档位：${budgetRaw}` });
+  }
+  const budget = budgetRaw ? (budgetRaw as ThinkingBudgetLevel) : undefined;
+
+  const applied = applyModelSelection(optionId, thinking, budget);
+  if (!applied.ok) return json(res, 400, { code: applied.code, detail: applied.message });
+
+  // 模型身份变化后重建 Runtime 装配，保证 trace 快照记录的模型与实际调用一致。
+  resetClinicalRuntimeCache();
+  noStore(res);
+  console.log(`[pgy] 模型切换：${describeActiveModel()}`);
+  json(res, 200, getModelCatalog());
+}
+
 async function handleHealth(res: ServerResponse): Promise<void> {
   let knowledge: { ok: boolean; version?: string; docCount?: number; error?: string };
   try {
@@ -182,7 +228,7 @@ async function handleHealth(res: ServerResponse): Promise<void> {
     ok: true,
     service: 'pgy-clinical-copilot',
     runtimeMode: config.runtime.mode,
-    llm: { fast: config.llm.fastModel, deep: config.llm.deepModel },
+    llm: getModelCatalog().active,
     knowledge,
     capabilities: manifests.map((m) => ({ id: m.id, version: m.version, displayName: m.displayName, enabled: m.enabled !== false })),
     skills: skills.map((s) => ({ id: s.id, version: s.version })),
@@ -200,8 +246,17 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
   }
   const input = typeof body.input === 'string' ? body.input : '';
   const mode = body.mode === 'classic' ? 'classic' : 'harness';
+  const modelRequest = runModelRequestFromBody(body);
   if (!input.trim()) {
     json(res, 400, { detail: '请输入病例内容' });
+    return;
+  }
+
+  let modelExecution;
+  try {
+    modelExecution = snapshotModelExecution(modelRequest);
+  } catch (error) {
+    json(res, 400, { detail: error instanceof Error ? error.message : String(error) });
     return;
   }
 
@@ -213,7 +268,15 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
   });
 
   const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  sse(res, 'meta', { requestId, mode, model: config.llm.deepModel, asrEnabled: isAsrEnabled() });
+  sse(res, 'meta', {
+    requestId,
+    mode,
+    model: modelExecution.clinicalProfile.id,
+    modelOptionId: modelExecution.clinical.optionId,
+    controlModelOptionId: modelExecution.control.optionId,
+    controlFallbackReason: modelExecution.controlFallbackReason,
+    asrEnabled: isAsrEnabled(),
+  });
 
   const startedAt = new Date().toISOString();
   let rec: RunRecord | undefined;
@@ -221,6 +284,7 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
   try {
     const result = await runCase(input, {
       mode,
+      modelExecution,
       onEvent: (event) => {
         if (event.type === 'tool-call') sse(res, 'tool', event.toolCall);
         else if (event.type === 'workspace') sse(res, 'workspace', { events: event.events });
@@ -252,7 +316,7 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
       startedAt,
       finishedAt: new Date().toISOString(),
       status: 'error',
-      model: config.llm.deepModel,
+      model: trace?.modelRoles?.clinical.id ?? trace?.modelProfileId ?? describeActiveModel(),
       error: message,
       trace: trace ? buildTraceView(trace) : undefined,
     };
@@ -302,10 +366,12 @@ async function handleEvalRun(req: IncomingMessage, res: ServerResponse): Promise
   }
   const input = typeof body.input === 'string' ? body.input : '';
   const caseKey = typeof body.caseKey === 'string' ? body.caseKey : '';
+  const modelRequest = runModelRequestFromBody(body);
   if (!input.trim()) return json(res, 400, { detail: '请输入病例内容' });
 
   try {
-    const result = await runCase(input);
+    const modelExecution = snapshotModelExecution(modelRequest);
+    const result = await runCase(input, { modelExecution });
     const session = buildSessionView(result);
 
     let gold: ReturnType<typeof getGold> | undefined;
@@ -380,6 +446,8 @@ export async function startServer(port = Number(process.env.APP_PORT ?? 8787)): 
         return json(res, 403, { detail: '仅管理员可访问该功能' });
       }
 
+      if (pathname === '/api/models' && req.method === 'GET') return handleModels(res);
+      if (pathname === '/api/models/select' && req.method === 'POST') return await handleModelSelect(req, res);
       if (pathname === '/api/run/stream' && req.method === 'POST') return await handleRunStream(req, res);
       if (pathname === '/api/traces' || pathname.startsWith('/api/traces/')) return await handleTraces(req, res, pathname);
       if (pathname === '/api/eval/cases' && req.method === 'GET') return await handleEvalCases(res);

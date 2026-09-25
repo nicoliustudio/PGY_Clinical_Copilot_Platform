@@ -201,8 +201,10 @@ export interface TreatmentFormDecision {
   disposition: TreatmentFormDisposition;
   statement: string;
   sourceEvidenceRefs: string[];
-  /** Canonical Runtime Catalog assets selected for source-bound product materialization.
-   * This is distinct from generic supporting evidence. Kernel validates hydration receipts before commit. */
+  /**
+   * @deprecated Migration-only legacy field. It has no authority in SOURCE_BOUND materialization.
+   * Canonical product membership is owned exclusively by Kernel SourceBindingReceipt from source.bind.
+   */
   sourceAssetRefs?: string[];
   /** Case-derived advisory only; never changes BaseFormula authority. */
   advisoryComposition?: string[];
@@ -232,9 +234,26 @@ export interface TreatmentPlan {
   version: number;
 }
 
-export interface FormulaSelection {
-  selectedCandidateRef?: string;
+export type FormulaCandidateDisposition = 'CONSIDERED' | 'EXCLUDED';
+
+export interface FormulaCandidateDecision {
+  candidateRef: string;
+  disposition: FormulaCandidateDisposition;
+  /** Clinical explanation only. Durable evidence linkage is Runtime-owned by CandidateSetReceipt. */
   rationale?: string;
+}
+
+export interface FormulaSelection {
+  /** Stable selection-unit identity exposed to the model (source-node / case-visit). */
+  selectedCandidateRef?: string;
+  /** Canonical source identity, kept separate from candidate/formula identity. */
+  selectedSourceRef?: string;
+  /** Canonical primary product chosen/derived inside the selected source bundle. */
+  primaryFormulaRef?: string;
+  /** Closed-world accounting of the Kernel-owned CandidateSet. */
+  candidateDecisions?: FormulaCandidateDecision[];
+  rationale?: string;
+  /** Runtime-derived evidence refs. Models do not need to copy opaque evidence ids. */
   supportingEvidenceRefs?: string[];
   contradictingEvidenceRefs?: string[];
   version: number;
@@ -293,6 +312,16 @@ export interface SourceFormulaEntry {
   relation: FormulaAdoptionState;
   exclusionReason?: string;
   exclusionEvidenceRefs?: string[];
+  /** Historical case context for P2 source products. This is source truth, not current-patient reasoning. */
+  caseContext?: {
+    sourceRef: string;
+    visit?: string;
+    patient?: string;
+    symptoms?: string;
+    disease?: string;
+    syndrome?: string;
+    treatment?: string;
+  };
   /** 该方当前适用的加减证据（逐 formula 独立，非共享）。空数组 = 明确无适用加减。 */
   applicableModifications: ModificationEvidenceCandidate[];
 }
@@ -303,6 +332,11 @@ export interface SourceFormulaEntry {
  */
 export interface SourceFormulaSet {
   parentRecordRef: string;
+  /** Truth domain of this source bundle. P2 is historical case truth, never promoted to P1 normative authority. */
+  sourceKind?: 'P1_NORMATIVE_SOURCE' | 'P2_CASE_SOURCE';
+  sourceAuthority?: 'P1' | 'P2_CASE_DERIVED';
+  /** For P2 bundles, the stable parent case ref whose encounters form the complete membership set. */
+  sourceCaseRef?: string;
   disease: string;
   syndrome: string;
   treatmentMethod: string;
@@ -316,10 +350,11 @@ export interface SourceFormulaSet {
 
 /**
  * H15.6 Modification Evidence Closure —— Runtime 确定性完成义务（非模型自觉）。
- * 状态表达「是否真的查过、是否命中」，不表达「是否采用」。
+ * 状态表达「是否真的查过、规则库是否可用、是否命中」。
+ * UNAVAILABLE 与 SEARCHED_NONE 严格区分；患者特异计划由 Kernel transaction 物化。
  */
 export interface ModificationEvidenceClosure {
-  status: 'FOUND' | 'SEARCHED_NONE' | 'NOT_APPLICABLE';
+  status: 'FOUND' | 'SEARCHED_NONE' | 'NOT_APPLICABLE' | 'UNAVAILABLE';
   baseCandidateRef?: string;
   parentSourceId?: string;
   matchedRuleRefs: string[];
@@ -449,6 +484,14 @@ export interface CandidateReference {
   originatingHypothesisRefs?: string[];
   /** H15.2.6：P2 case-derived fallback 的来源标记（不升级处方权）。 */
   sourceAuthority?: 'P1' | 'P2_CASE_DERIVED';
+  sourceKind?: 'P1_NORMATIVE_SOURCE' | 'P2_CASE_SOURCE';
+  retrievalRank?: number;
+  retrievalScore?: number;
+  retrievalLane?: 'NORMATIVE' | 'CASE_ANALOG';
+  selectionUnit?: 'SOURCE_NODE' | 'CASE_VISIT';
+  sourceProductRefs?: string[];
+  sourceProductNames?: string[];
+  sourceProductCount?: number;
   sourceCaseRef?: string;
   /** H15.2.7：formula-level 证据单元（encounter-level）追溯字段。 */
   sourceEvidenceRef?: string;
@@ -511,6 +554,34 @@ export interface ProposalDraft {
   uncertainty?: string[];
 }
 
+
+/** Kernel-owned receipt proving that hydrated canonical runtime assets were deliberately bound
+ * to one exact semantic outcome. Models may request a binding transaction, but cannot write this. */
+export interface SourceBindingReceipt {
+  outcome: string;
+  capabilityId: string;
+  assetRefs: string[];
+  contentHashes: Record<string, string>;
+  workspaceVersion: number;
+}
+
+
+export interface CandidateSetEvidenceBinding {
+  candidateRef: string;
+  evidenceRefs: string[];
+  sourceRefs: string[];
+}
+
+/**
+ * CandidateSetReceipt is the single durable truth for the retrieval stage.
+ * Search + canonical hydration are one Runtime transaction; LLMs never construct evidence ids.
+ */
+export interface CandidateSetReceipt {
+  candidateRefs: string[];
+  evidenceBindings: CandidateSetEvidenceBinding[];
+  workspaceVersion: number;
+}
+
 export interface ClinicalWorkspace {
   facts: unknown[];
   /** 带稳定 CF_xxx 身份的病例事实（EvidenceRef 可引用 CaseFactRef）。 */
@@ -542,6 +613,10 @@ export interface ClinicalWorkspace {
   capabilityEvidenceClosures?: CapabilityEvidenceClosure[];
   /** H15.7：Runtime 拥有的证据 receipt（按 scope 聚合；模型无写入通道）。 */
   capabilityEvidenceReceipts?: Record<string, CapabilityEvidenceReceipt>;
+  /** Kernel-owned source binding receipts. Hydration/evidence never silently promotes into adoption. */
+  sourceBindingReceipts?: Record<string, SourceBindingReceipt>;
+  /** Kernel-owned closed-world treatment candidate universe + canonical evidence linkage. */
+  candidateSetReceipt?: CandidateSetReceipt;
   /** H15.9 / Phase 3.5：各治疗形式能力的交付闭环（evidence acquired ≠ delivery delivered）。 */
   capabilityDeliveryClosures?: CapabilityDeliveryClosure[];
 }
@@ -552,6 +627,7 @@ export type WorkspaceEventType =
   | 'evidence.added'
   | 'candidate.presented'
   | 'candidate.focused'
+  | 'candidate.frontier.set'
   | 'candidate.selected'
   | 'candidate.rejected'
   | 'candidate.assessed'
@@ -570,6 +646,7 @@ export type WorkspaceEventType =
   | 'pattern.assessment.recorded'
   | 'disease.assessment.recorded'
   | 'treatment.plan.recorded'
+  | 'source.binding.recorded'
   | 'formula.selection.recorded'
   | 'modification.plan.recorded'
   | 'formula.review.recorded'

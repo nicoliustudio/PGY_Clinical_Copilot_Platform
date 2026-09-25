@@ -8,6 +8,7 @@ import type { ClinicalStrategy } from './clinical-strategy.js';
 import type { ClinicalRequestIR } from '../control-plane-v2/types.js';
 import type { DurableArtifactEnvelopeV21, ObligationGraphV21, TypedBlockerV21, ControlPlanePolicyV21 } from '../control-plane-v21/types.js';
 import type { CommitLedger } from '../platform/commit/commit-ledger.js';
+import type { ModelExecutionReceipt } from '../model/model-registry.js';
 
 /**
  * V2.1 runtime 拥有的 typed blocker（模型无写入通道）。
@@ -44,6 +45,22 @@ export interface SkillVersion {
 
 export interface RuntimeSnapshot {
   modelProfileId: string;
+  modelRoles?: {
+    clinical: ModelProfile;
+    control: ModelProfile;
+  };
+  /** Exact run-scoped execution receipt used for reproducible model A/B. */
+  modelExecution?: {
+    requestedClinicalOptionId: string;
+    resolvedClinicalOptionId: string;
+    clinicalThinking: boolean;
+    clinicalBudget: string;
+    requestedControlOptionId: string;
+    resolvedControlOptionId: string;
+    controlThinking: boolean;
+    controlBudget: string;
+    controlFallbackReason?: string;
+  };
   promptHash?: string;
   capabilities: string[];
   skills: string[];
@@ -75,6 +92,8 @@ export interface RuntimeContext {
   tools: RuntimeToolDescriptor[];
   safety: SafetyDecision;
   model: ModelProfile;
+  /** Immutable model truth captured once at run start. */
+  modelExecution?: ModelExecutionReceipt;
   trace: TraceContext;
   harness: HarnessControlPort;
   workspace: ClinicalWorkspace;

@@ -39,19 +39,13 @@ function p2Hit(overrides: Record<string, unknown> = {}): any {
   };
 }
 
-test('H15.2.6 B: P2 case hit → case-derived formula candidate', () => {
-  const cards = buildP2CandidateCards([p2Hit()]);
-  assert.equal(cards.length, 1);
+test('H15.2.6 B: P2 case hit without structured prescription stays evidence-only, not selectable', () => {
+  assert.deepEqual(buildP2CandidateCards([p2Hit()]), []);
 });
 
-test('H15.2.6 D: P2 candidate 保留 provenance（candidateRef/sourceCaseRef/sourceAuthority）', () => {
+test('H15.2.6 D: evidence-only P2 case cannot manufacture a dead formula candidate', () => {
   const cards = buildP2CandidateCards([p2Hit()]);
-  const c = cards[0];
-  assert.equal(c.candidateRef, 'P2:C_cough001::case');
-  assert.equal(c.sourceCaseRef, 'P2:C_cough001');
-  assert.equal(c.sourceAuthority, 'P2_CASE_DERIVED');
-  assert.equal(c.fallbackReason, 'NO_APPLICABLE_P1');
-  assert.equal(c.sourceTier, 'P2');
+  assert.deepEqual(cards, []);
 });
 
 test('H15.2.6 F: 无 P1 且无 P2 hit → 空 candidates（不 hallucinate）', () => {
@@ -69,7 +63,7 @@ test('H15.2.6 E: formula.search_candidates 只产生 presented，不自动 selec
   const drafts = workspaceEventsForTool(
     'formula.search_candidates',
     { topK: 5 },
-    { candidates: [{ candidateRef: 'P2:C_cough001::case', formulaId: 'P2:C_cough001', sourceId: 'P2:C_cough001', formulaName: '咳嗽病例', sourceAuthority: 'P2_CASE_DERIVED', sourceCaseRef: 'P2:C_cough001' }] },
+    { candidates: [{ candidateRef: 'P2:E_cough001::formula', formulaId: 'P2_CASE_FORMULA::P2:C_cough001::E_cough001::1', sourceId: 'P2:E_cough001', formulaName: '病例方（原案无正式方名）', sourceAuthority: 'P2_CASE_DERIVED', sourceKind: 'P2_CASE_SOURCE', sourceCaseRef: 'P2:C_cough001' }] },
   );
   const types = drafts.map((d) => d.type);
   assert.ok(types.includes('candidate.presented'));

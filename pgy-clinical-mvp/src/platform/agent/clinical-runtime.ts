@@ -10,9 +10,6 @@ import { AuthorityPipeline } from '../authority/pipeline.js';
 import { EVIDENCE_EVENT_TYPES } from '../workspace/evidence-projection.js';
 import { HYPOTHESIS_EVENT_TYPES } from '../workspace/hypothesis-projection.js';
 import { getCanonicalFormula, validateNormativeFormula } from '../../clinical/formula.js';
-import { hydrateSourceFormulaSet } from '../../clinical/source-formula-set.js';
-import { computeModificationEvidenceClosure } from '../../clinical/modification-evidence.js';
-import { loadIndex } from '../../knowledge/build.js';
 import { setFormulaIdentityTrace, type FormulaIdentityTrace } from '../../trace.js';
 import { ledgerContractResolved, ledgerContractSatisfied, ledgerOutcomeCoverage, refreshControlPlaneV21 } from '../control-plane/control-plane-v21-session.js';
 import { projectFormulaSet } from '../../control-plane-v2/result-projection.js';
@@ -67,30 +64,6 @@ function recordCandidateDecision(proposal: AgentResult, context: RuntimeContext)
       context.workspaceStore.append('candidate.selected', { id: candidate.id });
     }
   }
-}
-
-/**
- * H15.6 确定性来源/证据闭环（Runtime 完成义务，非模型自觉）：
- * - 选中 P1 主选方后，水合同一 parent 下的全部 ACTIVE 原典方（sourceFormulaSet）。
- * - 计算加减证据闭环（modificationEvidenceClosure）。
- * 不经过 semantic search / topK / rerank；不产生新 Agent step。
- */
-async function finalizeSourceClosures(proposal: AgentResult, context: RuntimeContext): Promise<void> {
-  if (proposal.mode !== 'clinical') return;
-  const ref = proposal.formula?.candidate_ref;
-  const candidate = ref ? context.workspace.candidates.find((c) => c.id === ref && c.kind === 'formula') : undefined;
-
-  if (candidate?.sourceId?.startsWith('P1:')) {
-    try {
-      const idx = await loadIndex();
-      const sourceFormulaSet = hydrateSourceFormulaSet(idx.docs, ref ?? '');
-      if (sourceFormulaSet) context.workspace.sourceFormulaSet = sourceFormulaSet;
-    } catch {
-      // fail-closed：索引不可用（如单测无 .kb-cache）时跳过同源多方水合，不影响 authority/提交。
-    }
-  }
-
-  context.workspace.modificationEvidenceClosure = computeModificationEvidenceClosure(context.workspace, ref);
 }
 
 /** 依据 proposal 的 syndrome 记录最终领先 hypothesis（不覆盖已有 support/contradiction 状态）。 */
@@ -297,6 +270,7 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
         ...(usage.presence === 'PRESENT' && usage.value ? { usage: usage.value } : {}),
         relation: product.qualification,
         applicableModifications: [],
+        ...(payload.caseContext && typeof payload.caseContext === 'object' ? { caseContext: payload.caseContext as ProjectedFormula['caseContext'] } : {}),
         facts: {
           composition,
           preparation,
@@ -319,13 +293,22 @@ function committedLegacyFormula(records: readonly CommitRecord[]): Record<string
     const composition = factProjection<string>(payload.composition);
     if (composition.presence !== 'PRESENT' || !composition.value) continue;
     return {
-      authority: 'NORMATIVE',
+      authority: record.provenance.kind === 'CANONICAL_SOURCE' ? 'NORMATIVE' : 'GENERATED_DRAFT',
       formula_id: primary.productId,
       name: primary.name,
       composition: [composition.value],
       source_id: bundle.sourceId,
-      evidence_refs: [bundle.sourceId],
+      evidence_refs: [...record.provenance.sourceRefs],
       candidate_ref: typeof payload.formulaRef === 'string' ? payload.formulaRef : `${bundle.sourceId}::${primary.productId}`,
+      ...(record.provenance.kind === 'CASE_DERIVED'
+        ? { source_authority: 'P2_CASE_DERIVED' as const, source_case_ref: bundle.sourceId }
+        : { source_authority: 'P1' as const }),
+      ...(typeof (payload.caseContext as Record<string, unknown> | undefined)?.sourceRef === 'string'
+        ? {
+            source_evidence_ref: String((payload.caseContext as Record<string, unknown>).sourceRef),
+            visit_ref: String((payload.caseContext as Record<string, unknown>).sourceRef),
+          }
+        : {}),
     };
   }
   return undefined;
@@ -367,6 +350,7 @@ function committedDeliveries(records: readonly CommitRecord[]) {
     provider_id: record.providerId,
     delivery_status: record.deliveryStatus,
     execution_clearance: record.executionClearance,
+    ...(record.clinicalApplicability ? { clinical_applicability: record.clinicalApplicability } : {}),
     provenance: {
       kind: record.provenance.kind,
       sourceRefs: [...record.provenance.sourceRefs],
@@ -430,10 +414,21 @@ export class ClinicalRuntime {
         : proposal.formula?.candidate_ref;
       let canonicalFormula: FormulaIdentityTrace['canonicalFormula'];
       if (ref) {
-        const candidate = context.workspace.candidates.find((c) => c.kind === 'formula' && c.id === ref);
-        if (candidate?.sourceId && candidate?.formulaId) {
-          const c = await getCanonicalFormula(candidate.sourceId, candidate.formulaId);
+        const set = context.workspace.sourceFormulaSet;
+        const primary = set?.formulas.find((formula) => formula.relation === 'PRIMARY_SELECTED');
+        const sourceId = set?.sourceAuthority === 'P2_CASE_DERIVED'
+          ? primary?.caseContext?.sourceRef
+          : set?.parentRecordRef;
+        if (sourceId && primary?.formulaId) {
+          const c = await getCanonicalFormula(sourceId, primary.formulaId);
           if (c) canonicalFormula = { sourceId: c.sourceId, formulaId: c.formulaId, name: c.name, composition: c.composition };
+        } else {
+          // Legacy/non-V2 path: fall back to retrieval candidate metadata.
+          const candidate = context.workspace.candidates.find((c) => c.kind === 'formula' && c.id === ref);
+          if (candidate?.sourceId && candidate?.formulaId) {
+            const c = await getCanonicalFormula(candidate.sourceId, candidate.formulaId);
+            if (c) canonicalFormula = { sourceId: c.sourceId, formulaId: c.formulaId, name: c.name, composition: c.composition };
+          }
         }
       }
       const formulaDecision = authority.decisions.find((d) => d.stage === 'formula.authority');
@@ -454,6 +449,23 @@ export class ClinicalRuntime {
       usage: output.usage,
       snapshot: {
         modelProfileId: context.model.id,
+        ...(context.modelExecution ? {
+          modelRoles: {
+            clinical: context.modelExecution.clinicalProfile,
+            control: context.modelExecution.controlProfile,
+          },
+          modelExecution: {
+            requestedClinicalOptionId: context.modelExecution.requestedClinicalOptionId,
+            resolvedClinicalOptionId: context.modelExecution.clinical.optionId,
+            clinicalThinking: context.modelExecution.clinical.thinking,
+            clinicalBudget: context.modelExecution.clinical.budget,
+            requestedControlOptionId: context.modelExecution.requestedControlOptionId,
+            resolvedControlOptionId: context.modelExecution.control.optionId,
+            controlThinking: context.modelExecution.control.thinking,
+            controlBudget: context.modelExecution.control.budget,
+            ...(context.modelExecution.controlFallbackReason ? { controlFallbackReason: context.modelExecution.controlFallbackReason } : {}),
+          },
+        } : {}),
         promptHash: this.promptHash,
         capabilities: context.capabilities.map((c) => c.id),
         skills: context.skills.map((s) => s.id),
@@ -539,35 +551,57 @@ export class ClinicalRuntime {
         };
 
     const explicit = notDeliverable.map((o) =>
-      `required outcome ${o.outcome} is NOT_DELIVERABLE: the knowledge base returned no qualified asset`
+      `required outcome ${o.outcome} is NOT_DELIVERABLE: no enabled provider can produce the exact requested semantic outcome or the qualified source asset is unavailable`
       + (modelAllowed
         ? '; a model-authored advisory may be provided but is not a normative delivery'
         : '; model-authored substitution is not permitted by the request generation policy'),
     );
+    const blockedShortfalls = state.graph.nodes
+      .filter((node) => node.required && node.status === 'BLOCKED')
+      .flatMap((node) => node.rootOutcomes.map((outcome) =>
+        `required outcome ${outcome} is BLOCKED: ${node.blocker?.question ?? 'the closed-world execution graph cannot satisfy this obligation'}`));
+    explicit.push(...blockedShortfalls);
     const cardinality = state.requestIR.outputPolicy.formulaCardinality;
     const clinicallyEligibleFormulaCount = formulaSet.filter((formula) => formula.relation !== 'CLINICALLY_EXCLUDED').length;
     if (cardinality.mode === 'AT_LEAST' && clinicallyEligibleFormulaCount < cardinality.count) {
       explicit.push(`formula cardinality shortfall: requested at least ${cardinality.count}, but only ${clinicallyEligibleFormulaCount} clinically eligible source formulas were deterministically available`);
     }
     const treatmentDeliveries = committedTreatmentDeliveries(context.commitLedger.all());
-    const formulaProjection = formulaSet.map((formula) => ({
-      formula_ref: formula.formulaRef,
-      formula_id: formula.formulaId,
-      name: formula.name,
-      composition: formula.composition,
-      source_ref: formula.sourceRef,
-      modification_rules: formula.sourceModifications,
-      modification_status: formula.modificationStatus,
-      modification_text: formula.modificationStatus === 'PRESENT'
-        ? formula.sourceModifications.join('；')
-        : (formula.modificationStatus === 'KNOWN_EMPTY' ? '无加减' : 'UNKNOWN'),
-      ...(formula.sourceLevelModifications.length > 0
-        ? { source_level_modification_rules: formula.sourceLevelModifications }
-        : {}),
-      ...(formula.usage ? { usage: formula.usage } : {}),
-      relation: formula.relation,
-      ...(formula.facts ? { facts: formula.facts } : {}),
-    }));
+    const renderModificationFact = (fact: { presence: 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN'; value?: unknown } | undefined): string => {
+      if (!fact || fact.presence === 'UNKNOWN') return 'UNKNOWN';
+      if (fact.presence === 'KNOWN_EMPTY') return '无加减';
+      const value = Array.isArray(fact.value) ? fact.value : [];
+      if (value.length === 0) return '无加减';
+      return value.map((item) => typeof item === 'string' ? item : (item && typeof item === 'object' && 'statement' in item ? String(item.statement ?? '') : String(item)))
+        .filter(Boolean)
+        .join('；') || '无加减';
+    };
+    const formulaProjection = formulaSet.map((formula) => {
+      const formulaLocalText = renderModificationFact(formula.facts?.modifications.formulaLocal);
+      const sourceSharedText = renderModificationFact(formula.facts?.modifications.sourceShared);
+      const patientSpecificText = renderModificationFact(formula.facts?.modifications.patientSpecific);
+      return {
+        formula_ref: formula.formulaRef,
+        formula_id: formula.formulaId,
+        name: formula.name,
+        composition: formula.composition,
+        source_ref: formula.sourceRef,
+        modification_rules: formula.sourceModifications,
+        modification_status: formula.modificationStatus,
+        // Compatibility summary. The three ownership namespaces below are authoritative for rendering.
+        modification_text: `方内原始：${formulaLocalText}；病证共享：${sourceSharedText}；患者特异：${patientSpecificText}`,
+        formula_local_modification_text: formulaLocalText,
+        source_shared_modification_text: sourceSharedText,
+        patient_specific_modification_text: patientSpecificText,
+        ...(formula.sourceLevelModifications.length > 0
+          ? { source_level_modification_rules: formula.sourceLevelModifications }
+          : {}),
+        ...(formula.usage ? { usage: formula.usage } : {}),
+        relation: formula.relation,
+        ...(formula.caseContext ? { case_context: formula.caseContext } : {}),
+        ...(formula.facts ? { facts: formula.facts } : {}),
+      };
+    });
     const committedFormula = committedLegacyFormula(context.commitLedger.all());
     const deliveries = committedDeliveries(context.commitLedger.all());
     const diseaseName = typeof assessment?.disease === 'string' ? assessment.disease : baseClinical.disease.name;

@@ -77,10 +77,31 @@ function matchDiagnosisMap(text: string): string[] {
 
 /** 纯函数：从规范病名集中，找出包含 query 的病名（用于 query 本身无法被 crosswalk 命中的 fallback）。 */
 function exactDiseaseMatches(docs: KnowledgeDoc[], query: string): string[] {
+  const trimmed = (query ?? '').trim();
+  if (!trimmed) return [];
   const out: string[] = [];
   for (const d of docs) {
     if (d.sourceTier !== 'P1') continue;
-    if (d.disease.includes(query) && !out.includes(d.disease)) out.push(d.disease);
+    if (d.disease.includes(trimmed) && !out.includes(d.disease)) out.push(d.disease);
+  }
+  return out;
+}
+
+/**
+ * 病例中用户明确提供的疾病身份（西医病名/别名 surface forms）→ 规范中医病名。
+ *
+ * 这是 Patient Fact / Disease Identity Authority 的确定性解析层：
+ * - 只做 diagnosis_map 交叉映射（不加 query disease、不做 relation expansion、不给排名）。
+ * - 输入是「用户明说的病名」，输出是 Knowledge Store 中的规范病名。
+ * - 与 Agent 的辨证/治法 hypothesis 完全解耦：reasoning 不能覆盖用户已提供的疾病身份。
+ */
+export function resolveCaseDiseaseNames(caseDiseaseSurfaceForms: string[]): string[] {
+  const out: string[] = [];
+  for (const surface of caseDiseaseSurfaceForms ?? []) {
+    if (typeof surface !== 'string' || !surface.trim()) continue;
+    for (const canonical of matchDiagnosisMap(surface)) {
+      if (!out.includes(canonical)) out.push(canonical);
+    }
   }
   return out;
 }

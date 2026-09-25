@@ -35,6 +35,7 @@ export interface ProjectedFormula {
   usage?: string;
   relation: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
   applicableModifications: SourceFormulaSet['formulas'][number]['applicableModifications'];
+  caseContext?: SourceFormulaSet['formulas'][number]['caseContext'];
   /** Lossless product facts. Legacy flat fields above remain compatibility helpers only. */
   facts?: ProjectedFormulaFacts;
 }
@@ -66,6 +67,7 @@ export function projectFormulaSet(
     usage: f.usage,
     relation: f.relation,
     applicableModifications: f.applicableModifications,
+    ...(f.caseContext ? { caseContext: { ...f.caseContext } } : {}),
     facts: {
       composition: {
         presence: f.compositionPresence ?? (f.composition.trim() ? 'PRESENT' : 'UNKNOWN'),

@@ -45,7 +45,18 @@
           <div class="case-title" id="caseTitle"><strong>新问诊</strong><span>输入病例开始临床推理</span></div>
         </div>
         <div class="topbar-right">
-          <span class="model-chip" id="modelState">模型加载中…</span>
+          <div class="model-control" id="modelControl">
+            <select class="model-select" id="modelSelect" aria-label="选择模型" title="模型加载中…"></select>
+            <label class="thinking-switch" id="thinkingSwitch" title="推理思考开关">
+              <input type="checkbox" id="thinkingInput" />
+              <span class="thinking-track" aria-hidden="true"><span class="thinking-thumb"></span></span>
+              <span class="thinking-label" id="thinkingLabel">推理</span>
+            </label>
+            <label class="budget-field" id="budgetField" title="思考预算">
+              <span class="budget-label">预算</span>
+              <select class="budget-select" id="budgetSelect" aria-label="思考预算"></select>
+            </label>
+          </div>
           <span class="safety-chip" id="safetyState"></span>
           <button class="ghost-btn" id="openTrace" title="开发者 Trace">Trace</button>
           <span class="user-chip" id="userChip"></span>

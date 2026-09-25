@@ -60,15 +60,14 @@ test('H15.5 Test F: record_deliberation 事件仍由完整 input 生成（compac
     diseaseAssessment: { statement: '带下病' },
     treatmentPlan: { primaryPrinciple: '益气升提', treatmentTarget: '止带' },
     patternAssessment: { primary: { statement: '脾肾气虚' } },
-    formulaSelection: { selectedCandidateRef: 'P1:a::F:1' },
   };
   // compact receipt（tool execute 返回值）不参与事件生成
-  const compactOutput = { accepted: true, updatedArtifacts: ['diseaseAssessment', 'treatmentPlan', 'patternAssessment', 'formulaSelection'], remainingDecisionChangingUnknowns: [] };
+  const compactOutput = { accepted: true, updatedArtifacts: ['diseaseAssessment', 'treatmentPlan', 'patternAssessment'], remainingDecisionChangingUnknowns: [] };
 
   const drafts = workspaceEventsForTool('workspace.record_deliberation', input, compactOutput);
   const types = drafts.map((d) => d.type);
   assert.ok(types.includes('disease.assessment.recorded'));
   assert.ok(types.includes('treatment.plan.recorded'));
   assert.ok(types.includes('pattern.assessment.recorded'));
-  assert.ok(types.includes('formula.selection.recorded'));
+  assert.ok(!types.includes('formula.selection.recorded'), 'formula.selection 只能由 formula.select 写入');
 });

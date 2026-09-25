@@ -27,7 +27,7 @@ const PLAN_PROMPT = `你是中医临床的「总策划层」（Clinical Planner�
 - criticalEvidenceNeeds：只保留「答案可能改变病名 / 证候 / 治法 / 方药」的信息需求（字符串数组）。不要生成完整问诊、检查或工具步骤。
 - stopWhen：什么条件下已有信息足以形成可辩护结论、应当停止检索（字符串数组）。
 - uncertainty：当前最关键的未知/不确定点 [{item, reason}]。
-- provisionalRequiredArtifacts：根据本次 requested outcome，预判本次结构化任务必须产出的临床产物类型（字符串数组）。只能从以下系统已存在的产物类型中选择：diseaseAssessment / formalHypotheses / patternAssessment / treatmentPlan / formulaSelection / formulaReview。规则：仅辨证/仅鉴别 = 不需要 formulaSelection/formulaReview；需要开方 = 需含 treatmentPlan + formulaSelection；需要方药评审 = 需含 formulaReview。这是「预判的最小产物契约」，不是病/证/方的结论。
+- provisionalRequiredArtifacts：根据本次 requested outcome，预判本次结构化任务必须产出的临床产物类型（字符串数组）。只能从以下系统已存在的产物类型中选择：diseaseAssessment / patternAssessment / treatmentPlan / formulaSelection / formulaReview。规则：仅辨证/仅鉴别 = 不需要 formulaSelection/formulaReview；需要开方 = 需含 treatmentPlan + formulaSelection；需要方药评审 = 需含 formulaReview。这是「预判的最小产物契约」，不是病/证/方的结论。
 
 纪律（必须遵守）：
 - 不输出任何方剂、证型、诊断结论。

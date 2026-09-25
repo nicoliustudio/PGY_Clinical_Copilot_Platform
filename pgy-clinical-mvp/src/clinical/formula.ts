@@ -97,6 +97,7 @@ export interface CanonicalFormula {
   composition: string;
   sourceId: string;
   sourceTier: string;
+  sourceAuthority: 'P1' | 'P2_CASE_DERIVED';
 }
 
 const hydrationCache = new Map<string, CanonicalFormula>();
@@ -163,17 +164,35 @@ export async function getCanonicalFormula(
     return cached;
   }
   const idx = docs ?? (await loadIndex()).docs;
-  const doc = idx.find((d) => d.id === sourceId && d.sourceTier === 'P1');
+  const doc = idx.find((d) => d.id === sourceId);
   if (!doc) return null;
-  const f = doc.formulas.find((x) => x.id === formulaId);
-  if (!f) return null;
-  const canonical: CanonicalFormula = {
-    formulaId: f.id,
-    name: f.name,
-    composition: f.composition,
-    sourceId: doc.id,
-    sourceTier: doc.sourceTier,
-  };
+  let canonical: CanonicalFormula | null = null;
+  if (doc.sourceTier === 'P1') {
+    const f = doc.formulas.find((x) => x.id === formulaId);
+    if (!f) return null;
+    canonical = {
+      formulaId: f.id,
+      name: f.name,
+      composition: f.composition,
+      sourceId: doc.id,
+      sourceTier: doc.sourceTier,
+      sourceAuthority: 'P1',
+    };
+  } else if (doc.sourceTier === 'P2' && doc.kind === 'case-formula' && doc.composition?.trim()) {
+    const visitRef = doc.id.startsWith('P2:') ? doc.id.slice(3) : doc.id;
+    const caseRef = doc.caseId ? `P2:${doc.caseId}` : doc.id;
+    const expectedFormulaId = `P2_CASE_FORMULA::${caseRef}::${visitRef}::1`;
+    if (formulaId !== 'formula' && formulaId !== expectedFormulaId) return null;
+    canonical = {
+      formulaId: expectedFormulaId,
+      name: doc.formulaName?.trim() || '病例方（原案无正式方名）',
+      composition: doc.composition,
+      sourceId: doc.id,
+      sourceTier: doc.sourceTier,
+      sourceAuthority: 'P2_CASE_DERIVED',
+    };
+  }
+  if (!canonical) return null;
   hydrationCache.set(key, canonical);
   if (runId) {
     const t = telemetryFor(runId);

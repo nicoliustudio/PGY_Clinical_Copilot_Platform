@@ -29,21 +29,18 @@ test('H15.2.9 invariant: default config 下 patternAssessment 仍可写（record
   assert.ok('patternAssessment' in shape, 'patternAssessment 字段在 default config 下必须可写');
 });
 
-test('H15.2.9 invariant: 写入四个 hard-required artifact 后 clinical core 可达 complete', () => {
+test('H15.2.9 invariant: clinical core means enough structured meaning for retrieval, not terminal hypothesis bookkeeping', () => {
   const ws = createClinicalWorkspace();
   const store = new ClinicalWorkspaceStore(ws, 'run_invariant');
-  // clinicalQuestion（seed）+ diseaseAssessment + formalHypotheses + patternAssessment。
   ws.clinicalDecisionSpine.clinicalQuestion = { statement: '求诊', version: 1 };
   store.append('disease.assessment.recorded', { statement: '胃痛', evidenceRefs: [], version: 1 });
   store.append('pattern.assessment.recorded', { primary: { statement: '湿热中阻', supportingEvidenceRefs: ['CF_1'] } });
+  store.append('treatment.plan.recorded', { primaryPrinciple: '清化湿热', treatmentTarget: '湿热中阻', evidenceRefs: ['CF_1'] });
+  // Open-world alternatives remain clinically visible, but do not own deterministic retrieval liveness.
   store.append('hypothesis.presented', { id: 'H_1', label: '湿热中阻', origin: 'agent_reasoning' });
-  // V2.1.1：H12 disposition 是 clinical-core truth 的一部分（不再与 readiness 双口径）。
-  const beforeDisposition = checkClinicalCoreCompletion(ws);
-  assert.equal(beforeDisposition.ok, false, '未处置 formal hypothesis 时 clinical core 不得 complete');
-  assert.ok(beforeDisposition.missing.includes('hypothesisDisposition'));
-  store.append('hypothesis.selected', { id: 'H_1' });
+  store.append('hypothesis.presented', { id: 'H_2', label: '脾胃虚弱', origin: 'agent_reasoning' });
   const core = checkClinicalCoreCompletion(ws);
-  assert.equal(core.ok, true, `clinical core 应可达 complete，实际 missing=${core.missing.join(',')}`);
+  assert.equal(core.ok, true, `clinical core 应可达 retrieval-ready，实际 missing=${core.missing.join(',')}`);
 });
 
 test('H15.2.9 invariant: WorkingView 可见 patternStructure / completion / formula decision state', () => {

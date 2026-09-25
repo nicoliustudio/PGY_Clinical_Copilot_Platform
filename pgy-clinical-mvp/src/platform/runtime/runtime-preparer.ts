@@ -14,6 +14,7 @@ import { HarnessSession } from './harness-session.js';
 import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../workspace/clinical-workspace.js';
 import { deriveGraphV21 } from '../control-plane/control-plane-v21-session.js';
 import { CommitLedger } from '../commit/commit-ledger.js';
+import type { ModelExecutionReceipt } from '../../model/model-registry.js';
 
 export interface RuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
@@ -23,6 +24,7 @@ export interface RuntimePreparerDependencies {
   skills: SkillRegistry;
   tools: ToolRegistry;
   model: ModelProfile;
+  modelExecution?: ModelExecutionReceipt;
   baselineToolIds: string[];
   baselineSkillIds: string[];
   baselineKnowledgeScopes: string[];
@@ -92,6 +94,7 @@ export class RuntimePreparer implements RuntimePreparationPort {
       tools: this.deps.baselineToolIds.map((id) => this.deps.tools.require(id)),
       safety,
       model: this.deps.model,
+      modelExecution: this.deps.modelExecution,
       trace: { runId, startedAt: new Date().toISOString() },
       harness: undefined as unknown as RuntimeContext['harness'],
       workspace,

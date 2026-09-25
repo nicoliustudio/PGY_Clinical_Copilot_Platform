@@ -116,9 +116,9 @@ export function blockedObligationsV21(state: NonNullable<RuntimeContext['control
   return state.graph.nodes.filter((node) => node.status === 'BLOCKED');
 }
 
-/** 仍未满足的 required obligation —— readiness 的单一缺失集口径。 */
+/** 仍有合法工作可推进的 required obligation。Terminal shortfalls are reported elsewhere. */
 export function unmetObligationsV21(state: NonNullable<RuntimeContext['controlPlaneV21']>): ObligationNodeV21[] {
-  return state.graph.nodes.filter((node) => node.required && node.status !== 'SATISFIED' && node.status !== 'NOT_DELIVERABLE');
+  return state.graph.nodes.filter((node) => node.required && node.status === 'OPEN');
 }
 
 export function graphComplete(state: NonNullable<RuntimeContext['controlPlaneV21']>): boolean {

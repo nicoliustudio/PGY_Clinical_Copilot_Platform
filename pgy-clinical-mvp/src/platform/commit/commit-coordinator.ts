@@ -1,4 +1,5 @@
 import type {
+  ClinicalApplicability,
   CommitIntent,
   CommitResult,
   CommittedSourceBundle,
@@ -18,7 +19,7 @@ export interface CommitEnvironment {
     | { ok: false; code: 'NO_PROVIDER' | 'AMBIGUOUS_PROVIDER' | 'MISSING_REQUIRED_FIELDS' | 'IDENTITY_MISMATCH'; missing?: string[] };
   /** SOURCE_BOUND: hydrate immutable canonical source product(s) from Runtime-owned source receipts. */
   hydrateSourceBoundProduct?: (outcome: string) =>
-    | { ok: true; providerId: string; product: Readonly<Record<string, unknown>>; sourceBundle: CommittedSourceBundle; sourceRefs: readonly string[] }
+    | { ok: true; providerId: string; product: Readonly<Record<string, unknown>>; sourceBundle: CommittedSourceBundle; sourceRefs: readonly string[]; clinicalApplicability: ClinicalApplicability }
     | { ok: false; code: 'CANONICAL_HYDRATION_FAILED' | 'SOURCE_BINDING_MISMATCH' | 'MISSING_REQUIRED_FIELDS'; details?: readonly string[] };
   /** 从内部 candidate truth 水合 canonical product/source，并做 composition binding 校验。必须 fail closed。 */
   hydrateCanonicalCandidate(truth: CandidateTruth, outcome: string): Promise<
@@ -39,7 +40,7 @@ export class CommitCoordinator {
   ) {}
 
   async commit(intent: CommitIntent, env: CommitEnvironment): Promise<CommitResult> {
-    const clearance = executionClearance(env.safety);
+    const defaultClearance = executionClearance(env.safety);
 
     if (intent.candidateHandle) {
       const truth = this.handles.resolve(intent.candidateHandle);
@@ -55,7 +56,7 @@ export class CommitCoordinator {
           semanticIdentity: intent.outcome,
           providerId: hydrated.providerId,
           deliveryStatus: 'DELIVERED',
-          executionClearance: clearance,
+          executionClearance: defaultClearance,
           provenance: {
             kind: truth.provenanceKind,
             sourceRefs: hydrated.sourceRefs,
@@ -71,6 +72,7 @@ export class CommitCoordinator {
       if (!env.hydrateSourceBoundProduct) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
       const hydrated = env.hydrateSourceBoundProduct(intent.outcome);
       if (!hydrated.ok) return { ok: false, code: hydrated.code, details: hydrated.details };
+      const sourceBoundClearance = executionClearance(env.safety, hydrated.clinicalApplicability);
       return {
         ok: true,
         record: this.ledger.append({
@@ -78,7 +80,8 @@ export class CommitCoordinator {
           semanticIdentity: intent.outcome,
           providerId: hydrated.providerId,
           deliveryStatus: 'DELIVERED',
-          executionClearance: clearance,
+          clinicalApplicability: hydrated.clinicalApplicability,
+          executionClearance: sourceBoundClearance,
           provenance: {
             kind: 'CANONICAL_SOURCE',
             sourceRefs: hydrated.sourceRefs,
@@ -105,7 +108,7 @@ export class CommitCoordinator {
           semanticIdentity: intent.outcome,
           providerId: validation.providerId,
           deliveryStatus: 'DELIVERED',
-          executionClearance: clearance,
+          executionClearance: defaultClearance,
           provenance: (() => {
             const refs = Array.isArray(draft.sourceEvidenceRefs)
               ? draft.sourceEvidenceRefs.filter((ref): ref is string => typeof ref === 'string' && ref.trim().length > 0)

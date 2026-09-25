@@ -16,6 +16,7 @@ import { importedArtifact } from '../../control-plane-v21/artifacts.js';
 import { stableToken } from '../../control-plane-v21/terms.js';
 import { checkClinicalCoreCompletion, isArtifactSatisfied } from '../workspace/clinical-workspace.js';
 import type { CommitLedger } from '../commit/commit-ledger.js';
+import { formulaSelectionReady } from '../../clinical/formula-selection.js';
 
 /**
  * Workspace → V2.1 Artifact Bridge（Phase 4）。
@@ -74,16 +75,6 @@ export function evidenceVolume(workspace: ClinicalWorkspace): number {
   return workspace.evidenceState.evidenceItems.length + workspace.evidenceRefs.length;
 }
 
-/** 方剂证据完整性：与 legacy formula decision surface 使用同一判定（frontier 证据是否展开完毕）。 */
-function formulaEvidenceComplete(workspace: ClinicalWorkspace): boolean {
-  const candidates = workspace.candidates.filter((c) => c.kind === 'formula');
-  if (candidates.length === 0) return false;
-  const frontier = workspace.deliberationState.frontier.filter((ref) => candidates.some((c) => c.id === ref));
-  if (frontier.length === 0) return false;
-  return frontier.every((ref) =>
-    workspace.evidenceState.evidenceItems.some((item) => item.relatedCandidates.includes(ref)));
-}
-
 // ---------------------------------------------------------------------------
 // V2.1.2 —— postcondition / provenance / insufficiency 的 domain adapter 侧实现。
 //
@@ -119,7 +110,7 @@ const ARTIFACT_KEYS: Record<string, string> = {
  * 用于区分「模型还没做完」与「闭世界知识库确实无法满足」，后者才允许 typed insufficiency。
  */
 const KB_EXHAUSTION_READERS: Record<string, (workspace: ClinicalWorkspace) => boolean> = {
-  'artifact:formula-selection': (workspace) => formulaEvidenceComplete(workspace),
+  'artifact:formula-selection': (workspace) => formulaSelectionReady(workspace),
 };
 
 /** artifact type → durable 产物来源（未登记的 artifact 类型没有 provenance 结论）。 */
@@ -146,12 +137,10 @@ export function describePostconditionShortfall(node: ObligationNodeV21, workspac
 }
 
 /**
- * V2.1.1 观测：方剂候选已取得证据、但没有任何候选进入 deliberation frontier。
- *
- * 此时 `formula-evidence` 在结构上无法闭合（closure 要求 frontier ⊆ hydrated），而 hydration
- * 又无法自己创造 frontier，因此这是模型必须显式执行 `workspace.focus_candidates` 的状态。
- * 真实 E2E 已复现：模型连续 29 次 formula.get_evidence 而从不 focus → 义务永不闭合。
- * 这是「可执行但未执行的下一步」，不是可自动闭合的终态，因此不改变 closure 语义，只把它显式暴露。
+ * Legacy/repair observability: candidates exist and evidence has arrived, but no Kernel frontier receipt exists.
+ * Normal production flow now freezes the complete candidate set and hydrates its evidence atomically at
+ * formula.search_candidates time, so this state indicates a legacy trace or deterministic repair requirement,
+ * not a clinical choice the model should make by dropping candidates.
  */
 export function formulaFrontierPending(workspace: ClinicalWorkspace): boolean {
   const candidates = workspace.candidates.filter((c) => c.kind === 'formula');
@@ -172,7 +161,7 @@ const TRUTH_READERS: Record<string, TruthReader> = {
   // 诊断证据：真实存在诊断类知识证据。
   'artifact:diagnostic-evidence': (_node, { workspace }) => workspace.evidenceState.evidenceItems.length > 0 ? 'SATISFIED' : 'OPEN',
   // 方剂证据：候选已聚焦且证据已展开（否则方剂检索保持开放）。
-  'artifact:formula-evidence': (_node, { workspace }) => formulaEvidenceComplete(workspace) ? 'SATISFIED' : 'OPEN',
+  'artifact:formula-evidence': (_node, { workspace }) => formulaSelectionReady(workspace) ? 'SATISFIED' : 'OPEN',
   // 方剂交付：durable formulaSelection 已选方**且**满足参数化完成要求（如 AT_LEAST N）。
   // cardinality 未满足时不得 closure —— 这里保持 OPEN，由 insufficiency 投影决定后续（见下）。
   'artifact:formula-selection': (node, { workspace }) => {
