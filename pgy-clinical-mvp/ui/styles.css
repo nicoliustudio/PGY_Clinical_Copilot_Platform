@@ -407,16 +407,42 @@ td .input-preview { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 .user-chip .role-tag { font-size: 10px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 1px 5px; }
 
 
-/* Truth Genesis / Source Authority: lossless committed source payload rendering. */
-.source-bound .source-payload {
-  max-height: 28rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: .5rem 0 0;
-  padding: .65rem;
-  border-radius: .5rem;
-  background: rgba(0, 0, 0, .04);
-  font-size: .8rem;
-  line-height: 1.45;
-}
+/* ---------- 治疗方案：统一交付卡片（方剂 / 膏方 / 针灸 / 成药共用） ----------
+ * 只做排版与分组：不放宽信息、不用裸 JSON，来源原文折叠在溯源区。 */
+.rx-section-title { margin: 16px 0 8px; font-size: 12px; color: var(--muted); letter-spacing: .04em; }
+.rx-list { display: grid; gap: 10px; }
+.rx-card { border: 1px solid var(--line); border-radius: 14px; background: #fcfdfc; padding: 12px 13px; }
+.rx-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rx-kind { flex: 0 0 auto; font-size: 11px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 7px; }
+.rx-title { font-size: 14px; color: #173a2c; }
+.rx-badge { font-size: 10px; border-radius: 999px; padding: 2px 8px; background: var(--soft); color: #4d5650; }
+.rx-badge.PRIMARY_SELECTED, .rx-badge.NORMATIVE { background: #e8f5ed; color: #187448; }
+.rx-badge.SOURCE_ALTERNATIVE { background: #eef3f7; color: #40607a; }
+.rx-badge.CLINICALLY_EXCLUDED { background: #f1f2f1; color: var(--muted); }
+.rx-badge.GENERATED_DRAFT, .rx-badge.advisory { background: #fff3dc; color: #9a6a1b; }
+.rx-badge.BLOCKED { background: #feeceb; color: #a83e3b; }
+.rx-meta { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.rx-body { margin-top: 9px; display: grid; gap: 7px; }
+.rx-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; align-items: start; }
+.rx-k { font-size: 12px; color: var(--muted); }
+.rx-v { min-width: 0; }
+.rx-text { font-size: 13px; line-height: 1.7; color: #303732; overflow-wrap: anywhere; }
+.rx-text.muted { color: var(--muted); }
+.rx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rx-chip { background: var(--soft); border-radius: 999px; padding: 3px 9px; font-size: 11px; color: #294638; }
+.rx-rules { display: grid; gap: 4px; }
+.rx-rule { font-size: 12px; line-height: 1.7; color: #3f4a44; overflow-wrap: anywhere; }
+.rx-sub { display: grid; gap: 6px; }
+.rx-sub-item { padding-left: 9px; border-left: 2px solid #eef2ef; }
+.rx-source { margin-top: 9px; font-size: 11px; color: var(--muted); }
+.rx-exclusion { margin-top: 7px; font-size: 11px; color: #a83e3b; }
+.rx-raw { margin-top: 8px; border-top: 1px dashed #e6ece8; padding-top: 7px; }
+.rx-raw > summary { cursor: pointer; font-size: 11px; color: var(--muted); list-style: none; }
+.rx-raw > summary::-webkit-details-marker { display: none; }
+.rx-raw > summary::before { content: '▸ '; color: var(--muted-2); }
+.rx-raw[open] > summary::before { content: '▾ '; }
+.rx-raw-body { margin-top: 7px; display: grid; gap: 7px; }
+.rx-raw-text { white-space: pre-wrap; font-size: 12px; line-height: 1.7; color: #4d5650; background: rgba(0, 0, 0, .03); border-radius: 8px; padding: 9px 10px; overflow-wrap: anywhere; }
+.rx-kv-list { display: grid; gap: 3px; }
+.rx-kv { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 8px; font-size: 11px; color: #4d5650; }
+.rx-kv span:first-child { color: var(--muted-2); overflow-wrap: anywhere; }

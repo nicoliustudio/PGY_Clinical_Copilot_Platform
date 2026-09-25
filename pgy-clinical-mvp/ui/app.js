@@ -400,66 +400,297 @@ function renderResult(r, authority) {
   return `<div class="assistant-block"><div class="plain-text">${esc(JSON.stringify(r))}</div></div>`;
 }
 
+/* ---------- 治疗方案：统一结构化渲染 ----------
+ * 渲染纪律（与 Agent / Kernel 边界一致）：
+ * - 只渲染 committed 事实，不筛选、不重排、不重算完整性（UI 无权威）；
+ * - 方剂 / 膏方 / 针灸 / 成药等所有交付共用同一套卡片，任何字段都不以裸 JSON 呈现；
+ * - 「一味药 = 一枚标签（药名+脚注+剂量）」，药名与剂量永不拆成两行；
+ * - 来源原文与技术标识无损保留在可展开的溯源区（可读文本，非 JSON）。
+ */
+
+const MODALITY_LABELS = {
+  'modality:herbal-formula': '方剂',
+  'modality:gaofang': '膏方',
+  'modality:acupuncture': '针灸',
+  'modality:moxibustion': '艾灸',
+  'modality:auricular': '耳穴',
+  'modality:external-therapy': '外治',
+  'modality:preparation': '成药',
+};
+const RELATION_LABELS = { PRIMARY_SELECTED: '主选', SOURCE_ALTERNATIVE: '同源备选', CLINICALLY_EXCLUDED: '已排除' };
+const FORMULA_AUTHORITY_LABELS = { NORMATIVE: '规范来源', GENERATED_DRAFT: '生成草稿', BLOCKED: '已阻断' };
+const CLEARANCE_LABELS = { CLEARED: '可执行', REVIEW_REQUIRED: '需医生复核', BLOCKED: '暂不可执行' };
+const APPLICABILITY_LABELS = { CURRENTLY_SUITABLE: '当前适用', DEFERRED: '择期适用', CURRENTLY_NOT_SUITABLE: '当前不适用' };
+
+/** 来源载荷字段 → 医生可读标签。未收录的键保留原键名（不丢字段）。 */
+const PAYLOAD_LABELS = {
+  title: '名称', name: '名称', raw_name: '原始病名', specialty: '科别',
+  disease: '病名', patient: '患者', syndrome_pattern: '证型', applies_to_syndromes: '适用证型',
+  indication_text: '适应证', indication: '适应证', tongue: '舌象', pulse: '脉象',
+  treatment_method: '治法', composition: '组成', preparation_process: '制备', usage: '用法',
+  contraindication: '禁忌', auxiliary_formulas: '辅助方', protocol: '治疗方案',
+  modalities: '治疗方式', points: '取穴', technique: '手法', regimens: '疗程',
+  medicine: '成药', raw: '原文', source_tag: '来源标记',
+  operation: '操作', frequency: '频次', course: '疗程次数',
+};
+
+/** 技术 / 检索元数据：不进医生主视图，折叠进溯源区（不丢弃）。 */
+const PAYLOAD_TECH_KEYS = new Set([
+  'asset_id', 'asset_type', 'subtype', 'content_hash', 'evidence_tier', 'knowledge_domain',
+  'knowledge_role', 'curated_id', 'curated_source_tier', 'can_decide_base_formula',
+  'requires_explicit_intent', 'sex', 'occurrences', 'tags_seen', 'syndrome_specific',
+  'duplicate_occurrences', 'source_tag_mismatch', 'activation_scope', 'runtime_eligible',
+  'deferred_reason', 'search_text', 'provenance',
+]);
+const PROVENANCE_DISPLAY_KEYS = new Set(['book', 'section', 'source_label', 'raw_text']);
+
+function isObj(v) { return typeof v === 'object' && v !== null && !Array.isArray(v); }
+function isBlank(v) {
+  if (v === undefined || v === null) return true;
+  if (typeof v === 'string') return v.trim() === '';
+  if (Array.isArray(v)) return v.every(isBlank);
+  if (isObj(v)) return Object.values(v).every(isBlank);
+  return false;
+}
+function modalityLabel(outcome) {
+  if (typeof outcome !== 'string' || !outcome.trim()) return '治疗';
+  const key = outcome.trim();
+  if (MODALITY_LABELS[key]) return MODALITY_LABELS[key];
+  const tail = key.split(/[:/]/).filter(Boolean).pop();
+  return MODALITY_LABELS[tail] || tail;
+}
+function chipsHtml(items) {
+  const list = (items || []).map((x) => String(x).trim()).filter(Boolean);
+  if (!list.length) return '';
+  return `<div class="rx-chips">${list.map((x) => `<span class="rx-chip">${esc(x)}</span>`).join('')}</div>`;
+}
+/** 成句的规则 / 疗程逐条成行；胶囊只留给药味与穴位这类短词条。 */
+function rulesHtml(items) {
+  const list = (items || []).map((x) => String(x).trim()).filter(Boolean);
+  if (!list.length) return '';
+  return `<div class="rx-rules">${list.map((x) => `<div class="rx-rule">${esc(x)}</div>`).join('')}</div>`;
+}
+/** 结构化成份 [{name,note,dose}] → 「药名（脚注）剂量」；药名与剂量永远同枚标签。 */
+function ingredientItems(list) {
+  return list.filter(isObj).map((it) => {
+    const name = String(it.name ?? '').trim();
+    const note = String(it.note ?? '').trim();
+    const dose = String(it.dose ?? '').trim();
+    if (!name) return dose;
+    return `${name}${note ? `（${note}）` : ''}${dose ? ` ${dose}` : ''}`.trim();
+  }).filter(Boolean);
+}
+/**
+ * 组成 / 取穴等文本拆成「一味药 = 一条」。先按顿号逗号等分隔；若某段用空格罗列，
+ * 且每段都自带剂量（形如「党参10克」），再按空格拆开——保证药名与其剂量始终同一条。
+ */
+function splitList(text) {
+  const out = [];
+  for (const fragment of String(text).split(/[，,、；;。\n]+/).map((s) => s.trim()).filter(Boolean)) {
+    const tokens = fragment.split(/\s+/).filter(Boolean);
+    if (tokens.length > 1 && tokens.every((t) => /\d/.test(t))) out.push(...tokens);
+    else out.push(fragment);
+  }
+  return out;
+}
+function rawDetailsHtml(summary, text) {
+  if (typeof text !== 'string' || !text.trim()) return '';
+  return `<details class="rx-raw"><summary>${esc(summary)}</summary><div class="rx-raw-body"><div class="rx-raw-text">${esc(text)}</div></div></details>`;
+}
+function rowHtml(label, body) {
+  if (!body) return '';
+  return `<div class="rx-row"><span class="rx-k">${esc(label)}</span><div class="rx-v">${body}</div></div>`;
+}
+/** 任意字段值 → 可读 HTML（标签 / 文本 / 子字段）。永不输出裸 JSON。 */
+function valueHtml(value, key) {
+  if (isBlank(value)) return '';
+  if (Array.isArray(value)) {
+    if (value.every((x) => !isObj(x))) return chipsHtml(value);
+    if (value.every((x) => isObj(x) && String(x.name ?? '').trim())) return chipsHtml(ingredientItems(value));
+    return `<div class="rx-sub">${value.map((x) => `<div class="rx-sub-item">${isObj(x) ? objectRowsHtml(x) : esc(String(x))}</div>`).join('')}</div>`;
+  }
+  if (isObj(value)) {
+    // 结构化组成：以 ingredients 呈现药味标签，raw 折叠为可核对原文。
+    if (Array.isArray(value.ingredients)) {
+      return chipsHtml(ingredientItems(value.ingredients)) + rawDetailsHtml('组成原文', value.raw);
+    }
+    return objectRowsHtml(value);
+  }
+  const text = String(value).trim();
+  if (key === 'composition' || key === 'points') {
+    const items = splitList(text);
+    if (items.length > 1) return chipsHtml(items);
+  }
+  if (key === 'regimens') {
+    const items = splitList(text);
+    if (items.length > 1) return rulesHtml(items);
+  }
+  return `<div class="rx-text">${esc(text)}</div>`;
+}
+function objectRowsHtml(obj, skipKeys) {
+  return Object.entries(obj).map(([k, v]) => {
+    if (skipKeys?.has(k) || PAYLOAD_TECH_KEYS.has(k) || k === 'provenance' || isBlank(v)) return '';
+    return rowHtml(PAYLOAD_LABELS[k] || k, valueHtml(v, k));
+  }).join('');
+}
+/** 三态事实（PRESENT / KNOWN_EMPTY / UNKNOWN）渲染，UNKNOWN 绝不写成「无」。 */
+function presenceHtml(fact, key) {
+  if (!fact) return '';
+  if (fact.presence === 'PRESENT') return valueHtml(fact.value, key);
+  if (fact.presence === 'KNOWN_EMPTY') return '<div class="rx-text muted">明确无</div>';
+  return '<div class="rx-text muted">未知</div>';
+}
+/** 三个加减命名空间共用：PRESENT 列出规则，KNOWN_EMPTY 为「无加减」，UNKNOWN 保持未知。 */
+function modificationHtml(fact) {
+  if (!fact) return '';
+  if (fact.presence === 'PRESENT') {
+    const items = (Array.isArray(fact.value) ? fact.value : [fact.value])
+      .map((x) => (isObj(x) ? String(x.statement ?? '') : String(x ?? '')))
+      .map((x) => x.trim()).filter(Boolean);
+    return items.length ? rulesHtml(items) : '<div class="rx-text muted">无加减</div>';
+  }
+  if (fact.presence === 'KNOWN_EMPTY') return '<div class="rx-text muted">无加减</div>';
+  return '<div class="rx-text muted">未知</div>';
+}
+function provenanceLineHtml(prov) {
+  if (!isObj(prov)) return '';
+  const label = [prov.source_label, prov.book].find((x) => typeof x === 'string' && x.trim());
+  const section = typeof prov.section === 'string' && prov.section.trim() ? prov.section : '';
+  if (!label && !section) return '';
+  return `<div class="rx-source">出处：${esc(label || '—')}${section ? ` · ${esc(section)}` : ''}</div>`;
+}
+function provenanceDetailsHtml(prov) {
+  if (!isObj(prov)) return '';
+  const raw = typeof prov.raw_text === 'string' ? prov.raw_text : '';
+  const extras = Object.entries(prov)
+    .filter(([k, v]) => !PROVENANCE_DISPLAY_KEYS.has(k) && !isBlank(v))
+    .map(([k, v]) => `<div class="rx-kv"><span>${esc(k)}</span><span>${esc(Array.isArray(v) ? v.join('、') : String(v))}</span></div>`)
+    .join('');
+  if (!raw && !extras) return '';
+  return `<details class="rx-raw"><summary>来源原文与溯源字段</summary><div class="rx-raw-body">${raw ? `<div class="rx-raw-text">${esc(raw)}</div>` : ''}${extras ? `<div class="rx-kv-list">${extras}</div>` : ''}</div></details>`;
+}
+function techDetailsHtml(payload) {
+  const entries = Object.entries(payload).filter(([k, v]) => PAYLOAD_TECH_KEYS.has(k) && k !== 'provenance' && !isBlank(v));
+  if (!entries.length) return '';
+  const rows = entries.map(([k, v]) => `<div class="rx-kv"><span>${esc(k)}</span><span>${esc(Array.isArray(v) ? v.join('、') : String(v))}</span></div>`).join('');
+  return `<details class="rx-raw"><summary>来源资产标识</summary><div class="rx-raw-body"><div class="rx-kv-list">${rows}</div></div></details>`;
+}
+function deliveryCardHtml({ kind, title, badge, ref, meta, rows, source, details, exclusion }) {
+  return `<div class="rx-card">
+      <div class="rx-head">
+        <span class="rx-kind">${esc(kind)}</span>
+        <strong class="rx-title">${esc(title || kind)}</strong>
+        ${badge || ''}
+        ${ref || ''}
+      </div>
+      ${meta ? `<div class="rx-meta">${esc(meta)}</div>` : ''}
+      <div class="rx-body">${rows || '<div class="rx-text muted">该来源未提供可展示的结构化字段。</div>'}${exclusion || ''}</div>
+      ${source || ''}
+      ${details || ''}
+    </div>`;
+}
+function formulaCardHtml(f) {
+  const facts = f.facts || {};
+  const rows = [
+    rowHtml('组成', facts.composition ? presenceHtml(facts.composition, 'composition') : valueHtml(f.composition, 'composition')),
+    rowHtml('制备', facts.preparation ? presenceHtml(facts.preparation) : ''),
+    rowHtml('用法', facts.usage ? presenceHtml(facts.usage) : (f.usage ? `<div class="rx-text">${esc(f.usage)}</div>` : '')),
+    rowHtml('方内原始加减', facts.modifications ? modificationHtml(facts.modifications.formulaLocal) : ''),
+    rowHtml('来源节点共享加减', facts.modifications ? modificationHtml(facts.modifications.sourceShared) : ''),
+    rowHtml('患者个体化加减', facts.modifications ? modificationHtml(facts.modifications.patientSpecific) : ''),
+  ].filter(Boolean).join('');
+  const ctx = f.case_context;
+  const ctxText = ctx ? [
+    ctx.disease ? `病名：${ctx.disease}` : '', ctx.syndrome ? `证型：${ctx.syndrome}` : '',
+    ctx.treatment ? `治法：${ctx.treatment}` : '', ctx.patient ? `患者：${ctx.patient}` : '',
+    ctx.symptoms ? `症状：${ctx.symptoms}` : '', ctx.sourceRef ? `来源：${ctx.sourceRef}` : '',
+  ].filter(Boolean).join('\n') : '';
+  return deliveryCardHtml({
+    kind: '方剂',
+    title: f.name,
+    badge: `<span class="rx-badge ${esc(f.relation || '')}">${esc(RELATION_LABELS[f.relation] || f.relation || '来源成员')}</span>`,
+    ref: f.source_ref ? `<span class="ev-refs">${esc(f.source_ref)}</span>` : '',
+    rows,
+    details: rawDetailsHtml('来源病例上下文', ctxText),
+  });
+}
+function legacyFormulaCardHtml(f) {
+  const items = (f.composition || []).flatMap((x) => splitList(x));
+  return deliveryCardHtml({
+    kind: '方剂',
+    title: f.name,
+    badge: `<span class="rx-badge ${esc(f.authority || '')}">${esc(FORMULA_AUTHORITY_LABELS[f.authority] || f.authority || '')}</span>`,
+    ref: f.source_id ? `<span class="ev-refs">${esc(f.source_id)}</span>` : '',
+    rows: rowHtml('组成', items.length ? chipsHtml(items) : ''),
+  });
+}
+/** SOURCE_BOUND 交付：每个被采纳来源成员渲染一张卡，字段无损，形态与方剂一致。 */
+function sourceProductCardHtml(delivery, product) {
+  const payload = isObj(product.payload) ? product.payload : {};
+  const title = (typeof product.name === 'string' && product.name.trim())
+    || (typeof payload.title === 'string' ? payload.title : product.productId);
+  const applicability = product.clinicalApplicability || delivery.clinical_applicability;
+  const meta = [
+    CLEARANCE_LABELS[delivery.execution_clearance] || delivery.execution_clearance,
+    APPLICABILITY_LABELS[applicability] || applicability,
+  ].filter(Boolean).join(' · ');
+  const exclusion = product.qualification === 'CLINICALLY_EXCLUDED'
+    ? `<div class="rx-exclusion">临床排除${product.exclusionReason ? `：${esc(product.exclusionReason)}` : ''}</div>` : '';
+  return deliveryCardHtml({
+    kind: modalityLabel(delivery.outcome),
+    title,
+    badge: `<span class="rx-badge ${esc(product.qualification || '')}">${esc(RELATION_LABELS[product.qualification] || '来源成员')}</span>`,
+    ref: product.productId ? `<span class="ev-refs">${esc(product.productId)}</span>` : '',
+    meta,
+    rows: objectRowsHtml(payload, new Set(['title', 'name'])),
+    source: provenanceLineHtml(payload.provenance),
+    details: techDetailsHtml(payload) + provenanceDetailsHtml(payload.provenance),
+    exclusion,
+  });
+}
+function advisoryDeliveryCardHtml(d) {
+  const rows = [
+    rowHtml('适用性', APPLICABILITY_LABELS[d.disposition] ? `<div class="rx-text">${esc(APPLICABILITY_LABELS[d.disposition])}</div>` : ''),
+    rowHtml('说明', d.statement ? `<div class="rx-text">${esc(d.statement)}</div>` : ''),
+    rowHtml('参考组成', Array.isArray(d.advisory_composition) && d.advisory_composition.length ? chipsHtml(d.advisory_composition) : ''),
+    ...(isObj(d.details) ? Object.entries(d.details).filter(([, v]) => !isBlank(v)).map(([k, v]) => rowHtml(PAYLOAD_LABELS[k] || k, valueHtml(v, k))) : []),
+    rowHtml('制备', d.preparation ? `<div class="rx-text">${esc(d.preparation)}</div>` : ''),
+    rowHtml('用法', d.usage ? `<div class="rx-text">${esc(d.usage)}</div>` : ''),
+  ].filter(Boolean).join('');
+  return deliveryCardHtml({
+    kind: '治疗建议',
+    title: d.form || modalityLabel(d.outcome),
+    badge: '<span class="rx-badge advisory">模型建议</span>',
+    rows,
+  });
+}
+
 function renderClinical(r, authority) {
   const authorityState = r.formula?.authority || '';
-  const badge = authorityState ? `<span class="authority-badge ${esc(authorityState)}">${esc(authorityState)}</span>` : '';
+  const badge = authorityState ? `<span class="authority-badge ${esc(authorityState)}">${esc(FORMULA_AUTHORITY_LABELS[authorityState] || authorityState)}</span>` : '';
   const missing = (r.missing_information || []).map((m) => `<li>${esc(m)}</li>`).join('');
   const ev = (refs) => (refs || []).map((x) => `<span class="ev-refs">${esc(x)}</span>`).join('');
 
-  const renderFact = (label, fact) => {
-    if (!fact || !fact.presence) return '';
-    if (fact.presence === 'PRESENT') {
-      const raw = fact.value;
-      const value = Array.isArray(raw)
-        ? raw.map((item) => typeof item === 'string' ? item : (item?.statement || JSON.stringify(item))).join('；')
-        : String(raw ?? '');
-      return `<div class="muted">${esc(label)}：${esc(value)}</div>`;
-    }
-    return `<div class="muted">${esc(label)}：${esc(fact.presence === 'KNOWN_EMPTY' ? '明确无' : 'UNKNOWN')}</div>`;
-  };
-
-  // formula_set 是 committed SourceBundle 的 lossless compatibility projection。
-  // UI 只渲染，不按 qualification/presence 再筛选 source member。
-  let formulaLines = '';
+  const cards = [];
+  // 方剂：committed SourceBundle 的无损投影。UI 只渲染，不按 relation / qualification 再筛选。
   if (Array.isArray(r.formula_set) && r.formula_set.length) {
-    formulaLines = r.formula_set.map((f) => {
-      const rel = f.relation === 'PRIMARY_SELECTED' ? '主选' : (f.relation === 'CLINICALLY_EXCLUDED' ? '已排除' : '同源备选');
-      const facts = f.facts || {};
-      const mods = facts.modifications || {};
-      const composition = facts.composition?.presence === 'PRESENT' ? facts.composition.value : f.composition;
-      return `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(f.name)}${f.source_ref ? ` <span class="ev-refs">${esc(f.source_ref)}</span>` : ''} <span class="muted">${esc(rel)}</span>
-        <div class="herb-list">${facts.composition ? renderFact('组成', facts.composition) : esc(composition || '')}</div>
-        ${renderFact('方内原始加减', mods.formulaLocal)}
-        ${renderFact('来源节点共享加减', mods.sourceShared)}
-        ${renderFact('患者个体化加减', mods.patientSpecific)}
-        ${renderFact('制备', facts.preparation)}
-        ${renderFact('用法', facts.usage)}
-      </span></div>`;
-    }).join('');
+    cards.push(...r.formula_set.map(formulaCardHtml));
   } else if (r.formula?.name || (r.formula?.composition || []).length) {
-    const herbs = (r.formula?.composition || []).map((h) => `<span class="herb-pill">${esc(h)}</span>`).join('');
-    formulaLines = `<div class="clinical-line formula"><span class="k">方剂</span><span class="v">${esc(r.formula?.name)}${r.formula?.source_id ? ` <span class="ev-refs">${esc(r.formula.source_id)}</span>` : ''}<div class="herb-list">${herbs}</div></span></div>`;
+    cards.push(legacyFormulaCardHtml(r.formula));
   }
-
-  // First-class SOURCE_BOUND deliveries. Render every committed source member without filtering or
-  // reinterpreting it. JSON rendering is intentionally lossless: rich source topology (e.g. body/ear/water
-  // acupuncture regimens) must not be flattened into a generic points string in the UI.
-  const sourceBoundLines = Array.isArray(r.deliveries)
-    ? r.deliveries
-        .filter((d) => d?.source_bundle && d.outcome !== 'modality:herbal-formula')
-        .map((d) => {
-          const products = Array.isArray(d.source_bundle?.products) ? d.source_bundle.products : [];
-          return products.map((p) => `<div class="clinical-line treatment source-bound"><span class="k">来源治疗</span><span class="v">${esc(p.name || p.productId || d.outcome)} <span class="ev-refs">${esc(p.productId || '')}</span><div class="muted">${esc(d.outcome || '')} · ${esc(d.execution_clearance || '')}</div><pre class="source-payload">${esc(JSON.stringify(p.payload ?? {}, null, 2))}</pre></span></div>`).join('');
-        }).join('')
+  // 其他来源绑定交付（膏方 / 针灸 / 艾灸 / 耳穴 / 外治 / 成药…）：逐来源成员渲染，一个成员一张卡。
+  for (const delivery of (Array.isArray(r.deliveries) ? r.deliveries : [])) {
+    if (delivery?.outcome === 'modality:herbal-formula') continue; // 已由 formula_set 无损呈现
+    const products = Array.isArray(delivery?.source_bundle?.products) ? delivery.source_bundle.products : [];
+    for (const product of products) cards.push(sourceProductCardHtml(delivery, product));
+  }
+  // 无来源包的治疗交付（模型生成的建议）：与来源交付共用同一套卡片形态。
+  for (const delivery of (Array.isArray(r.treatment_deliveries) ? r.treatment_deliveries : [])) {
+    cards.push(advisoryDeliveryCardHtml(delivery));
+  }
+  const deliveryHtml = cards.length
+    ? `<div class="rx-section-title">治疗方案</div><div class="rx-list">${cards.join('')}</div>`
     : '';
-
-  let treatmentLines = '';
-  if (Array.isArray(r.treatment_deliveries) && r.treatment_deliveries.length) {
-    treatmentLines = r.treatment_deliveries.map((d) => {
-      const details = d.details ? Object.entries(d.details).map(([k, v]) => `<div class="muted">${esc(k)}：${esc(Array.isArray(v) ? v.join('、') : String(v))}</div>`).join('') : '';
-      return `<div class="clinical-line treatment"><span class="k">治疗</span><span class="v">${esc(d.form)}${d.outcome ? ` <span class="ev-refs">${esc(d.outcome)}</span>` : ''}<div class="muted">${esc(d.statement || '')}</div>${details}</span></div>`;
-    }).join('');
-  }
 
   return `
     <div class="assistant-block">
@@ -467,9 +698,7 @@ function renderClinical(r, authority) {
       <div class="clinical-line"><span class="k">病名</span><span class="v">${esc(r.disease?.name)}<span class="confidence">${(r.disease?.confidence ?? '').toFixed ? (r.disease.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.disease?.evidence_refs)}</span></div>
       <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}<span class="confidence">${r.syndrome?.confidence != null ? (r.syndrome.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.syndrome?.evidence_refs)}</span></div>
       <div class="clinical-line"><span class="k">治法</span><span class="v">${esc(r.treatment?.text)}${ev(r.treatment?.evidence_refs)}</span></div>
-      ${formulaLines}
-      ${sourceBoundLines}
-      ${treatmentLines}
+      ${deliveryHtml}
       ${missing ? `<div class="missing-info"><strong>尚缺信息</strong><ul>${missing}</ul></div>` : ''}
     </div>`;
 }
