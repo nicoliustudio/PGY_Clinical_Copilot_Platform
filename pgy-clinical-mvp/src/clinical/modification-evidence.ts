@@ -1,7 +1,12 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { config } from '../config.js';
-import type { ClinicalWorkspace, ModificationEvidenceCandidate, ModificationEvidenceClosure } from '../contracts/workspace.js';
+import type {
+  ClinicalWorkspace,
+  ModificationEvidenceCandidate,
+  ModificationEvidenceClosure,
+  ModificationMedication,
+} from '../contracts/workspace.js';
 
 /**
  * H15.6 Minimal ADD Modification Evidence（安全 + 闭环）
@@ -11,7 +16,10 @@ import type { ClinicalWorkspace, ModificationEvidenceCandidate, ModificationEvid
  *
  * 强制边界：
  * - 只读资产，不做 rule engine、不做 runtime LLM matcher、不做 embedding threshold。
- * - auto_apply_default 不作为自由执行开关；所有命中都必须有显式患者证据。
+ * - 药名与剂量是同一个事实的两半，必须成对解析（ModificationMedication）；
+ *   严禁投影成「药名一串 + 剂量一串」两条平行列表（那会让配对信息在进入交付前就永久丢失）。
+ * - 患者证据 ref 只放真实证据（CF_xxx / P1:…）；命中的临床判断 artifact 另行记录，
+ *   不冒充患者事实，也不因缺患者证据而伪造。
  * - 本模块只发现 curated ADD rule evidence；是否形成 durable patient-specific modification
  *   由 Kernel 的 formula.select transaction 在完成 canonical selection 时确定性物化，LLM 无直接写权。
  * - 症状 trigger 必须与规则所属知识上下文（当前 adopted disease/parent）共同成立。
@@ -100,38 +108,88 @@ function triggerGroups(trigger: string): string[][] {
   return groups.filter((g) => g.length > 0);
 }
 
-function parseMedication(medication: string): { medication: string; dose: string } {
-  const items = medication.split(/[、，；;]/).map((x) => x.trim()).filter(Boolean);
-  const herbs: string[] = [];
-  const doses: string[] = [];
-  for (const item of items) {
-    const m = item.match(/^(.*?)(\d.*)?$/);
-    const herb = (m?.[1] ?? item).trim();
-    const dose = (m?.[2] ?? '').trim();
-    if (herb) herbs.push(herb);
-    if (dose) doses.push(dose);
+/** 条目边界：标点与空白。不对「药名+剂量」的书写格式做枚举，任何分隔都只是条目边界。 */
+const ITEM_SEPARATOR = /[、，,；;。：:\s]+/;
+/** 「整条只是一个剂量」的形态：数字（可带小数）+ 至多两个汉字单位。 */
+const DOSE_ONLY = /^\d+(?:\.\d+)?\p{Script=Han}{0,2}$/u;
+
+/**
+ * 把一条条目切成「药名 + 剂量」。剂量是条目内紧随药名的第一个数字段起的部分，
+ * 因此「石打穿15」「蒲公英15克」「生军（后下）6克」都得到同一形态的结果，
+ * 无需对剂量写法/单位做枚举。数字开头的药名（如「821消瘤片」）整条视为药名。
+ */
+function splitHerbDose(token: string): { herb: string; dose?: string } | null {
+  const matched = /^(\D*?)(\d.*)$/.exec(token);
+  if (!matched) return { herb: token };
+  const herb = matched[1].trim();
+  const dose = matched[2].trim();
+  if (!herb) return DOSE_ONLY.test(dose) ? null : { herb: token };
+  return { herb, dose };
+}
+
+/**
+ * 解析一条加减用药文本为「药名 + 剂量」配对列表。
+ * 药名与其剂量永不分离：条目内成对产出，被空白拆开的两段（`石打穿 15`）也在此重新配对。
+ */
+export function parseMedications(text: string): ModificationMedication[] {
+  const items: ModificationMedication[] = [];
+  for (const token of String(text).split(ITEM_SEPARATOR).map((x) => x.trim()).filter(Boolean)) {
+    const split = splitHerbDose(token);
+    if (!split) {
+      // 独立的剂量段：并入上一条药名，而不是自成一条「药」。
+      const previous = items[items.length - 1];
+      if (previous && previous.dose === undefined) previous.dose = token;
+      continue;
+    }
+    items.push(split.dose === undefined ? { herb: split.herb } : { herb: split.herb, dose: split.dose });
   }
-  return { medication: herbs.join('、'), dose: doses.join('、') };
+  return items;
+}
+
+/** 规范文本投影：逐味「药名+剂量」相邻，永不产生「药名一串 剂量一串」。 */
+export function renderMedicationList(medications: readonly ModificationMedication[]): string {
+  return medications
+    .map((item) => `${item.herb}${item.dose ? ` ${item.dose}` : ''}`.trim())
+    .filter(Boolean)
+    .join('、');
+}
+
+/**
+ * 匹配目标：被匹配的文本 + 它的两类来源。
+ * `patientRefs` 是支撑该文本的真实证据；`assessmentRef` 是被命中的临床判断 artifact。
+ * 两者分开记录——artifact 名称绝不能冒充患者事实（否则审计会溯源不到病例原文）。
+ */
+interface MatchTarget {
+  text: string;
+  patientRefs: readonly string[];
+  assessmentRef: string;
 }
 
 /** 各 scope 的可匹配目标文本（DISEASE / SYNDROME 用已形成的临床判断；SYMPTOM 用已过滤的当前现症）。 */
-function patientTargets(workspace: ClinicalWorkspace, scope: string): { text: string; ref: string }[] {
+function patientTargets(workspace: ClinicalWorkspace, scope: string): MatchTarget[] {
   if (scope === 'DISEASE') {
-    const out: { text: string; ref: string }[] = [];
-    const stmt = workspace.clinicalDecisionSpine.diseaseAssessment?.statement;
-    if (stmt) out.push({ text: stmt, ref: 'diseaseAssessment' });
-    return out;
+    const assessment = workspace.clinicalDecisionSpine.diseaseAssessment;
+    if (!assessment?.statement) return [];
+    return [{ text: assessment.statement, patientRefs: assessment.evidenceRefs ?? [], assessmentRef: 'diseaseAssessment' }];
   }
   if (scope === 'SYNDROME') {
-    const out: { text: string; ref: string }[] = [];
     const pa = workspace.patternAssessment;
-    if (pa?.primary?.statement) out.push({ text: pa.primary.statement, ref: pa.primary.hypothesisRef ?? 'patternPrimary' });
-    for (const s of pa?.secondary ?? []) if (s.statement) out.push({ text: s.statement, ref: s.hypothesisRef ?? 'patternSecondary' });
-    if (pa?.currentDominantMechanism?.statement) out.push({ text: pa.currentDominantMechanism.statement, ref: pa.currentDominantMechanism.hypothesisRef ?? 'patternDominant' });
+    const out: MatchTarget[] = [];
+    const push = (claim: { statement?: string; hypothesisRef?: string; supportingEvidenceRefs?: string[] } | undefined, fallbackRef: string): void => {
+      if (!claim?.statement) return;
+      out.push({
+        text: claim.statement,
+        patientRefs: claim.supportingEvidenceRefs ?? [],
+        assessmentRef: claim.hypothesisRef ?? fallbackRef,
+      });
+    };
+    push(pa?.primary, 'pattern:primary');
+    for (const secondary of pa?.secondary ?? []) push(secondary, 'pattern:secondary');
+    push(pa?.currentDominantMechanism, 'pattern:dominant');
     return out;
   }
-  // SYMPTOM（默认）：当前 + present 的患者症状事实（CF_xxx）。
-  return eligibleSymptomFacts(workspace).map((f) => ({ text: f.value, ref: f.id }));
+  // SYMPTOM（默认）：当前 + present 的患者症状事实本身就是患者证据（CF_xxx）。
+  return eligibleSymptomFacts(workspace).map((f) => ({ text: f.value, patientRefs: [f.id], assessmentRef: '' }));
 }
 
 /**
@@ -157,24 +215,26 @@ export function matchModificationEvidence(
     const normalizedTargets = targets.map((t) => ({ ...t, n: normalize(t.text) }));
 
     // 任一 OR group 内全部 AND token 命中即算命中。
-    const matchedRefs = new Set<string>();
+    const matchedPatientRefs = new Set<string>();
+    const matchedAssessmentRefs = new Set<string>();
     for (const group of groups) {
       if (group.length === 0) continue;
       const groupAll = group.every((tok) => normalizedTargets.some((t) => t.n.includes(tok)));
       if (!groupAll) continue;
       for (const t of normalizedTargets) {
-        for (const tok of group) if (t.n.includes(tok)) matchedRefs.add(t.ref);
+        if (!group.some((tok) => t.n.includes(tok))) continue;
+        for (const ref of t.patientRefs) matchedPatientRefs.add(ref);
+        if (t.assessmentRef) matchedAssessmentRefs.add(t.assessmentRef);
       }
     }
 
-    if (matchedRefs.size === 0) continue;
-    const { medication, dose } = parseMedication(r.medication ?? '');
+    if (matchedPatientRefs.size === 0 && matchedAssessmentRefs.size === 0) continue;
     candidates.push({
       modificationEvidenceRef: r.id ?? '',
       trigger,
-      matchedPatientEvidenceRefs: [...matchedRefs],
-      medication,
-      dose,
+      matchedPatientEvidenceRefs: [...matchedPatientRefs],
+      matchedAssessmentRefs: [...matchedAssessmentRefs],
+      medications: parseMedications(r.medication ?? ''),
       sourceRef: r.source ?? '',
     });
     if (candidates.length >= topK) break;

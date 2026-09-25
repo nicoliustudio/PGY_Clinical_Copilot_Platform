@@ -261,8 +261,11 @@ export interface FormulaSelection {
 
 export interface ModificationPlan {
   items: Array<{
+    /** 由 medications 确定性投影出的可读文本（逐味「药名+剂量」相邻）。 */
     statement: string;
     patientEvidenceRefs: string[];
+    /** 触发该加减的临床判断 artifact；与患者证据分列，不混为一谈。 */
+    assessmentRefs?: string[];
     sourceEvidenceRefs?: string[];
   }>;
   version: number;
@@ -407,13 +410,24 @@ export interface CapabilityDeliveryClosure {
   artifactRef?: string;
 }
 
+/**
+ * 一味加减用药。药名与其剂量是同一个事实的两个部分，结构性绑定：
+ * 任何下游都不得把药名和剂量拆成两条平行列表再各自拼接。
+ */
+export interface ModificationMedication {
+  herb: string;
+  dose?: string;
+}
+
 /** 加减证据候选（逐 formula 独立命中；ADVISORY，不自动加味）。 */
 export interface ModificationEvidenceCandidate {
   modificationEvidenceRef: string;
   trigger: string;
+  /** 支撑命中的真实患者/来源证据（CF_xxx / P1:…）。空数组是 UNKNOWN，不是「无」。 */
   matchedPatientEvidenceRefs: string[];
-  medication: string;
-  dose: string;
+  /** 被命中的临床判断 artifact（患者证据之外的另一类来源，不冒充患者事实）。 */
+  matchedAssessmentRefs: string[];
+  medications: ModificationMedication[];
   sourceRef: string;
 }
 

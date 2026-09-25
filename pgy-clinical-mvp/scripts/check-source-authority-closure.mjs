@@ -32,12 +32,19 @@ for (const path of ['patient', 'syndrome_pattern', 'composition.raw', 'preparati
 
 const sourceCore = await read('src/platform/commit/source-bound-core.ts');
 for (const marker of [
-  'sourceAssetRefs',
   'hydratedRefs.has(ref)',
   'SOURCE_BINDING_MISMATCH',
   'structuredClone(resolved)',
   'sourceRequiredFieldsByOutcome',
 ]) if (!sourceCore.includes(marker)) violations.push(`source-bound core missing invariant marker: ${marker}`);
+// Adoption membership comes from a Kernel receipt, never from hydration count and never from the
+// model-authored `sourceAssetRefs` field. Assert that invariant where it is actually enforced:
+// the materializer consumes SourceBindingReceipts, and the delivery path strips the model field.
+const materializer = await read('src/platform/commit/source-bound-materializer.ts');
+if (!materializer.includes('sourceBindingReceipts')) violations.push('source-bound adoption is not receipt-driven');
+if (!materializer.includes('sourceAssetRefs')) violations.push('source-bound materializer no longer documents the model-authored sourceAssetRefs hazard');
+const toolBindings = await read('src/adapters/ai-sdk/tool-bindings.ts');
+if (!toolBindings.includes('delete delivery.sourceAssetRefs')) violations.push('model-authored sourceAssetRefs can still reach the delivery path');
 if (sourceCore.includes('input.hydratedRefs.size === 1')) violations.push('hydration alone can still become source adoption');
 if (!sourceCore.includes('COMPLETE_FOR_ADOPTED_ASSETS')) violations.push('source-bound core overclaims or omits adopted-asset completeness semantics');
 if (!sourceCore.includes('contentHashes')) violations.push('source-bound commit does not preserve canonical content hashes');
@@ -62,7 +69,13 @@ if (!runtime.includes("proposal.mode === 'urgent'")) violations.push('urgent saf
 
 const ui = await read('ui/app.js');
 if (!ui.includes('source_bundle')) violations.push('UI does not render first-class committed source bundles');
-if (!ui.includes('JSON.stringify(p.payload')) violations.push('UI source-bound projection is not lossless for rich source topology');
+// Rich source topology (body / ear / water acupuncture regimens) must stay structurally lossless:
+// every committed member is rendered, and each payload field is rendered generically. A raw payload
+// JSON blob is explicitly forbidden, because a doctor cannot read it.
+if (!ui.includes('source_bundle?.products')) violations.push('UI does not enumerate every committed source member');
+const productCard = functionBody(ui, 'function sourceProductCardHtml');
+if (!productCard.includes('objectRowsHtml(payload')) violations.push('UI source-bound projection is not lossless for rich source topology');
+if (productCard.includes('JSON.stringify')) violations.push('UI flattens rich source topology into a raw JSON blob');
 
 const semantic = await read('src/control-plane-v2/semantic-validator.ts');
 if (!semantic.includes('COMPILER_BOUND')) violations.push('semantic entrance reconciliation is missing');

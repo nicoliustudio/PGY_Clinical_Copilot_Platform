@@ -3,7 +3,7 @@ import type { CandidateReference, FormulaCandidateDecision, SourceFormulaSet } f
 import { loadIndex } from '../knowledge/build.js';
 import type { KnowledgeIndex } from '../knowledge/types.js';
 import { formulaSelectionReady, focusedFormulaCandidateRefs, missingFocusedFormulaEvidence } from './formula-selection.js';
-import { searchModificationEvidence, type ModificationEvidenceResult } from './modification-evidence.js';
+import { renderMedicationList, searchModificationEvidence, type ModificationEvidenceResult } from './modification-evidence.js';
 import { hydrateSourceFormulaSetForCandidate } from './source-formula-set.js';
 
 export type FormulaSelectionTransactionResult =
@@ -148,11 +148,13 @@ export async function selectCanonicalFormula(
     contradictingEvidenceRefs: [],
   });
 
-  let modificationItems: Array<{ statement: string; patientEvidenceRefs: string[]; sourceEvidenceRefs: string[] }> = [];
+  let modificationItems: Array<{ statement: string; patientEvidenceRefs: string[]; assessmentRefs: string[]; sourceEvidenceRefs: string[] }> = [];
   if (modificationEvidence) {
     modificationItems = modificationEvidence.candidates.map((item) => ({
-      statement: `${item.medication}${item.dose ? ` ${item.dose}` : ''}`.trim(),
-      patientEvidenceRefs: item.matchedPatientEvidenceRefs,
+      // 文本是结构化用药的投影：逐味「药名+剂量」相邻，配对信息不被拆成两条平行列表。
+      statement: renderMedicationList(item.medications),
+      patientEvidenceRefs: [...item.matchedPatientEvidenceRefs],
+      assessmentRefs: [...item.matchedAssessmentRefs],
       sourceEvidenceRefs: [item.modificationEvidenceRef, item.sourceRef].filter(Boolean),
     }));
     context.workspaceStore.append('modification.plan.recorded', { items: modificationItems });

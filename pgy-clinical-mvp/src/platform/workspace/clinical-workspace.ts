@@ -728,9 +728,12 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
             const o = it as Record<string, unknown>;
             const statement = asString(o.statement);
             if (!statement) return undefined;
+            const assessmentRefs = asStringArray(o.assessmentRefs);
             return {
               statement,
               patientEvidenceRefs: asStringArray(o.patientEvidenceRefs),
+              // 触发该加减的临床判断 artifact：空即省略（与投递载荷同一策略），不得静默丢弃。
+              ...(assessmentRefs.length > 0 ? { assessmentRefs } : {}),
               sourceEvidenceRefs: asStringArray(o.sourceEvidenceRefs),
             };
           })

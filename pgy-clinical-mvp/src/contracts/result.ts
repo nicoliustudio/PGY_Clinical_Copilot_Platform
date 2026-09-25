@@ -16,12 +16,14 @@ export const clinicalResultSchema = z.object({
   status: z.enum(['COMPLETED', 'BLOCKED']),
   disease: z.object({
     name: z.string(),
-    confidence: z.number(),
+    /** 模型未给出置信度时省略；0 只表示「确实为 0」，不表示「未给」（UNKNOWN ≠ NONE）。 */
+    confidence: z.number().optional(),
     evidence_refs: z.array(z.string()),
   }),
   syndrome: z.object({
     name: z.string(),
-    confidence: z.number(),
+    /** 同上：缺失即未知，不得用 0 冒充。 */
+    confidence: z.number().optional(),
     evidence_refs: z.array(z.string()),
   }),
   treatment: z.object({

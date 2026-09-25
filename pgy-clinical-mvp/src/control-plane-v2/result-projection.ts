@@ -18,6 +18,8 @@ export interface ProjectedFormulaFacts {
     patientSpecific: ProjectedFact<Array<{
       statement?: string;
       patientEvidenceRefs?: string[];
+      /** 触发该加减的临床判断 artifact；与患者证据分列。 */
+      assessmentRefs?: string[];
       sourceEvidenceRefs?: string[];
     }>>;
   };

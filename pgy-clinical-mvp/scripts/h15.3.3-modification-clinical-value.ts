@@ -1,6 +1,7 @@
 import { runCase } from '../src/composition/runtime.js';
 import { config } from '../src/config.js';
 import { loadIndex } from '../src/knowledge/build.js';
+import { renderMedicationList } from '../src/clinical/modification-evidence.js';
 import { writeFileSync } from 'node:fs';
 
 /**
@@ -104,7 +105,7 @@ for (const c of CASES) {
   console.log(`组成: ${(rec.formula.composition as string[]).join('') || '-'}`);
   console.log(`getModificationCalls=${rec.getModificationCalls} candidates=${modCandidates.length} adopted=${(mp?.items ?? []).length}`);
   for (const cand of modCandidates) {
-    console.log(`  CAND trigger=${str(cand.trigger)} med=${str(cand.medication)} dose=${str(cand.dose)} src=${str(cand.sourceRef)} ref=${str(cand.modificationEvidenceRef)} patient=${(cand.matchedPatientEvidenceRefs as string[])?.join(',') || '-'}`);
+    console.log(`  CAND trigger=${str(cand.trigger)} meds=${renderMedicationList((cand.medications as Array<{ herb: string; dose?: string }>) ?? []) || '-'} src=${str(cand.sourceRef)} ref=${str(cand.modificationEvidenceRef)} patient=${(cand.matchedPatientEvidenceRefs as string[])?.join(',') || '-'}`);
   }
   for (const it of (mp?.items ?? [])) {
     console.log(`  PLAN ${str(it.statement)}`);

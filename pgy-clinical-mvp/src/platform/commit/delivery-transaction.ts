@@ -58,11 +58,16 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
               ? patientItems.map((item) => ({
                   statement: item.statement,
                   patientEvidenceRefs: [...item.patientEvidenceRefs],
+                  ...(item.assessmentRefs && item.assessmentRefs.length > 0 ? { assessmentRefs: [...item.assessmentRefs] } : {}),
                   sourceEvidenceRefs: [...(item.sourceEvidenceRefs ?? [])],
                 }))
               : undefined,
             patientPresence === 'PRESENT'
-              ? patientItems.flatMap((item) => [...item.patientEvidenceRefs, ...(item.sourceEvidenceRefs ?? [])])
+              ? patientItems.flatMap((item) => [
+                  ...item.patientEvidenceRefs,
+                  ...(item.assessmentRefs ?? []),
+                  ...(item.sourceEvidenceRefs ?? []),
+                ])
               : [],
           ),
         },

@@ -1,5 +1,6 @@
 import { runCase } from '../src/composition/runtime.js';
 import { loadIndex } from '../src/knowledge/build.js';
+import { renderMedicationList } from '../src/clinical/modification-evidence.js';
 
 /**
  * H15.3.2 — Minimal Modification Tool Wiring
@@ -48,11 +49,11 @@ for (const c of CASES) {
   const toolReturnedModRefs: string[] = [];
   const toolReturnedMedications: string[] = [];
   for (const mc of modCalls) {
-    const out = (mc.output ?? {}) as { candidates?: Array<{ sourceRef?: string; modificationEvidenceRef?: string; medication?: string; dose?: string; matchedPatientEvidenceRefs?: string[] }> };
+    const out = (mc.output ?? {}) as { candidates?: Array<{ sourceRef?: string; modificationEvidenceRef?: string; medications?: Array<{ herb: string; dose?: string }>; matchedPatientEvidenceRefs?: string[] }> };
     for (const cand of out.candidates ?? []) {
       if (cand.sourceRef) toolReturnedSourceRefs.push(cand.sourceRef);
       if (cand.modificationEvidenceRef) toolReturnedModRefs.push(cand.modificationEvidenceRef);
-      if (cand.medication) toolReturnedMedications.push(cand.medication);
+      if (cand.medications?.length) toolReturnedMedications.push(renderMedicationList(cand.medications));
     }
   }
 

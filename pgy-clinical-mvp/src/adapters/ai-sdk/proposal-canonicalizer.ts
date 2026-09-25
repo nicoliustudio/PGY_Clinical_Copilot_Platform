@@ -10,7 +10,8 @@ import type { KnowledgeDoc } from '../../knowledge/types.js';
  * - candidate_ref 是 canonical formula identity 的唯一来源；模型 raw formula 字段不参与。
  * - formula.authority 由 Runtime 判定：candidate_ref 可 canonical hydrate → NORMATIVE，否则 GENERATED_DRAFT。
  * - safety.status 由 Runtime 后续（ClinicalRuntime）以 canonical safety 覆盖，这里先占位 PASS。
- * - disease / syndrome / treatment 是模型的开放世界选择，缺失 confidence/evidence_refs 时补默认值。
+ * - disease / syndrome / treatment 是模型的开放世界选择；confidence 缺失时保持缺失（不补 0），
+ *   evidence_refs 缺失时补空数组。
  */
 export async function canonicalizeProposalSubmit(
   input: ProposalSubmitInput,
@@ -71,12 +72,12 @@ export async function canonicalizeProposalSubmit(
     status: 'COMPLETED',
     disease: {
       name: input.disease.name,
-      confidence: input.disease.confidence ?? 0,
+      ...(input.disease.confidence !== undefined ? { confidence: input.disease.confidence } : {}),
       evidence_refs: input.disease.evidence_refs ?? [],
     },
     syndrome: {
       name: input.syndrome.name,
-      confidence: input.syndrome.confidence ?? 0,
+      ...(input.syndrome.confidence !== undefined ? { confidence: input.syndrome.confidence } : {}),
       evidence_refs: input.syndrome.evidence_refs ?? [],
     },
     treatment: {

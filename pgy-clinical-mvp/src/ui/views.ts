@@ -24,8 +24,8 @@ import { buildComparisonMatrix } from '../platform/workspace/deliberation-projec
 export interface ResultView {
   mode: AgentResult['mode'];
   status?: 'COMPLETED' | 'BLOCKED';
-  disease?: { name: string; confidence: number; evidence_refs: string[] };
-  syndrome?: { name: string; confidence: number; evidence_refs: string[] };
+  disease?: { name: string; confidence?: number; evidence_refs: string[] };
+  syndrome?: { name: string; confidence?: number; evidence_refs: string[] };
   treatment?: { text: string; evidence_refs: string[] };
   formula?: {
     authority: string;

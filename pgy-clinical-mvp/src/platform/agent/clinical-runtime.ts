@@ -537,8 +537,9 @@ export class ClinicalRuntime {
       : {
           mode: 'clinical' as const,
           status: 'BLOCKED' as const,
-          disease: { name: fallbackDisease, confidence: 0, evidence_refs: [] as string[] },
-          syndrome: { name: fallbackSyndrome, confidence: 0, evidence_refs: [] as string[] },
+          // 未收口时病/证结论不成立：confidence 保持缺失，不用 0 冒充「未给」（UNKNOWN ≠ NONE）。
+          disease: { name: fallbackDisease, evidence_refs: [] as string[] },
+          syndrome: { name: fallbackSyndrome, evidence_refs: [] as string[] },
           treatment: { text: fallbackPrinciple, evidence_refs: [] as string[] },
           missing_information: [
             proposal.mode === 'conversation' ? proposal.message : 'Execution terminated before clinical submit; committed deliveries are preserved below.',

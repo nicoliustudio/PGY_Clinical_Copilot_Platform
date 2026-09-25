@@ -670,6 +670,8 @@ function renderClinical(r, authority) {
   const badge = authorityState ? `<span class="authority-badge ${esc(authorityState)}">${esc(FORMULA_AUTHORITY_LABELS[authorityState] || authorityState)}</span>` : '';
   const missing = (r.missing_information || []).map((m) => `<li>${esc(m)}</li>`).join('');
   const ev = (refs) => (refs || []).map((x) => `<span class="ev-refs">${esc(x)}</span>`).join('');
+  // 置信度可能未给出（UNKNOWN ≠ 0）：未给出就不渲染，绝不显示 0%。
+  const confidenceBadge = (value) => (typeof value === 'number' ? `<span class="confidence">${(value * 100).toFixed(0)}%</span>` : '');
 
   const cards = [];
   // 方剂：committed SourceBundle 的无损投影。UI 只渲染，不按 relation / qualification 再筛选。
@@ -695,8 +697,8 @@ function renderClinical(r, authority) {
   return `
     <div class="assistant-block">
       <div class="answer-head"><h3>临床判断</h3>${badge}</div>
-      <div class="clinical-line"><span class="k">病名</span><span class="v">${esc(r.disease?.name)}<span class="confidence">${(r.disease?.confidence ?? '').toFixed ? (r.disease.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.disease?.evidence_refs)}</span></div>
-      <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}<span class="confidence">${r.syndrome?.confidence != null ? (r.syndrome.confidence * 100).toFixed(0) + '%' : ''}</span>${ev(r.syndrome?.evidence_refs)}</span></div>
+      <div class="clinical-line"><span class="k">病名</span><span class="v">${esc(r.disease?.name)}${confidenceBadge(r.disease?.confidence)}${ev(r.disease?.evidence_refs)}</span></div>
+      <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}${confidenceBadge(r.syndrome?.confidence)}${ev(r.syndrome?.evidence_refs)}</span></div>
       <div class="clinical-line"><span class="k">治法</span><span class="v">${esc(r.treatment?.text)}${ev(r.treatment?.evidence_refs)}</span></div>
       ${deliveryHtml}
       ${missing ? `<div class="missing-info"><strong>尚缺信息</strong><ul>${missing}</ul></div>` : ''}

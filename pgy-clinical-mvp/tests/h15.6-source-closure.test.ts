@@ -141,6 +141,28 @@ test('B7: 同 disease 命中自己的规则', () => {
   assert.equal(r.result, 'FOUND');
 });
 
+test('B7.1: DISEASE scope 的患者证据取自被命中判断自身证据，artifact 另行记录', () => {
+  const ws = createClinicalWorkspace();
+  ws.clinicalDecisionSpine.diseaseAssessment = { statement: '肌瘤、癥瘕、癌肿', evidenceRefs: ['CF_001', 'P1:K_x'], version: 1 };
+  const rule: ModificationRule = { id: 'R1', action: 'ADD', scope: 'DISEASE', trigger: '癥瘕', medication: '石打穿15、石见穿15', disease: '肌瘤、癥瘕、癌肿', source: 's' };
+  const r = matchModificationEvidence(ws, [rule]);
+  assert.equal(r.result, 'FOUND');
+  const hit = r.candidates[0];
+  assert.deepEqual(hit.matchedPatientEvidenceRefs, ['CF_001', 'P1:K_x'], '患者证据必须是真实证据，不能写成 artifact 名');
+  assert.deepEqual(hit.matchedAssessmentRefs, ['diseaseAssessment']);
+  assert.deepEqual(hit.medications, [{ herb: '石打穿', dose: '15' }, { herb: '石见穿', dose: '15' }]);
+});
+
+test('B7.2: 判断本身无证据支撑时仍可命中，但不得伪造患者证据', () => {
+  const ws = createClinicalWorkspace();
+  ws.clinicalDecisionSpine.diseaseAssessment = { statement: '癥瘕', evidenceRefs: [], version: 1 };
+  const rule: ModificationRule = { id: 'R1', action: 'ADD', scope: 'DISEASE', trigger: '癥瘕', medication: '石打穿15', source: 's' };
+  const r = matchModificationEvidence(ws, [rule]);
+  assert.equal(r.result, 'FOUND');
+  assert.deepEqual(r.candidates[0].matchedPatientEvidenceRefs, [], '缺证据是 UNKNOWN，不得拿 artifact 名冒充患者事实');
+  assert.deepEqual(r.candidates[0].matchedAssessmentRefs, ['diseaseAssessment']);
+});
+
 test('B8: eligibleSymptomFacts 只返回当前+present 的 symptom', () => {
   const ws = createClinicalWorkspace();
   ws.caseFacts.push(
