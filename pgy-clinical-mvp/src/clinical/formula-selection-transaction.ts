@@ -1,10 +1,10 @@
 import type { RuntimeContext } from '../contracts/runtime.js';
-import type { CandidateReference, FormulaCandidateDecision, SourceFormulaSet } from '../contracts/workspace.js';
+import type { CandidateReference, CaseFact, FormulaCandidateDecision, SourceFormulaSet } from '../contracts/workspace.js';
 import { loadIndex } from '../knowledge/build.js';
 import type { KnowledgeIndex } from '../knowledge/types.js';
 import { formulaSelectionReady, focusedFormulaCandidateRefs, missingFocusedFormulaEvidence } from './formula-selection.js';
-import { renderMedicationList, searchModificationEvidence, type ModificationEvidenceResult } from './modification-evidence.js';
 import { hydrateSourceFormulaSetForCandidate } from './source-formula-set.js';
+import { caseFactCanBackDecision } from './canonical-clinical-state.js';
 
 export type FormulaSelectionTransactionResult =
   | {
@@ -13,26 +13,25 @@ export type FormulaSelectionTransactionResult =
       selectedSourceRef: string;
       primaryFormulaRef?: string;
       sourceFormulaCount: number;
+      /** Selection no longer scans/adopts modifications. Discovery closure is recorded by the adoption transaction. */
       modificationRuleCount: number;
-      modificationState: 'PRESENT' | 'KNOWN_EMPTY' | 'NOT_APPLICABLE';
+      modificationState: 'UNKNOWN' | 'PRESENT' | 'KNOWN_EMPTY' | 'NOT_APPLICABLE';
       sourceAuthority: 'P1' | 'P2_CASE_DERIVED';
     }
   | {
       ok: false;
-      code: 'UNKNOWN_CANDIDATE_REF' | 'CANDIDATE_NOT_FOCUSED' | 'CANDIDATE_EXCLUDED' | 'CANDIDATE_DELIBERATION_INCOMPLETE' | 'FORMULA_EVIDENCE_INCOMPLETE' | 'CANONICAL_HYDRATION_FAILED' | 'MODIFICATION_EVIDENCE_UNAVAILABLE';
+      code: 'UNKNOWN_CANDIDATE_REF' | 'CANDIDATE_NOT_FOCUSED' | 'CANDIDATE_EXCLUDED' | 'CANDIDATE_DELIBERATION_INCOMPLETE' | 'FORMULA_EVIDENCE_INCOMPLETE' | 'CANONICAL_HYDRATION_FAILED' | 'FACT_BACKING_INVALID';
       details: string[];
     };
 
 export interface FormulaSelectionDependencies {
   loadIndex: () => Promise<KnowledgeIndex>;
   hydrateSourceFormulaSet: (docs: KnowledgeIndex['docs'], candidate: CandidateReference) => SourceFormulaSet | null;
-  searchModificationEvidence: (workspace: RuntimeContext['workspace'], topK?: number) => ModificationEvidenceResult;
 }
 
 const DEFAULT_DEPENDENCIES: FormulaSelectionDependencies = {
   loadIndex,
   hydrateSourceFormulaSet: hydrateSourceFormulaSetForCandidate,
-  searchModificationEvidence,
 };
 
 function validateClosedWorldDecision(
@@ -50,11 +49,65 @@ function validateClosedWorldDecision(
   }
   for (const ref of candidateRefs) if (!seen.has(ref)) details.push(`candidate has no clinical disposition: ${ref}`);
   const selected = decisions.find((decision) => decision.candidateRef === selectedCandidateRef);
-  if (selected?.disposition === 'EXCLUDED') {
-    details.push(`selected candidate is explicitly excluded: ${selectedCandidateRef}`);
+  if (selected && selected.disposition !== 'CONSIDERED') {
+    details.push(`selected candidate must be CONSIDERED: ${selectedCandidateRef}`);
     return { ok: false, details, selectedExcluded: true };
   }
   if (!selected) details.push(`selected candidate has no decision: ${selectedCandidateRef}`);
+  return details.length === 0 ? { ok: true } : { ok: false, details };
+}
+
+/**
+ * P0-5: fact-backed disposition validation.
+ *
+ * The rationale is explanation only. Disposition authority comes from typed patient facts:
+ * - CONSIDERED requires >=1 known supporting patient fact.
+ * - EXCLUDED requires >=1 known contradicting patient fact.
+ * - INSUFFICIENT_EVIDENCE requires >=1 missingCriticalEvidence item and no fabricated negative fact.
+ *
+ * PRESENT and explicitly_absent are both real patient facts. `unknown` is NOT_MENTIONED and cannot
+ * support or contradict a decision. Semantic fit between the cited fact and candidate criterion remains
+ * model judgment; the Kernel guarantees epistemic provenance, not disease-specific rules.
+ */
+export function validateFactBackedDecision(
+  caseFacts: CaseFact[],
+  decisions: FormulaCandidateDecision[],
+): { ok: true } | { ok: false; details: string[] } {
+  const byId = new Map(caseFacts.map((f) => [f.id, f]));
+  const details: string[] = [];
+
+  const validateRefs = (decision: FormulaCandidateDecision, refs: readonly string[], role: 'support' | 'contradiction') => {
+    for (const ref of refs) {
+      const fact = byId.get(ref);
+      if (!fact) {
+        details.push(`${role} fact ref is not a patient fact: ${ref}`);
+        continue;
+      }
+      if (!caseFactCanBackDecision(fact)) {
+        details.push(`${role} fact ref is UNKNOWN/NOT_MENTIONED and cannot back a disposition: ${ref}`);
+      }
+    }
+  };
+
+  for (const decision of decisions) {
+    const support = decision.supportingFactRefs ?? [];
+    const contradiction = decision.contradictingFactRefs ?? [];
+    const missing = decision.missingCriticalEvidence ?? [];
+
+    validateRefs(decision, support, 'support');
+    validateRefs(decision, contradiction, 'contradiction');
+
+    if (decision.disposition === 'CONSIDERED' && support.length === 0) {
+      details.push(`CONSIDERED candidate requires supportingFactRefs: ${decision.candidateRef}`);
+    }
+    if (decision.disposition === 'EXCLUDED' && contradiction.length === 0) {
+      details.push(`EXCLUDED candidate requires contradictingFactRefs: ${decision.candidateRef}`);
+    }
+    if (decision.disposition === 'INSUFFICIENT_EVIDENCE' && missing.length === 0) {
+      details.push(`INSUFFICIENT_EVIDENCE candidate requires missingCriticalEvidence: ${decision.candidateRef}`);
+    }
+  }
+
   return details.length === 0 ? { ok: true } : { ok: false, details };
 }
 
@@ -103,6 +156,12 @@ export async function selectCanonicalFormula(
     };
   }
 
+  // P0-5: every clinical disposition must be backed by typed patient facts or typed missing evidence.
+  const factCheck = validateFactBackedDecision(context.workspace.caseFacts, input.candidateDecisions ?? []);
+  if (!factCheck.ok) {
+    return { ok: false, code: 'FACT_BACKING_INVALID', details: factCheck.details };
+  }
+
   let sourceFormulaSet: SourceFormulaSet | null;
   try {
     const index = await deps.loadIndex();
@@ -119,21 +178,12 @@ export async function selectCanonicalFormula(
   }
 
   const isP2CaseSource = candidate.sourceAuthority === 'P2_CASE_DERIVED' || sourceFormulaSet.sourceAuthority === 'P2_CASE_DERIVED';
-  const modificationEvidence = isP2CaseSource
-    ? null
-    : deps.searchModificationEvidence(context.workspace, Number.MAX_SAFE_INTEGER);
-  if (modificationEvidence?.result === 'UNAVAILABLE') {
-    return {
-      ok: false,
-      code: 'MODIFICATION_EVIDENCE_UNAVAILABLE',
-      details: [modificationEvidence.reason ?? 'modification evidence store unavailable'],
-    };
-  }
 
   const receipt = context.workspace.candidateSetReceipt;
   const selectedBinding = receipt?.evidenceBindings.find((binding) => binding.candidateRef === input.candidateRef);
   const selectedSourceRef = candidate.sourceId ?? sourceFormulaSet.parentRecordRef;
-  const primaryFormulaRef = sourceFormulaSet.formulas.find((formula) => formula.relation === 'PRIMARY_SELECTED')?.formulaRef;
+  // Product qualification is the only source of a primary ref. Source hydration alone yields 0 CURRENTLY_SELECTED.
+  const primaryFormulaRef = sourceFormulaSet.formulas.find((formula) => formula.clinicalQualification === 'CURRENTLY_SELECTED')?.formulaRef;
 
   // Complete source membership becomes durable truth at selection time. Downstream may qualify but not erase it.
   context.workspace.sourceFormulaSet = sourceFormulaSet;
@@ -148,43 +198,17 @@ export async function selectCanonicalFormula(
     contradictingEvidenceRefs: [],
   });
 
-  let modificationItems: Array<{ statement: string; patientEvidenceRefs: string[]; assessmentRefs: string[]; sourceEvidenceRefs: string[] }> = [];
-  if (modificationEvidence) {
-    modificationItems = modificationEvidence.candidates.map((item) => ({
-      // 文本是结构化用药的投影：逐味「药名+剂量」相邻，配对信息不被拆成两条平行列表。
-      statement: renderMedicationList(item.medications),
-      patientEvidenceRefs: [...item.matchedPatientEvidenceRefs],
-      assessmentRefs: [...item.matchedAssessmentRefs],
-      sourceEvidenceRefs: [item.modificationEvidenceRef, item.sourceRef].filter(Boolean),
-    }));
-    context.workspaceStore.append('modification.plan.recorded', { items: modificationItems });
-    context.workspace.modificationEvidenceClosure = {
-      status: modificationEvidence.result === 'FOUND' ? 'FOUND' : 'SEARCHED_NONE',
-      baseCandidateRef: input.candidateRef,
-      parentSourceId: selectedSourceRef,
-      matchedRuleRefs: modificationEvidence.candidates.map((item) => item.modificationEvidenceRef).filter(Boolean),
-      evaluatedPatientEvidenceRefs: [...new Set(modificationEvidence.candidates.flatMap((item) => item.matchedPatientEvidenceRefs))],
-      version: context.workspaceStore.version,
-    };
-  } else {
-    context.workspace.modificationEvidenceClosure = {
-      status: 'NOT_APPLICABLE',
-      baseCandidateRef: input.candidateRef,
-      parentSourceId: selectedSourceRef,
-      matchedRuleRefs: [],
-      evaluatedPatientEvidenceRefs: [],
-      version: context.workspaceStore.version,
-    };
-  }
-
+  // Retrieval != Adoption: formula.select does NOT scan or write modification evidence. A separate explicit
+  // `formula.adopt_modifications` transaction owns discovery → closed-world ADOPT/REJECT → durable ModificationPlan.
+  // Until adoption, patient-specific modification state is UNKNOWN (never KNOWN_EMPTY, never auto-filled).
   return {
     ok: true,
     selectedCandidateRef: input.candidateRef,
     selectedSourceRef,
     primaryFormulaRef,
     sourceFormulaCount: sourceFormulaSet.formulas.length,
-    modificationRuleCount: modificationItems.length,
-    modificationState: isP2CaseSource ? 'NOT_APPLICABLE' : (modificationItems.length > 0 ? 'PRESENT' : 'KNOWN_EMPTY'),
+    modificationRuleCount: 0,
+    modificationState: isP2CaseSource ? 'NOT_APPLICABLE' : 'UNKNOWN',
     sourceAuthority: isP2CaseSource ? 'P2_CASE_DERIVED' : 'P1',
   };
 }

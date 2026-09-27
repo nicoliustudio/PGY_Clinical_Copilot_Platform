@@ -16,6 +16,7 @@
     "eval:external": "tsx src/eval/run.ts external",
     "test": "node --experimental-sqlite --import tsx --test \"tests/*.test.ts\"",
     "arch:test": "tsx scripts/check-architecture.ts",
+    "root-authority:check": "node scripts/check-root-authority.mjs",
     "assets:list": "tsx scripts/list-assets.ts",
     "capability:new": "tsx scripts/new-capability.ts",
     "smoke:runtime-catalog": "tsx scripts/smoke-runtime-catalog.ts",

@@ -46,7 +46,7 @@ import { renderActiveSkills } from '../../platform/skills/render-skills.js';
 import { buildClinicalWorkingView, renderClinicalWorkingView, estimateTokens, type RecentAction } from '../../platform/context/clinical-working-view.js';
 import type { ClinicalWorkspace, DecisionState, WorkspaceBatchResult, WorkspaceEvent } from '../../contracts/workspace.js';
 import { getFormulaHydrationStats, resetFormulaHydrationStats } from '../../clinical/formula.js';
-import { requiredDeliveryFields } from '../../clinical/capability-delivery.js';
+import { deliveryMaterializationForOutcome, requiredDeliveryFields } from '../../clinical/capability-delivery.js';
 import { ToolContractError } from '../../contracts/tool-failure.js';
 
 /**
@@ -239,6 +239,21 @@ export function projectControlPlaneV21Surface(context: RuntimeContext, internalT
       }
     }
     for (const toolId of declared) if (!open.has(toolId)) closedSet.add(toolId);
+  }
+
+  // Treatment-delivery commit tools share the same structural V2.1 effect, but their legal transaction
+  // differs by provider-declared materialization. Refine the generic surface from manifest metadata:
+  // SOURCE_BOUND -> source.bind (which auto-commits); CANONICAL_CANDIDATE/REASONING_PRODUCT -> delivery.commit.
+  const deliveryNodes = runnableObligations(state)
+    .filter((node) => node.target.type === 'artifact:treatment-delivery')
+    .map((node) => node.target.qualifiers?.outcome)
+    .filter((outcome): outcome is string => typeof outcome === 'string' && outcome.length > 0);
+  if (deliveryNodes.length > 0) {
+    const materializations = deliveryNodes
+      .map((outcome) => deliveryMaterializationForOutcome(context.capabilities, outcome))
+      .filter((value): value is NonNullable<typeof value> => value !== undefined);
+    if (!materializations.some((value) => value === 'SOURCE_BOUND')) closedSet.add('source.bind');
+    if (!materializations.some((value) => value !== 'SOURCE_BOUND')) closedSet.add('delivery.commit');
   }
 
   // Formula workflow stages are expressed by the obligation graph itself.
@@ -684,6 +699,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
   constructor(private readonly options: AiSdkPrimaryAgentOptions) {}
 
   async run(context: RuntimeContext, onEvent?: (event: AgentStreamEvent) => void): Promise<PrimaryAgentOutput> {
+    if (context.signal?.aborted) throw new Error('Run aborted before agent started');
     const resolveModel = this.options.resolveModel;
     if (!resolveModel) throw new Error('AiSdkPrimaryAgent requires a run-scoped resolveModel');
     const bindings = this.options.toolBindings ?? DEFAULT_AI_SDK_TOOL_BINDINGS;
@@ -1248,6 +1264,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       const response = await buildLoopAgent(resourceSteps, null).generate({
         prompt: buildContextPrompt(context, mode),
         timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
+        ...(context.signal ? { abortSignal: context.signal } : {}),
       });
       proposal = extractJson(response.text, agentResultSchema);
       usage = response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens } : usage;
@@ -1260,11 +1277,13 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     let finalContract: ReturnType<typeof completionContractFor> | null = null;
 
     while (true) {
+      if (context.signal?.aborted) throw new Error('Run aborted during agent loop');
       const maxSteps = Math.max(1, resourceSteps - stepCount);
       const agent = buildLoopAgent(maxSteps, recovery);
       const response = await agent.generate({
         prompt: buildContextPrompt(context, mode),
         timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
+        ...(context.signal ? { abortSignal: context.signal } : {}),
       });
       stepCount += response.steps.length;
       stepOffset = stepCount;
@@ -1460,6 +1479,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       system: this.options.instructions,
       prompt,
       timeout: { totalMs: 120_000 },
+      ...(context.signal ? { abortSignal: context.signal } : {}),
     });
     let finInput = result.usage.inputTokens ?? 0;
     let finOutput = result.usage.outputTokens ?? 0;
@@ -1491,6 +1511,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       system: this.options.instructions,
       prompt: buildRetryPrompt(draft, parsed.error),
       timeout: { totalMs: 120_000 },
+      ...(context.signal ? { abortSignal: context.signal } : {}),
     });
     finInput += retryResult.usage.inputTokens ?? 0;
     finOutput += retryResult.usage.outputTokens ?? 0;

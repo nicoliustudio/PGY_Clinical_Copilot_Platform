@@ -21,7 +21,7 @@ export interface PersistedRunRecord {
   input: string;
   startedAt: string;
   finishedAt?: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'aborted';
   model: string;
   session?: SessionView;
   error?: string;
@@ -34,7 +34,7 @@ export interface RunSummary {
   input: string;
   startedAt: string;
   finishedAt?: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'aborted';
   model: string;
   error?: string;
 }

@@ -73,7 +73,7 @@ if (!ui.includes('source_bundle')) violations.push('UI does not render first-cla
 // every committed member is rendered, and each payload field is rendered generically. A raw payload
 // JSON blob is explicitly forbidden, because a doctor cannot read it.
 if (!ui.includes('source_bundle?.products')) violations.push('UI does not enumerate every committed source member');
-const productCard = functionBody(ui, 'function sourceProductCardHtml');
+const productCard = functionBody(ui, 'function sourceProductCard');
 if (!productCard.includes('objectRowsHtml(payload')) violations.push('UI source-bound projection is not lossless for rich source topology');
 if (productCard.includes('JSON.stringify')) violations.push('UI flattens rich source topology into a raw JSON blob');
 

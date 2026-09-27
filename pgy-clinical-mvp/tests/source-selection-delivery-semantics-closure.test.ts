@@ -64,7 +64,7 @@ test('SOURCE_BOUND preserves canonical payload while TREAT_FIRST_THEN_FORM becom
   assert.equal(result.clinicalApplicability, 'DEFERRED');
   assert.equal(result.sourceBundle.products.length, 1);
   assert.deepEqual(result.sourceBundle.products[0]?.payload, asset);
-  assert.equal(result.sourceBundle.products[0]?.qualification, 'PRIMARY_SELECTED');
+  assert.equal(result.sourceBundle.products[0]?.qualification, 'SOURCE_ALTERNATIVE');
   assert.equal((result.product as Record<string, unknown>).statement, undefined);
 });
 
@@ -188,6 +188,7 @@ test('source.bind is the only transaction that creates durable SOURCE_BOUND memb
 test('formula.select preserves N source siblings from one source-node candidate and materializes matched patient-specific ADD rules', async () => {
   const { selectCanonicalFormula } = await import('../src/clinical/formula-selection-transaction.js');
   const ws = createClinicalWorkspace();
+  ws.caseFacts = [{ id: 'CF_TEST', kind: 'symptom', value: '测试现症', polarity: 'present' }];
   const store = new ClinicalWorkspaceStore(ws, 'formula-select-run');
   const candidateRef = 'source-node:P1:K_PARENT';
   const productRefs = ['P1:K_PARENT::F1', 'P1:K_PARENT::F2', 'P1:K_PARENT::F3'];
@@ -214,7 +215,7 @@ test('formula.select preserves N source siblings from one source-node candidate 
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
   const result = await selectCanonicalFormula(context, {
     candidateRef,
-    candidateDecisions: [{ candidateRef, disposition: 'CONSIDERED', rationale: 'best source-node fit' }],
+    candidateDecisions: [{ candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'], rationale: 'best source-node fit' }],
   }, {
     loadIndex: async () => ({ docs: [] } as never),
     hydrateSourceFormulaSet: () => ({
@@ -235,41 +236,29 @@ test('formula.select preserves N source siblings from one source-node candidate 
         formulaLocalModificationPresence: index === 0 ? 'PRESENT' : 'KNOWN_EMPTY',
         modificationStatus: index === 0 ? 'PRESENT' : 'KNOWN_EMPTY',
         relation: index === 0 ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE',
+        clinicalQualification: index === 0 ? 'CURRENTLY_SELECTED' : 'UNASSESSED',
         applicableModifications: [],
       })),
-    }),
-    searchModificationEvidence: () => ({
-      result: 'FOUND',
-      candidates: [{
-        modificationEvidenceRef: 'MR-1',
-        trigger: '腹痛',
-        matchedPatientEvidenceRefs: ['CF-1'],
-        matchedAssessmentRefs: [],
-        medications: [{ herb: '延胡索', dose: '10克' }],
-        sourceRef: 'RULE-SOURCE',
-      }],
     }),
   });
 
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.sourceFormulaCount, 3);
-  assert.equal(result.modificationState, 'PRESENT');
+  assert.equal(result.modificationState, 'UNKNOWN');
   assert.equal(ws.sourceFormulaSet?.formulas.length, 3);
   assert.equal(ws.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef, candidateRef);
   assert.equal(ws.clinicalDecisionSpine.formulaSelection?.selectedSourceRef, 'P1:K_PARENT');
   assert.equal(ws.clinicalDecisionSpine.formulaSelection?.primaryFormulaRef, 'P1:K_PARENT::F1');
-  assert.deepEqual(ws.clinicalDecisionSpine.modificationPlan?.items, [{
-    statement: '延胡索 10克',
-    patientEvidenceRefs: ['CF-1'],
-    sourceEvidenceRefs: ['MR-1', 'RULE-SOURCE'],
-  }]);
-  assert.equal(ws.modificationEvidenceClosure?.status, 'FOUND');
+  // Retrieval != Adoption: selection does NOT auto-write a durable modification plan.
+  assert.equal(ws.clinicalDecisionSpine.modificationPlan, undefined);
+  assert.equal(ws.modificationEvidenceClosure, undefined);
 });
 
-test('formula.select fails closed before durable selection when modification rule storage is unavailable', async () => {
+test('formula.select succeeds even when modification rule store is unavailable (adoption is a separate transaction)', async () => {
   const { selectCanonicalFormula } = await import('../src/clinical/formula-selection-transaction.js');
   const ws = createClinicalWorkspace();
+  ws.caseFacts = [{ id: 'CF_TEST', kind: 'symptom', value: '测试现症', polarity: 'present' }];
   const store = new ClinicalWorkspaceStore(ws, 'formula-select-unavailable');
   const candidateRef = 'source-node:P1:K_PARENT';
   store.appendBatch(workspaceEventsForTool('formula.search_candidates', { topK: 5 }, {
@@ -284,7 +273,7 @@ test('formula.select fails closed before durable selection when modification rul
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
   const result = await selectCanonicalFormula(context, {
     candidateRef,
-    candidateDecisions: [{ candidateRef, disposition: 'CONSIDERED' }],
+    candidateDecisions: [{ candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'] }],
   }, {
     loadIndex: async () => ({ docs: [] } as never),
     hydrateSourceFormulaSet: () => ({
@@ -293,17 +282,17 @@ test('formula.select fails closed before durable selection when modification rul
       formulas: [{
         formulaRef: 'P1:K_PARENT::F1', formulaId: 'F1', formulaName: '方1', composition: '组成', compositionPresence: 'PRESENT',
         sourceModifications: [], formulaLocalModificationPresence: 'KNOWN_EMPTY', modificationStatus: 'KNOWN_EMPTY',
-        relation: 'PRIMARY_SELECTED', applicableModifications: [],
+        relation: 'PRIMARY_SELECTED', clinicalQualification: 'CURRENTLY_SELECTED', applicableModifications: [],
       }],
     }),
-    searchModificationEvidence: () => ({ result: 'UNAVAILABLE', candidates: [], reason: 'rule store missing' }),
   });
 
-  assert.equal(result.ok, false);
-  if (result.ok) return;
-  assert.equal(result.code, 'MODIFICATION_EVIDENCE_UNAVAILABLE');
-  assert.equal(ws.sourceFormulaSet, undefined);
-  assert.equal(ws.clinicalDecisionSpine.formulaSelection, undefined);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  // Selection no longer depends on the modification rule store; adoption is a separate explicit transaction.
+  assert.equal(result.modificationState, 'UNKNOWN');
+  assert.equal(ws.sourceFormulaSet?.formulas.length, 1);
+  assert.equal(ws.clinicalDecisionSpine.formulaSelection?.selectedSourceRef, 'P1:K_PARENT');
   assert.equal(ws.clinicalDecisionSpine.modificationPlan, undefined);
 });
 

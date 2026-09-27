@@ -132,12 +132,12 @@ function setSourceFormulas(context: RuntimeContext, eligible: number, excluded =
       ...Array.from({ length: eligible }, (_, i) => ({
         formulaRef: `F${i}`, formulaId: `F${i}`, formulaName: `方${i}`, composition: 'c',
         sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const,
-        relation: 'PRIMARY_SELECTED' as const, applicableModifications: [],
+        relation: 'PRIMARY_SELECTED' as const, clinicalQualification: 'CURRENTLY_SELECTED' as const, applicableModifications: [],
       })),
       ...Array.from({ length: excluded }, (_, i) => ({
         formulaRef: `X${i}`, formulaId: `X${i}`, formulaName: `排除方${i}`, composition: 'c',
         sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const,
-        relation: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [],
+        relation: 'CLINICALLY_EXCLUDED' as const, clinicalQualification: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [],
       })),
     ],
   };

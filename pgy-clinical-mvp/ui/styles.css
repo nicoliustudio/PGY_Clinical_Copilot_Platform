@@ -59,6 +59,7 @@ img.brand-mark, img.empty-logo, img.bot-avatar { background: transparent; border
 .session-item { padding: 11px 12px; border-radius: 12px; font-size: 13px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; color: #435049; }
 .session-item:hover { background: #ebefec; }
 .session-item.active { background: #e2ebe5; color: #173d2e; font-weight: 650; }
+.session-item .sess-running { color: #187448; margin-right: 6px; }
 .pp-foot { border-top: 1px solid var(--line); padding: 13px 14px; }
 
 .user-main { min-width: 0; display: grid; grid-template-rows: 60px 1fr auto; height: 100dvh; --measure: 820px; --panel-w: 384px; --pad-l: 24px; --pad-r: 24px; --sbw: 8px; }
@@ -422,6 +423,7 @@ td .input-preview { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 .rx-badge.GENERATED_DRAFT, .rx-badge.advisory { background: #fff3dc; color: #9a6a1b; }
 .rx-badge.BLOCKED { background: #feeceb; color: #a83e3b; }
 .rx-meta { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.rx-meta-shared { margin: 0 0 8px; font-size: 11px; color: var(--muted); }
 .rx-body { margin-top: 9px; display: grid; gap: 7px; }
 .rx-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; align-items: start; }
 .rx-k { font-size: 12px; color: var(--muted); }
@@ -432,6 +434,22 @@ td .input-preview { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 .rx-chip { background: var(--soft); border-radius: 999px; padding: 3px 9px; font-size: 11px; color: #294638; }
 .rx-rules { display: grid; gap: 4px; }
 .rx-rule { font-size: 12px; line-height: 1.7; color: #3f4a44; overflow-wrap: anywhere; }
+/* 加减分组：加（绿）/ 减（红）/ 换（蓝）；原文仍在溯源区无损保留。 */
+.rx-mod-list { display: grid; gap: 8px; }
+.rx-mod { display: grid; gap: 4px; }
+.rx-mod-scope { display: grid; gap: 5px; }
+.rx-mod-scope + .rx-mod-scope { margin-top: 7px; padding-top: 7px; border-top: 1px dashed #e6ece8; }
+.rx-mod-scope-label { font-size: 11px; color: var(--muted-2); }
+.rx-mod-when { font-size: 12px; color: #4d5650; }
+.rx-mod-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.rx-mod-tag { flex: 0 0 auto; font-size: 11px; line-height: 1.7; border-radius: 6px; padding: 1px 7px; }
+.rx-mod-tag.add { background: #e8f5ed; color: #187448; }
+.rx-mod-tag.remove { background: #feeceb; color: #a83e3b; }
+.rx-mod-tag.replace { background: #eef3f7; color: #40607a; }
+.rx-mod-arrow { color: var(--muted-2); font-size: 12px; }
+.rx-chip.add { background: #e8f5ed; color: #15703f; }
+.rx-chip.remove { background: #feeceb; color: #a83e3b; text-decoration: line-through; }
+.rx-chip.replace { background: #eef3f7; color: #40607a; }
 .rx-sub { display: grid; gap: 6px; }
 .rx-sub-item { padding-left: 9px; border-left: 2px solid #eef2ef; }
 .rx-source { margin-top: 9px; font-size: 11px; color: var(--muted); }

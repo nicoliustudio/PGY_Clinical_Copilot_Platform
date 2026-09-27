@@ -37,6 +37,13 @@ export interface NormativeFormula {
   usage?: string;
   /** Optional formula-local source note. */
   sourceNote?: string;
+  /**
+   * Reserved typed contract for the upstream knowledge builder (P0-4 指令四).
+   * Staged guidance ("先…待…再…") must be ingested as structured fields, never regex-inferred
+   * by the Runtime. Bump `KnowledgeIndex.schemaVersion` when upstream starts populating these.
+   */
+  stageGuidance?: string[];
+  conditionalGuidance?: string[];
   /** 公式级 source_tier（源自源数据，provenance 字符串，非 doc.sourceTier）。 */
   sourceTier: string;
   /** 公式级 knowledge_role（源自源数据，provenance 字符串）。 */
@@ -68,6 +75,13 @@ export interface KnowledgeDoc {
   formulas: NormativeFormula[];
   /** Parent/source-node modification text that could not safely be attributed to one formula. */
   sourceModifications?: string[];
+  /**
+   * Reserved typed contract for the upstream knowledge builder (P0-4 指令四): parent-level staged /
+   * conditional guidance. Runtime must not regex-parse composition to recover these. Bump
+   * `KnowledgeIndex.schemaVersion` when upstream starts populating them.
+   */
+  stageGuidance?: string[];
+  conditionalGuidance?: string[];
   /** 原资产 identity（不通过文本重新推断）。 */
   diseaseId?: string;
   syndromeId?: string;

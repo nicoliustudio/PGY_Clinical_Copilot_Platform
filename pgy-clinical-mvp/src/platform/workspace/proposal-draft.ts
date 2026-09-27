@@ -95,7 +95,12 @@ export function buildDeterministicClinicalSubmit(
     mode: 'clinical',
     disease: {
       name: disease.statement,
-      evidence_refs: uniqRefs([...(disease.diseaseRefs ?? []), ...disease.evidenceRefs]),
+      // P0-2: evidence_refs is evidence identity only. diseaseRefs (labels) and diseaseConcepts (typed)
+      // must not be conflated; only concept evidenceRefs + assessment evidenceRefs are evidence identity.
+      evidence_refs: uniqRefs([
+        ...(disease.diseaseConcepts ?? []).flatMap((c) => c.evidenceRefs),
+        ...disease.evidenceRefs,
+      ]),
     },
     syndrome: {
       name: primary.statement,

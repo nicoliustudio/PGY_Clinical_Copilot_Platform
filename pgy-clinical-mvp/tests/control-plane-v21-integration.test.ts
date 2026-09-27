@@ -573,10 +573,10 @@ test('多个方：formulaCardinality 由确定性投影表达，同源方不会�
     completeness: 'COMPLETE' as const,
     sourceLevelModifications: [],
     formulas: [
-      { formulaRef: 'a', formulaId: 'fa', formulaName: 'A', composition: 'x', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'PRIMARY_SELECTED' as const, applicableModifications: [] },
-      { formulaRef: 'b', formulaId: 'fb', formulaName: 'B', composition: 'y', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'SOURCE_ALTERNATIVE' as const, applicableModifications: [] },
-      { formulaRef: 'c', formulaId: 'fc', formulaName: 'C', composition: 'z', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'SOURCE_ALTERNATIVE' as const, applicableModifications: [] },
-      { formulaRef: 'd', formulaId: 'fd', formulaName: 'D', composition: 'w', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [] },
+      { formulaRef: 'a', formulaId: 'fa', formulaName: 'A', composition: 'x', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'PRIMARY_SELECTED' as const, clinicalQualification: 'CURRENTLY_SELECTED' as const, applicableModifications: [] },
+      { formulaRef: 'b', formulaId: 'fb', formulaName: 'B', composition: 'y', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'SOURCE_ALTERNATIVE' as const, clinicalQualification: 'UNASSESSED' as const, applicableModifications: [] },
+      { formulaRef: 'c', formulaId: 'fc', formulaName: 'C', composition: 'z', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'SOURCE_ALTERNATIVE' as const, clinicalQualification: 'UNASSESSED' as const, applicableModifications: [] },
+      { formulaRef: 'd', formulaId: 'fd', formulaName: 'D', composition: 'w', sourceModifications: [], modificationStatus: 'KNOWN_EMPTY' as const, relation: 'CLINICALLY_EXCLUDED' as const, clinicalQualification: 'CLINICALLY_EXCLUDED' as const, applicableModifications: [] },
     ],
   };
   assert.deepEqual(projectFormulaSet(set, { mode: 'PRIMARY_ONLY' }).map((f) => f.formulaRef), ['a', 'b', 'c', 'd']);

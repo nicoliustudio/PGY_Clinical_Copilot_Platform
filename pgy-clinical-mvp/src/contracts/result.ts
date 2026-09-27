@@ -65,6 +65,10 @@ export const clinicalResultSchema = z.object({
     patient_specific_modification_text: z.string(),
     source_level_modification_rules: z.array(z.string()).optional(),
     usage: z.string().optional(),
+    membership: z.literal('SOURCE_MEMBER').optional(),
+    clinical_qualification: z.enum(['UNASSESSED', 'CURRENTLY_SELECTED', 'CLINICALLY_EXCLUDED']).optional(),
+    sequence_relation: z.enum(['SELECTED_VISIT', 'SAME_SOURCE_MEMBER', 'EARLIER_VISIT', 'LATER_VISIT', 'UNKNOWN']).optional(),
+    /** @deprecated compatibility projection only. */
     relation: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
     case_context: z.object({
       sourceRef: z.string(),
@@ -110,6 +114,9 @@ export const clinicalResultSchema = z.object({
         productId: z.string(),
         name: z.string(),
         payload: z.record(z.string(), z.unknown()),
+        membership: z.literal('SOURCE_MEMBER').optional(),
+        clinicalQualification: z.enum(['UNASSESSED', 'CURRENTLY_SELECTED', 'CLINICALLY_EXCLUDED']).optional(),
+        sequenceRelation: z.enum(['SELECTED_VISIT', 'SAME_SOURCE_MEMBER', 'EARLIER_VISIT', 'LATER_VISIT', 'UNKNOWN']).optional(),
         qualification: z.enum(['PRIMARY_SELECTED', 'SOURCE_ALTERNATIVE', 'CLINICALLY_EXCLUDED']),
         clinicalApplicability: z.enum(['CURRENTLY_SUITABLE', 'DEFERRED', 'CURRENTLY_NOT_SUITABLE']).optional(),
         exclusionReason: z.string().optional(),

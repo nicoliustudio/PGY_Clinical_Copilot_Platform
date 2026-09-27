@@ -52,34 +52,35 @@ function hydrateP1(
   const sourceId = parent.id;
   const activeFormulas = parent.formulas.filter((f) => isActiveFormula(f.entityStatus));
   if (activeFormulas.length === 0) return null;
-  // Source-node selection (no explicit formula) defaults to the first active product.
-  // An explicitly requested product that is absent from the parent is a fail-closed identity miss,
-  // never a silent substitution — this keeps intent fidelity without re-parsing candidate syntax.
-  let primaryFormulaId: string;
-  if (selectedFormulaId === undefined) {
-    primaryFormulaId = activeFormulas[0]!.id;
-  } else if (activeFormulas.some((f) => f.id === selectedFormulaId)) {
-    primaryFormulaId = selectedFormulaId;
-  } else {
-    return null;
+  // Source hydration owns membership only. It never invents a primary product from array order.
+  // An explicit selectedFormulaId is a *product decision* (the caller already committed it), not a
+  // silent first-product default. With no explicit decision there are 0 CURRENTLY_SELECTED products.
+  let primaryFormulaId: string | undefined;
+  if (selectedFormulaId !== undefined) {
+    if (activeFormulas.some((f) => f.id === selectedFormulaId)) {
+      primaryFormulaId = selectedFormulaId;
+    } else {
+      // Explicitly requested product absent from the parent is a fail-closed identity miss,
+      // never a silent substitution — this keeps intent fidelity without re-parsing candidate syntax.
+      return null;
+    }
   }
 
   const shared = normalizeTextList(parent.sourceModifications);
   const formulas: SourceFormulaEntry[] = activeFormulas.map((f) => {
     const formulaRef = `${sourceId}::${f.id}`;
-    let relation: FormulaAdoptionState = 'SOURCE_ALTERNATIVE';
-    let exclusionReason: string | undefined;
-    let exclusionEvidenceRefs: string[] | undefined;
-    if (f.id === primaryFormulaId) {
-      relation = 'PRIMARY_SELECTED';
-    } else {
-      const exclusion = options.exclusions?.[formulaRef];
-      if (exclusion) {
-        relation = 'CLINICALLY_EXCLUDED';
-        exclusionReason = exclusion.reason;
-        exclusionEvidenceRefs = exclusion.evidenceRefs;
-      }
-    }
+    const isPrimary = f.id === primaryFormulaId;
+    const exclusion = options.exclusions?.[formulaRef];
+    const clinicalQualification = isPrimary
+      ? 'CURRENTLY_SELECTED'
+      : exclusion
+        ? 'CLINICALLY_EXCLUDED'
+        : 'UNASSESSED';
+    const relation: FormulaAdoptionState = isPrimary
+      ? 'PRIMARY_SELECTED'
+      : exclusion
+        ? 'CLINICALLY_EXCLUDED'
+        : 'SOURCE_ALTERNATIVE';
 
     const local = normalizeTextList(f.sourceModifications);
     const legacyLocal = local.presence === 'PRESENT'
@@ -106,8 +107,9 @@ function hydrateP1(
       usage: f.usage,
       usagePresence: textPresence(f.usage),
       relation,
-      exclusionReason,
-      exclusionEvidenceRefs,
+      clinicalQualification,
+      exclusionReason: exclusion?.reason,
+      exclusionEvidenceRefs: exclusion?.evidenceRefs,
       applicableModifications: [],
     };
   });
@@ -155,17 +157,23 @@ function hydrateP2Case(
   if (encounters.length === 0) return null;
 
   // Preserve source order when possible; visit text is display metadata, not identity authority.
-  const formulas: SourceFormulaEntry[] = encounters.map((doc) => {
+  const selectedIndex = encounters.findIndex((doc) => doc.id === selectedEncounter.id);
+  const formulas: SourceFormulaEntry[] = encounters.map((doc, index) => {
     const formulaRef = `${doc.id}::formula`;
-    let relation: FormulaAdoptionState = doc.id === selectedEncounter.id ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE';
-    let exclusionReason: string | undefined;
-    let exclusionEvidenceRefs: string[] | undefined;
+    const isSelected = doc.id === selectedEncounter.id;
+    // P2 sibling visits keep their sequence truth. They are not blanket "alternatives" to the selected
+    // visit; sequence (earlier/later) is a source fact, not a ranking of clinical preference.
+    const sequenceRelation = isSelected
+      ? 'SELECTED_VISIT'
+      : selectedIndex >= 0 && index < selectedIndex
+        ? 'EARLIER_VISIT'
+        : selectedIndex >= 0 && index > selectedIndex
+          ? 'LATER_VISIT'
+          : 'UNKNOWN';
+    const relation: FormulaAdoptionState = isSelected ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE';
     const exclusion = options.exclusions?.[formulaRef];
-    if (relation !== 'PRIMARY_SELECTED' && exclusion) {
-      relation = 'CLINICALLY_EXCLUDED';
-      exclusionReason = exclusion.reason;
-      exclusionEvidenceRefs = exclusion.evidenceRefs;
-    }
+    const exclusionReason: string | undefined = exclusion?.reason;
+    const exclusionEvidenceRefs: string[] | undefined = exclusion?.evidenceRefs;
     return {
       formulaRef,
       formulaId: p2FormulaId(doc),
@@ -178,6 +186,8 @@ function hydrateP2Case(
       preparationPresence: 'UNKNOWN',
       usagePresence: 'UNKNOWN',
       relation,
+      clinicalQualification: isSelected ? 'CURRENTLY_SELECTED' : (exclusion ? 'CLINICALLY_EXCLUDED' : 'UNASSESSED'),
+      sequenceRelation,
       exclusionReason,
       exclusionEvidenceRefs,
       caseContext: {
@@ -257,9 +267,20 @@ export function countPrimarySelected(set: SourceFormulaSet): number {
   return set.formulas.filter((f) => f.relation === 'PRIMARY_SELECTED').length;
 }
 
-export function assertSinglePrimary(set: SourceFormulaSet): void {
+/**
+ * Source selection does not imply product selection. After hydration (membership only) there may be
+ * 0 CURRENTLY_SELECTED products; the count is 0/1/N and never coerced to exactly 1 by array order.
+ * This helper asserts *at most one* PRIMARY_SELECTED (a single explicit decision may be unique),
+ * which is the only legal constraint — it no longer forces the source to invent a primary.
+ */
+export function assertAtMostOnePrimary(set: SourceFormulaSet): void {
   const primaries = countPrimarySelected(set);
-  if (primaries !== 1) {
-    throw new Error(`invariant violated: expected exactly 1 PRIMARY_SELECTED, got ${primaries}`);
+  if (primaries > 1) {
+    throw new Error(`invariant violated: at most 1 PRIMARY_SELECTED allowed, got ${primaries}`);
   }
+}
+
+/** @deprecated Use assertAtMostOnePrimary. Source hydration must not demand exactly one primary. */
+export function assertSinglePrimary(set: SourceFormulaSet): void {
+  assertAtMostOnePrimary(set);
 }

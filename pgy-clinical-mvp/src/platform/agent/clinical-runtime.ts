@@ -268,7 +268,14 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
         sourceLevelModifications: sourceShared.presence === 'PRESENT' ? sourceShared.value ?? [] : [],
         modificationStatus: localPresence,
         ...(usage.presence === 'PRESENT' && usage.value ? { usage: usage.value } : {}),
-        relation: product.qualification,
+        membership: product.membership,
+        clinicalQualification: product.clinicalQualification,
+        ...(product.sequenceRelation ? { sequenceRelation: product.sequenceRelation } : {}),
+        relation: product.clinicalQualification === 'CURRENTLY_SELECTED'
+          ? 'PRIMARY_SELECTED'
+          : product.clinicalQualification === 'CLINICALLY_EXCLUDED'
+            ? 'CLINICALLY_EXCLUDED'
+            : 'SOURCE_ALTERNATIVE',
         applicableModifications: [],
         ...(payload.caseContext && typeof payload.caseContext === 'object' ? { caseContext: payload.caseContext as ProjectedFormula['caseContext'] } : {}),
         facts: {
@@ -287,7 +294,7 @@ function committedLegacyFormula(records: readonly CommitRecord[]): Record<string
     if (record.outcome !== 'modality:herbal-formula') continue;
     const bundle = record.sourceBundle;
     if (!bundle || record.deliveryStatus !== 'DELIVERED') continue;
-    const primary = bundle.products.find((product) => product.qualification === 'PRIMARY_SELECTED');
+    const primary = bundle.products.find((product) => product.clinicalQualification === 'CURRENTLY_SELECTED');
     if (!primary) continue;
     const payload = primary.payload as Record<string, unknown>;
     const composition = factProjection<string>(payload.composition);
@@ -374,8 +381,8 @@ export class ClinicalRuntime {
     private readonly promptHash?: string,
   ) {}
 
-  async run(input: string, runId?: string, onEvent?: (event: AgentStreamEvent) => void): Promise<ClinicalRunResult> {
-    const context = await this.preparer.prepare(input, runId);
+  async run(input: string, runId?: string, onEvent?: (event: AgentStreamEvent) => void, signal?: AbortSignal): Promise<ClinicalRunResult> {
+    const context = await this.preparer.prepare(input, runId, signal);
     const output = await this.primaryAgent.run(context, onEvent);
     const v21Authoritative = context.controlPlaneV21?.compileStatus === 'COMPILED';
     // V2.1: proposal is a reasoning summary only. Post-hoc proposal candidate/syndrome fields may not
@@ -415,7 +422,7 @@ export class ClinicalRuntime {
       let canonicalFormula: FormulaIdentityTrace['canonicalFormula'];
       if (ref) {
         const set = context.workspace.sourceFormulaSet;
-        const primary = set?.formulas.find((formula) => formula.relation === 'PRIMARY_SELECTED');
+        const primary = set?.formulas.find((formula) => formula.clinicalQualification === 'CURRENTLY_SELECTED');
         const sourceId = set?.sourceAuthority === 'P2_CASE_DERIVED'
           ? primary?.caseContext?.sourceRef
           : set?.parentRecordRef;
@@ -598,6 +605,10 @@ export class ClinicalRuntime {
           ? { source_level_modification_rules: formula.sourceLevelModifications }
           : {}),
         ...(formula.usage ? { usage: formula.usage } : {}),
+        membership: formula.membership,
+        clinical_qualification: formula.clinicalQualification,
+        ...(formula.sequenceRelation ? { sequence_relation: formula.sequenceRelation } : {}),
+        // Legacy compatibility only. New consumers must use membership + clinical_qualification.
         relation: formula.relation,
         ...(formula.caseContext ? { case_context: formula.caseContext } : {}),
         ...(formula.facts ? { facts: formula.facts } : {}),

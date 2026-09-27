@@ -28,7 +28,7 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
   private readonly resolver = new ClassicSemanticNeedResolver();
   constructor(private readonly deps: ClassicRuntimePreparerDependencies) {}
 
-  async prepare(input: string, runId: string = randomUUID()): Promise<RuntimeContext> {
+  async prepare(input: string, runId: string = randomUUID(), signal?: AbortSignal): Promise<RuntimeContext> {
     const understanding = await this.deps.understanding.understand(input);
     const safety = await this.deps.safety.evaluate(understanding);
 
@@ -57,6 +57,7 @@ export class ClassicRuntimePreparer implements RuntimePreparationPort {
       harness: undefined as unknown as RuntimeContext['harness'],
       workspace,
       workspaceStore,
+      ...(signal ? { signal } : {}),
       commitLedger: new CommitLedger(),
     } satisfies RuntimeContext;
     const harness = new HarnessSession(context, this.deps.capabilities, this.deps.skills, this.deps.tools);

@@ -46,7 +46,7 @@ export interface RuntimePreparerDependencies {
 export class RuntimePreparer implements RuntimePreparationPort {
   constructor(private readonly deps: RuntimePreparerDependencies) {}
 
-  async prepare(input: string, runId: string = randomUUID()): Promise<RuntimeContext> {
+  async prepare(input: string, runId: string = randomUUID(), signal?: AbortSignal): Promise<RuntimeContext> {
     const understanding = await this.deps.understanding.understand(input);
     const safety = await this.deps.safety.evaluate(understanding);
     const strategy = await this.deps.planner.plan({
@@ -99,6 +99,7 @@ export class RuntimePreparer implements RuntimePreparationPort {
       harness: undefined as unknown as RuntimeContext['harness'],
       workspace,
       workspaceStore,
+      ...(signal ? { signal } : {}),
       commitLedger: new CommitLedger(),
     };
 

@@ -179,9 +179,30 @@ export interface PatternAssessment {
  * 固定「临床判断的因果顺序」，不固定医学答案。所有字段开放文本。
  * version 用于 Dependency Versioning（上游变化 → 下游候选 STALE）。
  */
+
+/** Typed disease concept identity（P0-2）。clinical label 与 canonical ref 与 evidence ref 分离。 */
+export type DiseaseConceptStatus = 'EXPLICIT' | 'RESOLVED' | 'HYPOTHESIS';
+
+export interface DiseaseConcept {
+  id: string;
+  /** Clinical label（病名表述）。与 canonical identity 分离，不参与 source id 解析。 */
+  label: string;
+  /** Canonical concept reference（可选，来自 terminology/diagnosis resolver）。 */
+  canonicalRef?: string;
+  status: DiseaseConceptStatus;
+  /** 只做 evidence identity（patient fact / source ref），不得混入病名文本。 */
+  evidenceRefs: string[];
+}
+
 export interface DiseaseAssessment {
   statement: string;
+  /**
+   * @deprecated Legacy clinical disease labels。仅作为「病名表述」读取，不得当作 source id 或 evidence ref。
+   * 第一真源是 `diseaseConcepts`；evidence identity 由 `evidenceRefs` 承载。
+   */
   diseaseRefs?: string[];
+  /** P0-2 第一真源：typed disease concept（label / canonicalRef / status / evidenceRefs 分离）。 */
+  diseaseConcepts?: DiseaseConcept[];
   evidenceRefs: string[];
   uncertainty?: string[];
   version: number;
@@ -234,13 +255,25 @@ export interface TreatmentPlan {
   version: number;
 }
 
-export type FormulaCandidateDisposition = 'CONSIDERED' | 'EXCLUDED';
+export type FormulaCandidateDisposition = 'CONSIDERED' | 'EXCLUDED' | 'INSUFFICIENT_EVIDENCE';
 
 export interface FormulaCandidateDecision {
   candidateRef: string;
   disposition: FormulaCandidateDisposition;
   /** Clinical explanation only. Durable evidence linkage is Runtime-owned by CandidateSetReceipt. */
   rationale?: string;
+  /**
+   * P0-5: patient-fact refs (CaseFact.id) that support this candidate in the unified semantic coordinate.
+   * Must resolve to a real patient fact; fail-closed otherwise.
+   */
+  supportingFactRefs?: string[];
+  /**
+   * P0-5: patient-fact refs that contradict this candidate. Must resolve to a known patient fact.
+   * `unknown` / NOT_MENTIONED is never negative evidence. `explicitly_absent` is a real negative fact and is admissible.
+   */
+  contradictingFactRefs?: string[];
+  /** P0-5: critical evidence the model could not resolve. Distinct from contradiction: absence is not evidence. */
+  missingCriticalEvidence?: string[];
 }
 
 export interface FormulaSelection {
@@ -248,7 +281,7 @@ export interface FormulaSelection {
   selectedCandidateRef?: string;
   /** Canonical source identity, kept separate from candidate/formula identity. */
   selectedSourceRef?: string;
-  /** Canonical primary product chosen/derived inside the selected source bundle. */
+  /** Optional explicit current product qualification inside the selected source bundle. Never derived from array order. */
   primaryFormulaRef?: string;
   /** Closed-world accounting of the Kernel-owned CandidateSet. */
   candidateDecisions?: FormulaCandidateDecision[];
@@ -282,10 +315,20 @@ export interface FormulaReview {
 /**
  * H15.6 Source Formula Adoption State —— 分离「来源完整性」与「临床采纳」。
  * 一个被采用的权威病-证 parent 下，所有 ACTIVE 原典方必须确定性水合；
- * 主选方只有一个，其余是 SOURCE_ALTERNATIVE，只有存在明确临床排除依据时才是 CLINICALLY_EXCLUDED。
- * `not selected` ≠ `clinically rejected`。
+ * source selection 本身允许 0 个 CURRENTLY_SELECTED product；若存在显式 product decision，则最多 1 个。
+ * 只有存在明确临床排除依据时才是 CLINICALLY_EXCLUDED；`not selected` ≠ `clinically rejected`。
+ *
+ * 注意：`relation` 是向后兼容投影字段。真正的 clinical qualification 由
+ * `SourceFormulaEntry.clinicalQualification` 承载（UNASSESSED / CURRENTLY_SELECTED / CLINICALLY_EXCLUDED），
+ * 它独立于 source membership，且不得由 `products[]` 数组顺序隐式产生。
  */
 export type FormulaAdoptionState = 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
+
+/** 产品的临床采纳状态（正交于 source membership）。仅显式 product decision 才可产生 CURRENTLY_SELECTED。 */
+export type ProductQualification = 'UNASSESSED' | 'CURRENTLY_SELECTED' | 'CLINICALLY_EXCLUDED';
+
+/** 同一 case 内诊次的时序关系（P2 source truth），绝不降格为 alternative 语义。 */
+export type SequenceRelation = 'SELECTED_VISIT' | 'SAME_SOURCE_MEMBER' | 'EARLIER_VISIT' | 'LATER_VISIT' | 'UNKNOWN';
 
 /** 同源原典方集合中的一个方。 */
 export type SourceModificationStatus = 'PRESENT' | 'KNOWN_EMPTY' | 'UNKNOWN' | 'UNATTRIBUTED_SOURCE_RULES';
@@ -311,8 +354,16 @@ export interface SourceFormulaEntry {
   /** Optional source-preserved usage text for this formula. */
   usage?: string;
   usagePresence?: SourceFieldPresence;
-  /** 来源完整性与临床采纳的分离状态。 */
+  /** 来源完整性与临床采纳的分离状态（向后兼容投影；见 clinicalQualification）。 */
   relation: FormulaAdoptionState;
+  /**
+   * 临床采纳状态（第一真源）。Source membership 与 clinical qualification 正交：
+   * hydration 只建立 membership（默认 UNASSESSED），只有显式 product decision 才产生
+   * CURRENTLY_SELECTED / CLINICALLY_EXCLUDED。禁止由数组顺序隐式 primary。
+   */
+  clinicalQualification: ProductQualification;
+  /** P2 同 case 诊次的时序关系（source truth，非 alternative 排序）。 */
+  sequenceRelation?: SequenceRelation;
   exclusionReason?: string;
   exclusionEvidenceRefs?: string[];
   /** Historical case context for P2 source products. This is source truth, not current-patient reasoning. */

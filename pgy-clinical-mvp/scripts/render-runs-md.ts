@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import path from 'node:path';
 
 /**
@@ -14,9 +15,22 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string, opts?: { readOnly?: boolean }) => { prepare: (sql: string) => { all: (...a: unknown[]) => unknown[]; get: (...a: unknown[]) => unknown } } };
 
-const DB_FILE = path.resolve('data', 'runs.sqlite3');
-const LIMIT = 8;
-const OUT_FILE = path.resolve('蒲公英中医AI-最新八例全链路排查记录.md');
+const DB_FILE = path.resolve(process.env.RUNS_DB ?? path.join('data', 'runs.sqlite3'));
+const LIMIT = Number(process.env.RUNS_LIMIT ?? 8);
+const OUT_FILE = path.resolve(process.env.RUNS_OUT ?? '蒲公英中医AI-最新八例全链路排查记录.md');
+
+/** 运行时读取真实 git 基线，避免文档写死过期的 HEAD / 改动数。 */
+function gitBaseline(): string {
+  try {
+    const repo = path.resolve('..');
+    const head = execSync('git rev-parse --short HEAD', { cwd: repo }).toString().trim();
+    const dirty = execSync('git status --porcelain', { cwd: repo }).toString().trim();
+    const dirtyCount = dirty ? dirty.split('\n').length : 0;
+    return dirtyCount > 0 ? `工作区 HEAD \`${head}\` + ${dirtyCount} 项未提交改动` : `工作区 HEAD \`${head}\`（工作区干净，无未提交改动）`;
+  } catch {
+    return '工作区 git 状态不可用';
+  }
+}
 
 interface Row {
   run_id: string;
@@ -26,7 +40,7 @@ interface Row {
   status: string;
   model: string;
   error: string | null;
-  session_json: string;
+  session_json: string | null;
 }
 
 const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -108,8 +122,15 @@ interface Derived {
 }
 
 function derive(row: Row): Derived {
-  const session = JSON.parse(row.session_json);
-  const trace = session.trace;
+  const session = row.session_json
+    ? JSON.parse(row.session_json)
+    : {
+        result: { mode: 'aborted', status: row.status.toUpperCase(), missing_information: [row.error ?? 'session_json unavailable'] },
+        workspace: {},
+        authority: {},
+        trace: { toolCalls: [], commits: [], agentLoop: { terminationReason: row.status, proposalSubmitted: false, forcedFinalization: false }, runMetrics: {} },
+      };
+  const trace = session.trace ?? {};
   const agentLoop = trace.agentLoop ?? {};
   const cp = agentLoop.controlPlane ?? {};
   const toolCalls: any[] = trace.toolCalls ?? [];
@@ -158,13 +179,13 @@ const runs = rows.map(derive);
 // ---------- header ----------
 
 const header: string[] = [];
-header.push('# 蒲公英中医 AI · 最新八例全链路排查记录');
+header.push(`# 蒲公英中医 AI · 最新${LIMIT}例全链路排查记录`);
 header.push('');
 header.push('> 数据 100% 来自本地服务 `http://localhost:8787/` 的落盘记录 `data/runs.sqlite3`（`session.result / session.workspace / trace.toolCalls / trace.agentLoop.controlPlane / trace.commits / trace.runMetrics`），未做人工润色。');
 header.push(`> 取数口径：按 \`started_at\` 倒序的最新 ${LIMIT} 条运行记录（原样，含重复 input）。`);
 header.push(`> 时间范围：${localTime(runs[runs.length - 1].row.started_at)} ～ ${localTime(runs[0].row.finished_at ?? runs[0].row.started_at)}（本地 Asia/Shanghai），共 ${runs.length} 例。`);
 header.push('> 详略：工具调用 input/output 为 **原文全量**（2 空格缩进 JSON），不做截断。');
-header.push('> 代码基线：工作区 HEAD `bcb7c8a`（Truth Genesis / Source Authority Closure）+ 72 项未提交改动；Root Architecture Closure —— P1 `source-node:*` / P2 `case-visit:*` typed candidate identity；`formula.search_candidates`（CandidateSet + canonical evidence 原子冻结）+ `formula.select`（闭世界 decision 事务）。');
+header.push(`> 代码基线：${gitBaseline()}。`);
 header.push('');
 header.push('## 总览');
 header.push('');
@@ -225,6 +246,25 @@ runs.forEach((r, idx) => {
   body.push('```text');
   body.push(r.input);
   body.push('```');
+  body.push('');
+
+  // 1.5 患者事实（CF_* patient facts）
+  const facts = Array.isArray(r.workspace?.facts) ? r.workspace.facts : [];
+  body.push('## 1.5 患者事实（CF_* patient facts）');
+  body.push('');
+  body.push('> id 按 `understanding.facts` 顺序重建（`CF_` + 三位序号）。Runtime 内 `CaseFact.id` 即此编号；落盘 `session.workspace.facts` 投影未保留 id 字段，此处按原顺序还原，供 `formula.select` 的 `supportingFactRefs / contradictingFactRefs` 精确溯源。');
+  body.push('');
+  if (facts.length) {
+    body.push('| id | kind | value | polarity | temporalRole | source |');
+    body.push('|---|---|---|---|---|---|');
+    facts.forEach((f, i) => {
+      const id = `CF_${String(i + 1).padStart(3, '0')}`;
+      const cell = (v: unknown) => String(v ?? '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+      body.push(`| ${id} | ${cell(f.kind)} | ${cell(f.value)} | ${cell(f.polarity)} | ${cell(f.temporalRole)} | ${cell(f.source)} |`);
+    });
+  } else {
+    body.push('（无患者事实）');
+  }
   body.push('');
 
   // 2. 最终结果

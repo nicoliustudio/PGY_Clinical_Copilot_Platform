@@ -79,7 +79,7 @@ export function materializeSourceBoundAssets(input: {
   const applicability = clinicalApplicability(input.decision);
   const products: CommittedSourceProduct[] = [];
   const missing: string[] = [];
-  for (const [index, ref] of refs.entries()) {
+  for (const ref of refs) {
     if (!input.hydratedRefs.has(ref)) return { ok: false, code: 'SOURCE_BINDING_MISMATCH', details: [`unhydrated source asset: ${ref}`] };
     const resolved = input.resolveAsset(ref);
     if (!resolved) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED', details: [`asset unavailable: ${ref}`] };
@@ -95,8 +95,11 @@ export function materializeSourceBoundAssets(input: {
       productId: ref,
       name: assetName(asset, ref),
       payload: asset,
-      // membership/selection and patient applicability are separate axes.
-      qualification: index === 0 ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE',
+      // SOURCE_BOUND adoption establishes source membership. Every adopted asset is a co-equal member;
+      // there is no array-order primary/alternative ranking (membership and qualification are orthogonal).
+      membership: 'SOURCE_MEMBER',
+      clinicalQualification: 'UNASSESSED',
+      qualification: 'SOURCE_ALTERNATIVE',
       clinicalApplicability: applicability,
     });
   }

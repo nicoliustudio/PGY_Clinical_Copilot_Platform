@@ -40,8 +40,13 @@ export interface FormulaEvidenceCard {
 /** 轻量候选卡（第一阶段 formula.search_candidates，Top 3~5）。 */
 export interface FormulaCandidateCard {
   candidateRef: string;
-  formulaId: string;
-  formulaName: string;
+  /**
+   * Top-level single-formula identity is NOT present for P1 SOURCE_NODE candidates. A source-level
+   * candidate must not be represented by its first product; membership lives in sourceProductRefs/Names.
+   * P2 case-visit candidates do carry a formulaId/formulaName because each visit is one prescription.
+   */
+  formulaId?: string;
+  formulaName?: string;
   matchedDiseaseContexts: EvidenceContext[];
   matchedSyndromeContexts: EvidenceContext[];
   matchedTreatmentPrinciples: EvidenceContext[];
@@ -125,15 +130,15 @@ export function isApplicableDisease(disease: string, patientDiseases: string[]):
   return [...sourceKeys].some((key) => patientKeys.has(key));
 }
 
-/** 由 diseaseRefs 确定性解析病名（不通过文本重建 identity）。 */
+/**
+ * 由 diseaseRefs 直接取病名 label。diseaseRefs 是临床病名（clinical label），不是 source id，
+ * 也不再是 evidence ref（evidence 由 DiseaseAssessment.evidenceRefs 承载）。禁止用 `docs.find(d => d.id === ref)`
+ * 把它误当 source id 解析 —— 那会把 label 与 canonical identity 混为一谈。
+ */
 export function resolveDiseaseNames(diseaseRefs: string[] | undefined, docs: KnowledgeDoc[]): string[] {
+  void docs;
   if (!diseaseRefs || diseaseRefs.length === 0) return [];
-  const names: string[] = [];
-  for (const ref of diseaseRefs) {
-    const doc = docs.find((d) => d.id === ref);
-    if (doc && nonEmpty(doc.disease) && !names.includes(doc.disease)) names.push(doc.disease);
-  }
-  return names;
+  return [...new Set(diseaseRefs.map((name) => name.trim()).filter(Boolean))];
 }
 
 /**
@@ -292,7 +297,11 @@ export async function searchFormulaCandidates(
   topK = 5,
 ): Promise<FormulaSearchCandidatesResult> {
   const idx = await loadIndex();
-  const diseaseNames = resolveDiseaseNames(workspace.clinicalDecisionSpine.diseaseAssessment?.diseaseRefs, idx.docs);
+  const assessment = workspace.clinicalDecisionSpine.diseaseAssessment;
+  // P0-2: prefer typed disease concepts (label is the clinical disease name); fall back to legacy labels.
+  const diseaseNames = assessment?.diseaseConcepts?.length
+    ? [...new Set(assessment.diseaseConcepts.map((c) => c.label.trim()).filter(Boolean))]
+    : resolveDiseaseNames(assessment?.diseaseRefs, idx.docs);
   const projection = buildFormulaRetrievalProjection(workspace, diseaseNames);
   if (!projection) return { candidates: [], projection: null, diagnostics: null };
   // Patient Fact / Disease Identity Authority：用户明确提供的疾病身份必须参与 canonical source 召回与
@@ -312,8 +321,11 @@ export async function searchFormulaCandidates(
     : null;
   // 1b. Hypothesis-support search remains useful, but it can no longer control the entire visible source set.
   const hypothesisSearch = await searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'NORMATIVE_TREATMENT' });
+  // Multi-lane union: recall lanes broaden the source universe; no lane owns hard deletion authority.
+  // Terminology/diagnosis mapping may only add recall evidence — it can never delete a P1 source here.
+  // Clinical applicability is decided later by the model in the closed-world selection transaction.
   const applicableHits = mergeHitsBySource(sourceRecall?.hits ?? [], hypothesisSearch.hits).filter(
-    (h) => h.authority === 'P1' && isApplicableDisease(h.provenance.disease, applicabilityDiseases),
+    (h) => h.authority === 'P1',
   );
   const p1Candidates = buildP1SourceCandidateCards(applicableHits);
 
@@ -418,13 +430,10 @@ export function buildP1SourceCandidateCards(hits: Array<{ sourceId: string; sour
     const products = h.formulas.filter((formula) => Boolean(formula.composition?.trim()));
     if (products.length === 0) continue;
     // Clinical applicability belongs to the disease/syndrome/treatment source node, not to each sibling.
-    // candidateRef therefore carries a real source-node identity. The first source-listed product is only
-    // canonical display/primary metadata; it no longer masquerades as the selection identity.
-    const representative = products[0]!;
+    // A SOURCE_NODE candidate is source-level: it carries NO top-level formulaId/formulaName authority,
+    // and product membership is expressed only via sourceProductRefs/Names (order never selects a primary).
     candidates.push({
       candidateRef: p1SourceNodeCandidateRef(h.sourceId),
-      formulaId: representative.id,
-      formulaName: representative.name,
       matchedDiseaseContexts: contexts(h.sourceId, h.provenance.disease),
       matchedSyndromeContexts: contexts(h.sourceId, h.provenance.syndrome),
       matchedTreatmentPrinciples: contexts(h.sourceId, h.provenance.treatment),
@@ -472,13 +481,37 @@ export async function getFormulaEvidence(
   if (!doc) return null;
   if (doc.sourceTier === 'P1') {
     // Source-node selection: hydrate one source-backed evidence card while preserving N source products
-    // in CandidateSet metadata. No sibling formula receives its own selection vote.
+    // in CandidateSet metadata. No sibling formula receives its own selection vote, and no representative
+    // product is inferred from array order.
     const legacyFormulaId = candidateRef.includes('::') ? candidateRef.split('::')[1] : undefined;
-    const representative = legacyFormulaId
-      ? doc.formulas.find((formula) => formula.id === legacyFormulaId)
-      : doc.formulas.find((formula) => Boolean(formula.composition?.trim()));
-    if (!representative) return null;
-    return docToEvidenceCard(doc, representative.id);
+    if (legacyFormulaId) {
+      const representative = doc.formulas.find((formula) => formula.id === legacyFormulaId);
+      if (!representative) return null;
+      return docToEvidenceCard(doc, representative.id);
+    }
+    // No explicit product ref: return source-level evidence, never pick the first product.
+    const products = doc.formulas.filter((formula) => Boolean(formula.composition?.trim()));
+    if (products.length === 0) return null;
+    return {
+      formulaId: doc.id,
+      formulaName: doc.disease?.trim() || doc.title || doc.id,
+      diseaseContexts: contexts(doc.id, doc.disease),
+      syndromeContexts: contexts(doc.id, doc.syndrome),
+      treatmentPrinciples: contexts(doc.id, doc.treatment),
+      indicationText: doc.text,
+      sourceId: doc.id,
+      sourceTier: doc.sourceTier,
+      composition: products.map((formula) => formula.composition),
+      provenance: {
+        source: doc.source,
+        sourceFile: doc.sourceFile,
+        sourceSchool: doc.sourceSchool,
+        disease: doc.disease,
+        syndrome: doc.syndrome,
+        treatment: doc.treatment,
+        raw: doc.raw,
+      },
+    };
   }
   // P2 case-derived：encounter（case-formula）返回该诊次的紧凑方药证据；case 全文仅在明确需要时读取。
   if (doc.sourceTier === 'P2') {

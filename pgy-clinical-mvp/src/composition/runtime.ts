@@ -126,7 +126,7 @@ export interface ClinicalRunResult { result: AgentResult; trace: RunTrace; works
 
 export async function runCase(
   input: string,
-  options: { mode?: ClinicalRuntimeMode; onEvent?: (event: AgentStreamEvent) => void; model?: RunModelRequest; modelExecution?: ModelExecutionReceipt } = {},
+  options: { mode?: ClinicalRuntimeMode; onEvent?: (event: AgentStreamEvent) => void; model?: RunModelRequest; modelExecution?: ModelExecutionReceipt; signal?: AbortSignal } = {},
 ): Promise<ClinicalRunResult> {
   const mode = options.mode ?? config.runtime.mode;
   // Freeze model truth before Runtime construction. UI changes after this line affect the next run only.
@@ -134,7 +134,7 @@ export async function runCase(
   const runtime = await getClinicalRuntime(mode, modelExecution);
   const trace = newTrace(input);
   try {
-    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, strategy, contextMetrics, commits } = await runtime.run(input, trace.runId, options.onEvent);
+    const { authority, usage, snapshot, workspace, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, strategy, contextMetrics, commits } = await runtime.run(input, trace.runId, options.onEvent, options.signal);
     const result = authority.proposal;
     if (result.mode === 'clinical') result.run_id = trace.runId;
     finishTrace(trace.runId, { finalResult: result, usage, snapshot, workspaceEvents, evidenceEvents, candidateComparison, hypothesisEvents, hypothesisComparison, promotionCoverage, candidateAssessments, deliberationCoverage, agentLoop, clinicalStrategy: strategy, contextMetrics, commits });

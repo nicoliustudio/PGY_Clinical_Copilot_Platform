@@ -167,17 +167,17 @@ test('formula.select is one closed-world decision: omission fails, complete acco
     },
   }));
   const ws = createClinicalWorkspace();
+  ws.caseFacts = [{ id: 'CF_TEST', kind: 'symptom', value: '测试现症', polarity: 'present' }];
   const store = new ClinicalWorkspaceStore(ws, 'selection-policy-run');
   store.appendBatch(workspaceEventsForTool('formula.search_candidates', { topK: 5 }, { candidates: cards, hydratedEvidence }));
 
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
   const blocked = await selectCanonicalFormula(context, {
     candidateRef: cards[0]!.candidateRef,
-    candidateDecisions: [{ candidateRef: cards[0]!.candidateRef, disposition: 'CONSIDERED' }],
+    candidateDecisions: [{ candidateRef: cards[0]!.candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'] }],
   }, {
     loadIndex: async () => ({ docs } as any),
     hydrateSourceFormulaSet: hydrateSourceFormulaSetForCandidate,
-    searchModificationEvidence: () => { throw new Error('P2 must not apply current-patient ADD rules to history'); },
   });
   assert.equal(blocked.ok, false);
   if (!blocked.ok) assert.equal(blocked.code, 'CANDIDATE_DELIBERATION_INCOMPLETE');
@@ -188,12 +188,12 @@ test('formula.select is one closed-world decision: omission fails, complete acco
       candidateRef: card.candidateRef,
       disposition: index === 0 ? 'CONSIDERED' : 'EXCLUDED',
       rationale: index === 0 ? 'source case fit' : 'less congruent historical visit',
+      ...(index === 0 ? { supportingFactRefs: ['CF_TEST'] } : { contradictingFactRefs: ['CF_TEST'] }),
     })),
     rationale: 'source case fit',
   }, {
     loadIndex: async () => ({ docs } as any),
     hydrateSourceFormulaSet: hydrateSourceFormulaSetForCandidate,
-    searchModificationEvidence: () => { throw new Error('P2 must not apply current-patient ADD rules to history'); },
   });
   assert.equal(selected.ok, true);
   if (!selected.ok) return;
@@ -202,7 +202,8 @@ test('formula.select is one closed-world decision: omission fails, complete acco
   assert.equal(selected.modificationState, 'NOT_APPLICABLE');
   assert.equal(ws.sourceFormulaSet?.sourceAuthority, 'P2_CASE_DERIVED');
   assert.equal(ws.sourceFormulaSet?.formulas.length, 2);
-  assert.equal(ws.modificationEvidenceClosure?.status, 'NOT_APPLICABLE');
+  // Selection no longer records modification closure; adoption is a separate explicit transaction.
+  assert.equal(ws.modificationEvidenceClosure, undefined);
   assert.deepEqual(
     ws.clinicalDecisionSpine.formulaSelection?.supportingEvidenceRefs,
     ws.candidateSetReceipt?.evidenceBindings[0]?.evidenceRefs,
@@ -215,6 +216,7 @@ test('selected candidate cannot be marked EXCLUDED inside the same closed-world 
   const cards = buildP2CandidateCards([p2Hit('P2:DE_V1', '初诊', '党参12g 黄芪12g')]);
   const card = cards[0]!;
   const ws = createClinicalWorkspace();
+  ws.caseFacts = [{ id: 'CF_CONTRA', kind: 'symptom', value: '明确冲突', polarity: 'present' }];
   const store = new ClinicalWorkspaceStore(ws, 'excluded-selection-run');
   store.appendBatch(workspaceEventsForTool('formula.search_candidates', { topK: 5 }, {
     candidates: cards,
@@ -226,11 +228,10 @@ test('selected candidate cannot be marked EXCLUDED inside the same closed-world 
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
   const result = await selectCanonicalFormula(context, {
     candidateRef: card.candidateRef,
-    candidateDecisions: [{ candidateRef: card.candidateRef, disposition: 'EXCLUDED', rationale: 'clinical contradiction' }],
+    candidateDecisions: [{ candidateRef: card.candidateRef, disposition: 'EXCLUDED', contradictingFactRefs: ['CF_CONTRA'], rationale: 'clinical contradiction' }],
   }, {
     loadIndex: async () => ({ docs } as any),
     hydrateSourceFormulaSet: hydrateSourceFormulaSetForCandidate,
-    searchModificationEvidence: () => ({ result: 'NONE', candidates: [] }),
   });
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.code, 'CANDIDATE_EXCLUDED');

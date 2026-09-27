@@ -46,7 +46,7 @@ if (formulaProjection.includes('.filter(')) violations.push('source formula proj
 if (!formulaProjection.includes('patientSpecific')) violations.push('patient-specific modification presence is absent from formula projection');
 
 const ui = await read('ui/app.js');
-for (const label of ['方内原始加减', '来源节点共享加减', '患者个体化加减', 'KNOWN_EMPTY', 'UNKNOWN']) {
+for (const label of ['方内原始', '来源共享', '患者个体化', 'KNOWN_EMPTY', 'UNKNOWN']) {
   if (!ui.includes(label)) violations.push(`UI does not preserve/render product fact state: ${label}`);
 }
 

@@ -22,11 +22,27 @@ function fact<T>(presence: FieldPresence, value: T | undefined, provenanceRefs: 
   return { presence: 'UNKNOWN', provenanceRefs };
 }
 
+function legacyQualification(clinicalQualification: SourceFormulaSet['formulas'][number]['clinicalQualification']): CommittedSourceProduct['qualification'] {
+  if (clinicalQualification === 'CURRENTLY_SELECTED') return 'PRIMARY_SELECTED';
+  if (clinicalQualification === 'CLINICALLY_EXCLUDED') return 'CLINICALLY_EXCLUDED';
+  return 'SOURCE_ALTERNATIVE';
+}
+
 function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): CommittedSourceBundle {
   const patientPlan = context.workspace.clinicalDecisionSpine.modificationPlan;
   const patientItems = patientPlan?.items ?? [];
+  const selectedProducts = set.formulas.filter((formula) => formula.clinicalQualification === 'CURRENTLY_SELECTED');
+
+  // Patient-specific modifications are product-scoped execution facts. Until the adoption contract carries
+  // an explicit target product, a durable patient-specific plan is legal only when exactly one product has
+  // been explicitly qualified CURRENTLY_SELECTED. Never attach it to products[0], and never silently drop it.
+  if (patientItems.length > 0 && selectedProducts.length !== 1) {
+    throw new Error(`patient-specific modification plan requires exactly one explicitly selected product; got ${selectedProducts.length}`);
+  }
+  const patientTargetRef = selectedProducts[0]?.formulaRef;
+
   const products: CommittedSourceProduct[] = set.formulas.map((formula) => {
-    const isPrimary = formula.relation === 'PRIMARY_SELECTED';
+    const isPatientTarget = patientTargetRef === formula.formulaRef;
     const compositionPresence = formula.compositionPresence ?? (formula.composition.trim() ? 'PRESENT' : 'UNKNOWN');
     const localPresence = formula.formulaLocalModificationPresence
       ?? (formula.sourceModifications.length > 0 ? 'PRESENT' : 'UNKNOWN');
@@ -36,7 +52,7 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
       ?? (formula.preparation === undefined ? 'UNKNOWN' : formula.preparation.trim() ? 'PRESENT' : 'KNOWN_EMPTY');
     const usagePresence = formula.usagePresence
       ?? (formula.usage === undefined ? 'UNKNOWN' : formula.usage.trim() ? 'PRESENT' : 'KNOWN_EMPTY');
-    const patientPresence: FieldPresence = !isPrimary
+    const patientPresence: FieldPresence = !isPatientTarget
       ? 'UNKNOWN'
       : (patientPlan === undefined ? 'UNKNOWN' : (patientItems.length > 0 ? 'PRESENT' : 'KNOWN_EMPTY'));
 
@@ -72,7 +88,11 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
           ),
         },
       },
-      qualification: formula.relation,
+      membership: 'SOURCE_MEMBER',
+      clinicalQualification: formula.clinicalQualification,
+      ...(formula.sequenceRelation ? { sequenceRelation: formula.sequenceRelation } : {}),
+      // Compatibility projection only. Downstream authority must read clinicalQualification.
+      qualification: legacyQualification(formula.clinicalQualification),
       ...(formula.exclusionReason ? { exclusionReason: formula.exclusionReason } : {}),
     };
   });
@@ -93,28 +113,78 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
 }
 
 /**
- * Convert durable SourceFormulaSet truth into the exact canonical product identity used at commit.
+ * Convert durable SourceFormulaSet truth into the canonical selection unit used at commit.
  *
- * Retrieval/selection candidate identities are intentionally NOT parsed here. A SOURCE_NODE candidate
- * and a formula product are different identities; only the Kernel-materialized SourceFormulaSet may
- * choose the primary product that crosses the commit boundary.
+ * Source selection and product selection are orthogonal:
+ * - one explicit CURRENTLY_SELECTED product -> product-level canonical truth;
+ * - zero selected products on a complete P1 source -> source-bundle truth;
+ * - multiple selected products -> fail closed.
+ *
+ * P2 case-visit hydration already carries one explicit selected visit, so it normally uses product truth.
  */
-export function canonicalCandidateTruthFromSourceFormulaSet(set: SourceFormulaSet): CandidateTruth | undefined {
+export function canonicalSelectionTruthFromSourceFormulaSet(set: SourceFormulaSet): CandidateTruth | undefined {
   if (set.completeness !== 'COMPLETE') return undefined;
-  const primary = set.formulas.find((formula) => formula.relation === 'PRIMARY_SELECTED');
-  if (!primary || primary.compositionPresence !== 'PRESENT' || !primary.composition.trim()) return undefined;
-  const sourceId = set.sourceAuthority === 'P2_CASE_DERIVED'
-    ? primary.caseContext?.sourceRef
-    : set.parentRecordRef;
-  if (!sourceId) return undefined;
+  const selected = set.formulas.filter((formula) => formula.clinicalQualification === 'CURRENTLY_SELECTED');
+  if (selected.length > 1) return undefined;
 
+  const product = selected[0];
+  if (product) {
+    if (product.compositionPresence !== 'PRESENT' || !product.composition.trim()) return undefined;
+    const sourceId = set.sourceAuthority === 'P2_CASE_DERIVED'
+      ? product.caseContext?.sourceRef
+      : set.parentRecordRef;
+    if (!sourceId) return undefined;
+    return {
+      kind: 'formula',
+      canonicalKey: `${sourceId}::${product.formulaId}`,
+      sourceId,
+      productId: product.formulaId,
+      composition: product.composition,
+      provenanceKind: set.sourceAuthority === 'P2_CASE_DERIVED' ? 'CASE_DERIVED' : 'CANONICAL_SOURCE',
+    };
+  }
+
+  if (set.sourceAuthority === 'P2_CASE_DERIVED') return undefined;
   return {
-    kind: 'formula',
-    canonicalKey: `${sourceId}::${primary.formulaId}`,
-    sourceId,
-    productId: primary.formulaId,
-    composition: primary.composition,
-    provenanceKind: set.sourceAuthority === 'P2_CASE_DERIVED' ? 'CASE_DERIVED' : 'CANONICAL_SOURCE',
+    kind: 'source-bundle',
+    canonicalKey: set.parentRecordRef,
+    sourceId: set.parentRecordRef,
+    provenanceKind: 'CANONICAL_SOURCE',
+  };
+}
+
+/** @deprecated compatibility alias. Use canonicalSelectionTruthFromSourceFormulaSet. */
+export function canonicalCandidateTruthFromSourceFormulaSet(set: SourceFormulaSet): CandidateTruth | undefined {
+  return canonicalSelectionTruthFromSourceFormulaSet(set);
+}
+
+function sameCanonicalMembership(a: SourceFormulaSet, b: SourceFormulaSet): boolean {
+  const refs = (set: SourceFormulaSet) => set.formulas.map((formula) => formula.formulaRef).sort();
+  return JSON.stringify(refs(a)) === JSON.stringify(refs(b));
+}
+
+/**
+ * Rehydrate source-owned facts at commit, then overlay only durable patient decision state.
+ * The Workspace may own qualification/exclusion, but it never becomes a second owner of composition,
+ * source modifications, usage, preparation, disease/syndrome/treatment, or membership.
+ */
+function canonicalSetWithDecisionState(canonical: SourceFormulaSet, decided: SourceFormulaSet): SourceFormulaSet | undefined {
+  if (!sameCanonicalMembership(canonical, decided)) return undefined;
+  const decisions = new Map(decided.formulas.map((formula) => [formula.formulaRef, formula]));
+  return {
+    ...canonical,
+    formulas: canonical.formulas.map((formula) => {
+      const decision = decisions.get(formula.formulaRef);
+      if (!decision) return formula;
+      return {
+        ...formula,
+        clinicalQualification: decision.clinicalQualification,
+        relation: legacyQualification(decision.clinicalQualification),
+        ...(decision.sequenceRelation ? { sequenceRelation: decision.sequenceRelation } : {}),
+        ...(decision.exclusionReason ? { exclusionReason: decision.exclusionReason } : {}),
+        ...(decision.exclusionEvidenceRefs ? { exclusionEvidenceRefs: [...decision.exclusionEvidenceRefs] } : {}),
+      };
+    }),
   };
 }
 
@@ -163,12 +233,52 @@ function buildCommitEnvironment(context: RuntimeContext): CommitEnvironment {
       return materializeSourceBoundProduct(context, capability, owner.obligation, outcome);
     },
     hydrateCanonicalCandidate: async (truth, outcome) => {
+      const provider = uniqueProvider(context, outcome);
+      if (!provider) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+
+      if (truth.kind === 'source-bundle') {
+        const sourceId = truth.sourceId ?? truth.canonicalKey;
+        const selectedSet = context.workspace.sourceFormulaSet;
+        if (!sourceId || !selectedSet || selectedSet.parentRecordRef !== sourceId || selectedSet.completeness !== 'COMPLETE') {
+          return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+        }
+        if (selectedSet.sourceAuthority === 'P2_CASE_DERIVED') return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+
+        let canonicalSet: SourceFormulaSet | null = null;
+        try {
+          const index = await loadIndex();
+          canonicalSet = hydrateSourceFormulaSet(index.docs, `source-node:${sourceId}`);
+        } catch {
+          return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+        }
+        if (!canonicalSet || canonicalSet.completeness !== 'COMPLETE') {
+          return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+        }
+        const commitSet = canonicalSetWithDecisionState(canonicalSet, selectedSet);
+        if (!commitSet) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
+
+        try {
+          const sourceBundle = sourceBundleFromSet(context, commitSet);
+          return {
+            ok: true,
+            providerId: provider.id,
+            product: {
+              selectionUnit: 'SOURCE_NODE',
+              selectedSourceRef: sourceId,
+              sourceMemberCount: sourceBundle.products.length,
+            },
+            sourceBundle,
+            sourceRefs: [sourceId],
+          };
+        } catch {
+          return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+        }
+      }
+
       const sep = truth.canonicalKey.indexOf('::');
       if (sep <= 0) return { ok: false, code: 'SOURCE_BINDING_MISMATCH' };
       const sourceId = truth.canonicalKey.slice(0, sep);
       const formulaId = truth.canonicalKey.slice(sep + 2);
-      const provider = uniqueProvider(context, outcome);
-      if (!provider) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
 
       const canonical = await getCanonicalFormula(sourceId, formulaId, context.runId);
       if (!canonical) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
@@ -190,7 +300,7 @@ function buildCommitEnvironment(context: RuntimeContext): CommitEnvironment {
         const prior = context.workspace.sourceFormulaSet;
         const exclusions = prior?.parentRecordRef === sourceId
           ? Object.fromEntries(prior.formulas
-              .filter((formula) => formula.relation === 'CLINICALLY_EXCLUDED')
+              .filter((formula) => formula.clinicalQualification === 'CLINICALLY_EXCLUDED')
               .map((formula) => [formula.formulaRef, {
                 reason: formula.exclusionReason ?? 'clinically excluded',
                 evidenceRefs: formula.exclusionEvidenceRefs,
@@ -205,18 +315,22 @@ function buildCommitEnvironment(context: RuntimeContext): CommitEnvironment {
       if (!selected || selected.compositionPresence !== 'PRESENT' || !selected.composition.trim()) {
         return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
       }
-      const sourceBundle = sourceBundleFromSet(context, set);
-      const selectedProduct = sourceBundle.products.find((product) => product.productId === formulaId);
-      if (!selectedProduct) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
-      return {
-        ok: true,
-        providerId: provider.id,
-        product: selectedProduct.payload,
-        sourceBundle,
-        sourceRefs: set.sourceAuthority === 'P2_CASE_DERIVED'
-          ? [...new Set([set.parentRecordRef, ...set.formulas.map((formula) => formula.formulaRef.split('::')[0] ?? '')].filter(Boolean))]
-          : [sourceId],
-      };
+      try {
+        const sourceBundle = sourceBundleFromSet(context, set);
+        const selectedProduct = sourceBundle.products.find((product) => product.productId === formulaId);
+        if (!selectedProduct) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+        return {
+          ok: true,
+          providerId: provider.id,
+          product: selectedProduct.payload,
+          sourceBundle,
+          sourceRefs: set.sourceAuthority === 'P2_CASE_DERIVED'
+            ? [...new Set([set.parentRecordRef, ...set.formulas.map((formula) => formula.formulaRef.split('::')[0] ?? '')].filter(Boolean))]
+            : [sourceId],
+        };
+      } catch {
+        return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+      }
     },
   };
 }
@@ -241,13 +355,13 @@ export async function commitDeliveryOutcome(context: RuntimeContext, outcome: st
   if (owner.obligation.materialization === 'CANONICAL_CANDIDATE') {
     // Commit from durable selection/source truth, not from retrieval-card display metadata.
     // A P1 source-node candidate may carry a representative formula only for display; the authoritative
-    // primary product is the one materialized in SourceFormulaSet by the Kernel selection transaction.
+    // commit unit may be the complete SourceBundle when no product has been explicitly qualified.
     const selection = context.workspace.clinicalDecisionSpine.formulaSelection;
     const set = context.workspace.sourceFormulaSet;
     if (!selection?.selectedCandidateRef || !set || set.completeness !== 'COMPLETE') {
       return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
     }
-    const truth = canonicalCandidateTruthFromSourceFormulaSet(set);
+    const truth = canonicalSelectionTruthFromSourceFormulaSet(set);
     if (!truth) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
 
     const registry = new CandidateHandleRegistry();

@@ -35,6 +35,11 @@ export interface ProjectedFormula {
   sourceLevelModifications: string[];
   modificationStatus: SourceFormulaSet['formulas'][number]['modificationStatus'];
   usage?: string;
+  /** First-truth source membership / patient qualification. */
+  membership: 'SOURCE_MEMBER';
+  clinicalQualification: SourceFormulaSet['formulas'][number]['clinicalQualification'];
+  sequenceRelation?: SourceFormulaSet['formulas'][number]['sequenceRelation'];
+  /** @deprecated compatibility projection only; never use as selection authority. */
   relation: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
   applicableModifications: SourceFormulaSet['formulas'][number]['applicableModifications'];
   caseContext?: SourceFormulaSet['formulas'][number]['caseContext'];
@@ -67,6 +72,9 @@ export function projectFormulaSet(
     sourceLevelModifications: [...set.sourceLevelModifications],
     modificationStatus: f.modificationStatus,
     usage: f.usage,
+    membership: 'SOURCE_MEMBER',
+    clinicalQualification: f.clinicalQualification,
+    ...(f.sequenceRelation ? { sequenceRelation: f.sequenceRelation } : {}),
     relation: f.relation,
     applicableModifications: f.applicableModifications,
     ...(f.caseContext ? { caseContext: { ...f.caseContext } } : {}),

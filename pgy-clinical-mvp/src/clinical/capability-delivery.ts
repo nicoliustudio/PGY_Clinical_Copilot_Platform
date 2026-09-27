@@ -37,6 +37,21 @@ function meaningful(value: unknown): boolean {
   return true;
 }
 
+
+export type DeliveryMaterialization = NonNullable<CapabilityDeliveryObligation['materialization']>;
+
+/** Resolve the unique provider's unique delivery materialization for one exact outcome. */
+export function deliveryMaterializationForOutcome(
+  capabilities: ResolvedCapability[],
+  outcome: string,
+): DeliveryMaterialization | undefined {
+  const providers = capabilities.filter((capability) => capability.provides?.includes(outcome));
+  if (providers.length !== 1) return undefined;
+  const obligations = providers[0].deliveryObligations ?? [];
+  if (obligations.length !== 1) return undefined;
+  return obligations[0].materialization ?? 'REASONING_PRODUCT';
+}
+
 /** Manifest-driven product completeness. Core never branches on modality names. */
 export function requiredDeliveryFields(
   obligation: CapabilityDeliveryObligation,

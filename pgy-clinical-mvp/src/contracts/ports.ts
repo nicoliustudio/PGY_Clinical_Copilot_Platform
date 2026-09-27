@@ -23,7 +23,7 @@ export interface ClinicalPlannerPort {
 }
 
 export interface RuntimePreparationPort {
-  prepare(input: string, runId?: string): Promise<RuntimeContext>;
+  prepare(input: string, runId?: string, signal?: AbortSignal): Promise<RuntimeContext>;
 }
 
 export interface SafetyPort {

@@ -41,7 +41,7 @@ interface RunRecord {
   input: string;
   startedAt: string;
   finishedAt?: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'aborted';
   model: string;
   session?: SessionView;
   error?: string;
@@ -49,6 +49,9 @@ interface RunRecord {
 }
 
 const runs = new Map<string, RunRecord>();
+
+/** 运行中的请求 → 中止控制器（按 requestId 索引，前端可随时 /api/run/abort 终止）。 */
+const activeRuns = new Map<string, AbortController>();
 
 /**
  * 运行记录落盘（SQLite，随 data 卷保留）。null = 数据库不可用，退回纯内存态。
@@ -267,7 +270,13 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
     'X-Accel-Buffering': 'no',
   });
 
-  const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const requestId = (typeof body.requestId === 'string' && body.requestId.trim())
+    ? body.requestId.trim()
+    : `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const abortController = new AbortController();
+  activeRuns.set(requestId, abortController);
+  // 客户端断开（含前端 AbortController.abort() 主动中断）时，立即终止后端推理，避免空转。
+  res.on('close', () => abortController.abort());
   sse(res, 'meta', {
     requestId,
     mode,
@@ -285,6 +294,7 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
     const result = await runCase(input, {
       mode,
       modelExecution,
+      signal: abortController.signal,
       onEvent: (event) => {
         if (event.type === 'tool-call') sse(res, 'tool', event.toolCall);
         else if (event.type === 'workspace') sse(res, 'workspace', { events: event.events });
@@ -310,22 +320,28 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
     const message = e instanceof Error ? e.message : String(e);
     const runId = (e as { runId?: string }).runId ?? `run_err_${Date.now()}`;
     const trace = getTrace(runId);
+    const aborted = abortController.signal.aborted;
     rec = {
       runId,
       input,
       startedAt,
       finishedAt: new Date().toISOString(),
-      status: 'error',
+      status: aborted ? 'aborted' : 'error',
       model: trace?.modelRoles?.clinical.id ?? trace?.modelProfileId ?? describeActiveModel(),
-      error: message,
+      ...(aborted ? {} : { error: message }),
       trace: trace ? buildTraceView(trace) : undefined,
     };
     runs.set(runId, rec);
     runStore?.save(rec);
-    sse(res, 'error', { message, runId });
+    if (aborted) {
+      sse(res, 'aborted', { runId, requestId });
+    } else {
+      sse(res, 'error', { message, runId });
+    }
     sse(res, 'lifecycle', { stage: 'no-commit' });
     sse(res, 'done', {});
   } finally {
+    activeRuns.delete(requestId);
     res.end();
     // 收紧运行记录上限，避免内存无界增长
     while (runs.size > 200) {
@@ -338,6 +354,22 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
 
 function listRuns(): RunRecord[] {
   return [...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+async function handleRunAbort(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: Record<string, unknown>;
+  try {
+    body = await readBody(req);
+  } catch {
+    return json(res, 400, { detail: '请求体不是合法 JSON' });
+  }
+  const requestId = typeof body.requestId === 'string' ? body.requestId.trim() : '';
+  if (!requestId) return json(res, 400, { detail: '缺少 requestId' });
+  const controller = activeRuns.get(requestId);
+  if (!controller) return json(res, 404, { detail: '未找到正在运行的请求（可能已结束）' });
+  controller.abort();
+  noStore(res);
+  json(res, 200, { ok: true, aborted: true });
 }
 
 async function handleTraces(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
@@ -449,6 +481,7 @@ export async function startServer(port = Number(process.env.APP_PORT ?? 8787)): 
       if (pathname === '/api/models' && req.method === 'GET') return handleModels(res);
       if (pathname === '/api/models/select' && req.method === 'POST') return await handleModelSelect(req, res);
       if (pathname === '/api/run/stream' && req.method === 'POST') return await handleRunStream(req, res);
+      if (pathname === '/api/run/abort' && req.method === 'POST') return await handleRunAbort(req, res);
       if (pathname === '/api/traces' || pathname.startsWith('/api/traces/')) return await handleTraces(req, res, pathname);
       if (pathname === '/api/eval/cases' && req.method === 'GET') return await handleEvalCases(res);
       if (pathname === '/api/eval/run' && req.method === 'POST') return await handleEvalRun(req, res);

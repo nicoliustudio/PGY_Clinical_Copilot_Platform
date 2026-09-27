@@ -10,6 +10,7 @@ import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignatur
 import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
 import { bindCanonicalSources } from '../../clinical/source-binding.js';
 import { selectCanonicalFormula } from '../../clinical/formula-selection-transaction.js';
+import { adoptCanonicalModifications } from '../../clinical/modification-adoption-transaction.js';
 import { recordSearchReceipt, recordHydrationReceipt, evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import type { EvidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
 import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contracts/result.js';
@@ -23,6 +24,7 @@ import type { PatternAssessment } from '../../contracts/workspace.js';
 import { commitDeliveryOutcome } from '../../platform/commit/delivery-transaction.js';
 import { toolContractError, toolFailure } from '../../contracts/tool-failure.js';
 import { resolveOutcomeProvider } from '../../control-plane-v21/provider-resolver.js';
+import { deliveryMaterializationForOutcome } from '../../clinical/capability-delivery.js';
 
 export type AiSdkToolBindingFactory = (context: RuntimeContext) => ToolSet[string];
 export type AiSdkToolBindings = Record<string, AiSdkToolBindingFactory>;
@@ -385,7 +387,16 @@ const patternAssessmentSchema = z.object({
 /** H15 Clinical Decision Spine 各层的开放文本 schema（不含医学 enum）。 */
 const diseaseAssessmentSchema = z.object({
   statement: z.string(),
+  /** @deprecated legacy clinical disease labels（仅病名表述，非 source id / evidence ref）。 */
   diseaseRefs: z.array(z.string()).optional(),
+  /** P0-2 第一真源：typed disease concept（label / canonicalRef / status / evidenceRefs 分离）。 */
+  diseaseConcepts: z.array(z.object({
+    id: z.string().optional(),
+    label: z.string(),
+    canonicalRef: z.string().optional(),
+    status: z.enum(['EXPLICIT', 'RESOLVED', 'HYPOTHESIS']).optional(),
+    evidenceRefs: z.array(z.string()).optional(),
+  })).optional(),
   evidenceRefs: z.array(z.string()).optional(),
   uncertainty: z.array(z.string()).optional(),
 });
@@ -730,6 +741,27 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       return searchModificationEvidence(context.workspace, topK ?? 3);
     },
   }),
+  'formula.adopt_modifications': (context) => tool({
+    description: '显式加减采纳事务。对当前选中基础方重新确定性发现的每条加减证据，逐一给出 ADOPT（采纳）或 REJECT（拒绝）的闭世界决定。Kernel 校验证据身份后，仅 ADOPT 的证据进入 durable ModificationPlan；未调用本工具则患者特异加减保持 UNKNOWN（绝不自动加味）。自由文本 rationale 不构成证据。',
+    inputSchema: z.object({
+      decisions: z.array(z.object({
+        modificationEvidenceRef: z.string().min(1),
+        disposition: z.enum(['ADOPT', 'REJECT']),
+        rationale: z.string().optional(),
+      })).min(0),
+    }),
+    execute: async ({ decisions }) => {
+      const result = await adoptCanonicalModifications(context, decisions);
+      if (!result.ok) {
+        return toolFailure(result.code, `modification adoption failed: ${result.code}`, {
+          details: result.details,
+          allowedNextActions: ['call formula.get_modification_evidence to discover the exact evidence refs first'],
+        });
+      }
+      refreshControlPlaneV21(context);
+      return result;
+    },
+  }),
   'formula.validate': (context) => tool({
     description: '校验 source_id + formula_id + composition 是否绑定于同一条 P1 规范记录。也可只传 candidateId，Harness 内部 canonical hydrate 后校验。',
     inputSchema: z.object({
@@ -905,14 +937,35 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'formula.select': (context) => tool({
-    description: 'Closed-world clinical selection transaction. Choose one candidate from the Kernel CandidateSet and account for every candidate exactly once as CONSIDERED or EXCLUDED. Submit clinical rationale only; Runtime owns evidence/source identities, hydrates the complete source bundle, and commits durable selection.',
+    description: 'Closed-world clinical selection transaction. Account for every Kernel candidate exactly once. CONSIDERED requires real supporting patient fact refs; EXCLUDED requires real contradicting patient fact refs; when the record is merely silent/unknown use INSUFFICIENT_EVIDENCE + missingCriticalEvidence, never invent an absence. Runtime owns evidence/source identities and hydrates the complete source bundle.',
     inputSchema: z.object({
       candidateRef: z.string().min(1),
-      candidateDecisions: z.array(z.object({
-        candidateRef: z.string().min(1),
-        disposition: z.enum(['CONSIDERED', 'EXCLUDED']),
-        rationale: z.string().optional(),
-      })).min(1),
+      candidateDecisions: z.array(z.discriminatedUnion('disposition', [
+        z.object({
+          candidateRef: z.string().min(1),
+          disposition: z.literal('CONSIDERED'),
+          rationale: z.string().optional(),
+          supportingFactRefs: z.array(z.string().min(1)).min(1),
+          contradictingFactRefs: z.array(z.string().min(1)).optional(),
+          missingCriticalEvidence: z.array(z.string().min(1)).optional(),
+        }),
+        z.object({
+          candidateRef: z.string().min(1),
+          disposition: z.literal('EXCLUDED'),
+          rationale: z.string().optional(),
+          supportingFactRefs: z.array(z.string().min(1)).optional(),
+          contradictingFactRefs: z.array(z.string().min(1)).min(1),
+          missingCriticalEvidence: z.array(z.string().min(1)).optional(),
+        }),
+        z.object({
+          candidateRef: z.string().min(1),
+          disposition: z.literal('INSUFFICIENT_EVIDENCE'),
+          rationale: z.string().optional(),
+          supportingFactRefs: z.array(z.string().min(1)).optional(),
+          contradictingFactRefs: z.array(z.string().min(1)).optional(),
+          missingCriticalEvidence: z.array(z.string().min(1)).min(1),
+        }),
+      ])).min(1),
       rationale: z.string().optional(),
     }),
     execute: async (input) => {
@@ -1058,13 +1111,19 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         return toolFailure(result.code, `delivery commit failed for ${outcome}: ${result.code}`, {
           outcome,
           details: result.details,
-          allowedNextActions: result.code === 'MISSING_REQUIRED_FIELDS'
-            ? ['complete the provider-declared required draft/source fields, then retry delivery.commit']
-            : result.code === 'SOURCE_BINDING_MISMATCH'
-              ? ['call source.bind with the intended hydrated canonical asset id, then retry delivery.commit']
-              : result.code === 'CANONICAL_HYDRATION_FAILED'
-                ? ['hydrate the selected canonical source with the provider-declared hydration tool, call source.bind, then retry delivery.commit']
-                : ['repair the deterministic commit precondition, then retry delivery.commit'],
+          allowedNextActions: (() => {
+            const materialization = deliveryMaterializationForOutcome(context.capabilities, outcome);
+            if (result.code === 'MISSING_REQUIRED_FIELDS') {
+              return ['complete the provider-declared required draft/source fields, then retry delivery.commit'];
+            }
+            if (materialization === 'SOURCE_BOUND') {
+              return ['hydrate the exact provider-owned canonical asset, then call source.bind; source.bind performs the terminal commit'];
+            }
+            if (result.code === 'SOURCE_BINDING_MISMATCH' || result.code === 'CANONICAL_HYDRATION_FAILED') {
+              return ['repair the selected canonical source/source-bundle precondition, then retry delivery.commit; source.bind is not legal for this materialization'];
+            }
+            return ['repair the deterministic commit precondition, then retry delivery.commit'];
+          })(),
         });
       }
       return {

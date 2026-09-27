@@ -3,6 +3,7 @@ import type {
   CandidateComparison,
   ClinicalWorkspace,
   DeliberationCoverage,
+  DiseaseConcept,
   EvidenceItem,
   HypothesisCandidate,
   PatternAssessment,
@@ -61,6 +62,25 @@ function asString(value: unknown): string | undefined {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
+}
+
+function asDiseaseConcepts(value: unknown): DiseaseConcept[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: DiseaseConcept[] = [];
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const record = raw as Record<string, unknown>;
+    const label = asString(record.label);
+    if (!label) continue;
+    out.push({
+      id: asString(record.id) ?? `DC_${out.length + 1}`,
+      label,
+      ...(asString(record.canonicalRef) ? { canonicalRef: asString(record.canonicalRef) } : {}),
+      status: (record.status === 'EXPLICIT' || record.status === 'RESOLVED' || record.status === 'HYPOTHESIS') ? record.status : 'HYPOTHESIS',
+      evidenceRefs: asStringArray(record.evidenceRefs),
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function pushUnique(target: string[], values: string[]): void {
@@ -573,12 +593,13 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
     const next = {
       statement,
       diseaseRefs: asStringArray(payload.diseaseRefs),
+      diseaseConcepts: asDiseaseConcepts(payload.diseaseConcepts),
       evidenceRefs: asStringArray(payload.evidenceRefs),
       uncertainty: asStringArray(payload.uncertainty),
     };
     const existing = this.workspace.clinicalDecisionSpine.diseaseAssessment;
     if (existing && sameValue(
-      { statement: existing.statement, diseaseRefs: existing.diseaseRefs, evidenceRefs: existing.evidenceRefs, uncertainty: existing.uncertainty },
+      { statement: existing.statement, diseaseRefs: existing.diseaseRefs, diseaseConcepts: existing.diseaseConcepts, evidenceRefs: existing.evidenceRefs, uncertainty: existing.uncertainty },
       next,
     )) return false;
     this.workspace.clinicalDecisionSpine.diseaseAssessment = { ...next, version: this.events.length + 1 };
@@ -686,8 +707,15 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
             const item = raw as Record<string, unknown>;
             const candidateRef = asString(item.candidateRef);
             const disposition = asString(item.disposition);
-            if (!candidateRef || !['CONSIDERED', 'EXCLUDED'].includes(disposition ?? '')) return undefined;
-            return { candidateRef, disposition: disposition as 'CONSIDERED' | 'EXCLUDED', rationale: asString(item.rationale) };
+            if (!candidateRef || !['CONSIDERED', 'EXCLUDED', 'INSUFFICIENT_EVIDENCE'].includes(disposition ?? '')) return undefined;
+            return {
+              candidateRef,
+              disposition: disposition as 'CONSIDERED' | 'EXCLUDED' | 'INSUFFICIENT_EVIDENCE',
+              rationale: asString(item.rationale),
+              supportingFactRefs: asStringArray(item.supportingFactRefs),
+              contradictingFactRefs: asStringArray(item.contradictingFactRefs),
+              missingCriticalEvidence: asStringArray(item.missingCriticalEvidence),
+            };
           })
           .filter((item): item is NonNullable<typeof item> => item !== undefined)
       : [];

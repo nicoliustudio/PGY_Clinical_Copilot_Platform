@@ -75,6 +75,7 @@ test('root invariant: one formula.select decision derives canonical evidence int
   const cards = p1Cards();
   const candidate = cards[0]!;
   const ws = createClinicalWorkspace();
+  ws.caseFacts = [{ id: 'CF_TEST', kind: 'symptom', value: '测试现症', polarity: 'present' }];
   const store = new ClinicalWorkspaceStore(ws, 'root-selection');
   store.appendBatch(workspaceEventsForTool('formula.search_candidates', { topK: 5 }, {
     candidates: cards,
@@ -91,7 +92,7 @@ test('root invariant: one formula.select decision derives canonical evidence int
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
   const result = await selectCanonicalFormula(context, {
     candidateRef: candidate.candidateRef,
-    candidateDecisions: [{ candidateRef: candidate.candidateRef, disposition: 'CONSIDERED', rationale: 'best fit' }],
+    candidateDecisions: [{ candidateRef: candidate.candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'], rationale: 'best fit' }],
     rationale: 'best fit',
   }, {
     loadIndex: async () => ({ docs: [] } as never),
@@ -115,10 +116,10 @@ test('root invariant: one formula.select decision derives canonical evidence int
         formulaLocalModificationPresence: 'KNOWN_EMPTY',
         modificationStatus: 'KNOWN_EMPTY',
         relation: index === 0 ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE',
+        clinicalQualification: index === 0 ? 'CURRENTLY_SELECTED' : 'UNASSESSED',
         applicableModifications: [],
       })),
     }),
-    searchModificationEvidence: () => ({ result: 'NONE', candidates: [] }),
   });
   assert.equal(result.ok, true);
   if (!result.ok) return;
@@ -136,6 +137,7 @@ test('root invariant: omission cannot become hidden selection authority', async 
   const base = p1Cards()[0]!;
   const second = { ...base, candidateRef: 'source-node:P1:K_OTHER', sourceId: 'P1:K_OTHER', sourceProductRefs: ['P1:K_OTHER::F9'] };
   const ws = createClinicalWorkspace();
+  ws.caseFacts = [{ id: 'CF_TEST', kind: 'symptom', value: '测试现症', polarity: 'present' }];
   const store = new ClinicalWorkspaceStore(ws, 'root-closed-world');
   store.appendBatch(workspaceEventsForTool('formula.search_candidates', { topK: 5 }, {
     candidates: [base, second],
@@ -147,11 +149,10 @@ test('root invariant: omission cannot become hidden selection authority', async 
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
   const result = await selectCanonicalFormula(context, {
     candidateRef: base.candidateRef,
-    candidateDecisions: [{ candidateRef: base.candidateRef, disposition: 'CONSIDERED' }],
+    candidateDecisions: [{ candidateRef: base.candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'] }],
   }, {
     loadIndex: async () => ({ docs: [] } as never),
     hydrateSourceFormulaSet: () => null,
-    searchModificationEvidence: () => ({ result: 'NONE', candidates: [] }),
   });
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.code, 'CANDIDATE_DELIBERATION_INCOMPLETE');
@@ -184,12 +185,12 @@ test('root invariant: commit identity is derived from durable P1 SourceFormulaSe
       {
         formulaRef: 'P1:K_ROOT::F1', formulaId: 'F1', formulaName: '方一', composition: '药A',
         compositionPresence: 'PRESENT', sourceModifications: [], formulaLocalModificationPresence: 'KNOWN_EMPTY',
-        modificationStatus: 'KNOWN_EMPTY', relation: 'PRIMARY_SELECTED', applicableModifications: [],
+        modificationStatus: 'KNOWN_EMPTY', relation: 'PRIMARY_SELECTED', clinicalQualification: 'CURRENTLY_SELECTED', applicableModifications: [],
       },
       {
         formulaRef: 'P1:K_ROOT::F2', formulaId: 'F2', formulaName: '方二', composition: '药B',
         compositionPresence: 'PRESENT', sourceModifications: [], formulaLocalModificationPresence: 'KNOWN_EMPTY',
-        modificationStatus: 'KNOWN_EMPTY', relation: 'SOURCE_ALTERNATIVE', applicableModifications: [],
+        modificationStatus: 'KNOWN_EMPTY', relation: 'SOURCE_ALTERNATIVE', clinicalQualification: 'UNASSESSED', applicableModifications: [],
       },
     ],
   });
@@ -212,7 +213,7 @@ test('root invariant: P2 commit identity is the selected historical visit prescr
       {
         formulaRef: 'P2:DE_VISIT1::P2_CASE_FORMULA::1', formulaId: 'P2_CASE_FORMULA::1', formulaName: '原案方', composition: '药甲',
         compositionPresence: 'PRESENT', sourceModifications: [], formulaLocalModificationPresence: 'KNOWN_EMPTY',
-        modificationStatus: 'KNOWN_EMPTY', relation: 'PRIMARY_SELECTED', applicableModifications: [],
+        modificationStatus: 'KNOWN_EMPTY', relation: 'PRIMARY_SELECTED', clinicalQualification: 'CURRENTLY_SELECTED', sequenceRelation: 'SELECTED_VISIT', applicableModifications: [],
         caseContext: { sourceRef: 'P2:DE_VISIT1', visit: '初诊' },
       },
     ],

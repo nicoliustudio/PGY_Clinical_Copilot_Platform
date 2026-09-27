@@ -64,9 +64,9 @@ describe('Kernel Commit Boundary invariants', () => {
     const bundle: CommittedSourceBundle = {
       sourceId: 'P1:s',
       products: [
-        { productId: 'f1', name: 'a', payload: {}, qualification: 'PRIMARY_SELECTED' },
-        { productId: 'f2', name: 'b', payload: {}, qualification: 'SOURCE_ALTERNATIVE' },
-        { productId: 'f3', name: 'c', payload: {}, qualification: 'CLINICALLY_EXCLUDED', exclusionReason: 'r' },
+        { productId: 'f1', name: 'a', payload: {}, membership: 'SOURCE_MEMBER', clinicalQualification: 'CURRENTLY_SELECTED', qualification: 'PRIMARY_SELECTED' },
+        { productId: 'f2', name: 'b', payload: {}, membership: 'SOURCE_MEMBER', clinicalQualification: 'UNASSESSED', qualification: 'SOURCE_ALTERNATIVE' },
+        { productId: 'f3', name: 'c', payload: {}, membership: 'SOURCE_MEMBER', clinicalQualification: 'CLINICALLY_EXCLUDED', qualification: 'CLINICALLY_EXCLUDED', exclusionReason: 'r' },
       ],
       sourceFacts: {},
     };

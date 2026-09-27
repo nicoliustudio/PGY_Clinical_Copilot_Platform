@@ -98,6 +98,8 @@ export interface RuntimeContext {
   harness: HarnessControlPort;
   workspace: ClinicalWorkspace;
   workspaceStore: WorkspaceControlPort;
+  /** 用户中止信号（run 级）：触发后 Agent 循环与在途 LLM 调用应尽快终止。 */
+  signal?: AbortSignal;
   /** Kernel Commit Boundary：本次 run 的唯一权威交付真相（Kernel-owned append-only ledger）。 */
   commitLedger: CommitLedger;
   /** V2.1 shadow/cutover state. Uses the same Request IR with parameterized planning semantics. */

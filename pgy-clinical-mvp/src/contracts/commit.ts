@@ -40,6 +40,13 @@ export interface CommittedSourceProduct {
   productId: string;
   name: string;
   payload: Readonly<Record<string, unknown>>;
+  /** Source membership is immutable source truth and is independent from current-patient qualification. */
+  membership: 'SOURCE_MEMBER';
+  /** First-truth clinical qualification. Never derive this from array order. */
+  clinicalQualification: 'UNASSESSED' | 'CURRENTLY_SELECTED' | 'CLINICALLY_EXCLUDED';
+  /** P2 visit sequence is source truth, not a clinical ranking. */
+  sequenceRelation?: 'SELECTED_VISIT' | 'SAME_SOURCE_MEMBER' | 'EARLIER_VISIT' | 'LATER_VISIT' | 'UNKNOWN';
+  /** @deprecated Compatibility projection only. Runtime authority must read clinicalQualification instead. */
   qualification: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
   /** Optional patient timing/applicability. This never changes source membership. */
   clinicalApplicability?: ClinicalApplicability;

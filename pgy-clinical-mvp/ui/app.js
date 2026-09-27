@@ -35,13 +35,39 @@ async function api(path, opt = {}) {
 /* ---------- 全局状态 ---------- */
 const state = {
   view: 'user',
-  sessions: [],           // 本地会话（用户端历史）
-  activeSession: null,    // 当前展示的 SessionView
-  streaming: false,
-  liveEvents: [],
-  lifecycle: null,        // 收敛生命周期阶段
+  sessions: [],           // 会话对象数组：每项持有独立的消息/运行/中止状态，互不串扰
+  activeId: null,         // 当前选中的会话 id
   openGroups: new Set(),  // 展开中的推理过程节点（跨重渲染保持）
 };
+
+const SESSION_STORE_KEY = 'pgy.sessions.v1';
+const SESSION_STORE_MAX = 50;
+
+function newSessionId() {
+  return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+/** 当前选中的会话（无则返回 null）。所有 UI 渲染以它为准，切换会话即切换视图。 */
+function activeSession() {
+  return state.sessions.find((s) => s.id === state.activeId) || null;
+}
+
+function createSession(title) {
+  return {
+    id: newSessionId(),
+    title: title || '新问诊',
+    runId: null,
+    requestId: null,
+    status: 'idle',          // idle | running | done | error | aborted
+    session: null,           // 完成后的 SessionView
+    input: '',
+    model: '',
+    error: '',
+    liveEvents: [],          // 运行中累积的工具/工作台事件（切走也持续累积）
+    lifecycle: null,
+    abortController: null,
+  };
+}
 
 /* ---------- 视图切换 ---------- */
 function switchView(view) {
@@ -92,32 +118,90 @@ function renderSessions() {
     list.innerHTML = '<div class="wp-empty">暂无历史会话</div>';
     return;
   }
-  list.innerHTML = state.sessions.map((s, i) =>
-    `<div class="session-item" data-i="${i}">${esc(s.title || '问诊')}</div>`
-  ).join('');
+  list.innerHTML = state.sessions.map((s) => {
+    const dot = s.status === 'running' ? '<span class="sess-running" title="运行中">●</span>' : '';
+    const active = s.id === state.activeId ? ' active' : '';
+    return `<div class="session-item${active}" data-id="${esc(s.id)}">${dot}<span>${esc(s.title || '问诊')}</span></div>`;
+  }).join('');
 }
-function addSession(title, session) {
-  state.sessions.unshift({ title, session, runId: session?.runId });
-  if (state.sessions.length > 50) state.sessions.pop();
+
+function persistSessions() {
+  try {
+    const meta = state.sessions
+      .filter((s) => s.status === 'done' || s.status === 'error' || s.status === 'aborted')
+      .map((s) => ({ id: s.id, title: s.title, runId: s.runId, status: s.status, model: s.model }))
+      .slice(0, SESSION_STORE_MAX);
+    localStorage.setItem(SESSION_STORE_KEY, JSON.stringify(meta));
+  } catch { /* 隐私模式忽略 */ }
+}
+
+function restoreSessions() {
+  try {
+    const raw = localStorage.getItem(SESSION_STORE_KEY);
+    if (!raw) return;
+    const meta = JSON.parse(raw);
+    if (!Array.isArray(meta)) return;
+    state.sessions = meta.map((m) => ({
+      id: m.id || newSessionId(),
+      title: m.title || '问诊',
+      runId: m.runId || null,
+      requestId: null,
+      status: m.status || 'done',
+      session: null,          // 懒加载：点击时按 runId 回取
+      input: '',
+      model: m.model || '',
+      liveEvents: [],
+      lifecycle: null,
+      abortController: null,
+    }));
+    if (state.sessions.length) state.activeId = state.sessions[0].id;
+  } catch { /* 忽略 */ }
+}
+
+/** 切到指定会话，并重建聊天区 / 工作台 / Trace。运行中的会话切走后仍在后台继续。 */
+async function selectSession(id) {
+  const s = state.sessions.find((x) => x.id === id);
+  if (!s) return;
+  state.activeId = id;
   renderSessions();
+  if (!s.session && s.runId) {
+    try {
+      const rec = await api(`/api/traces/${encodeURIComponent(s.runId)}`);
+      if (rec?.session) {
+        s.session = rec.session;
+        s.model = rec.model || s.model;
+        s.input = rec.session.trace?.input || s.input;
+      } else if (rec) {
+        s.error = rec.error || '';
+        s.input = rec.input || s.input;
+        s.model = rec.model || s.model;
+      }
+    } catch { /* 记录可能已不存在，保持空态 */ }
+  }
+  renderChatForActive();
+  renderWorkspace(s.session?.workspace || null);
+  renderTrace(s.session || null);
+  updateComposer();
 }
+
 $('#sessionList').addEventListener('click', (e) => {
   const item = e.target.closest('.session-item');
   if (!item) return;
-  const s = state.sessions[Number(item.dataset.i)];
-  if (s?.session) {
-    state.activeSession = s.session;
-    renderChatFromSession(s.session);
-    renderWorkspace(s.session.workspace);
-    renderTrace(s.session);
-  }
+  selectSession(item.dataset.id);
 });
+
 $('#newCase').addEventListener('click', () => {
-  state.activeSession = null;
-  $('#chat').innerHTML = EMPTY_STATE_HTML;
-  $('#caseTitle').innerHTML = '<strong>新问诊</strong><span>输入病例开始临床推理</span>';
+  const s = createSession();
+  state.sessions.unshift(s);
+  if (state.sessions.length > SESSION_STORE_MAX) state.sessions.pop();
+  state.activeId = s.id;
+  renderSessions();
+  renderChatForActive();
   renderWorkspace(null);
   renderTrace(null);
+  updateComposer();
+  persistSessions();
+  $('#input').focus();
 });
 
 /* ---------- 聊天渲染 ---------- */
@@ -247,7 +331,8 @@ function groupsHtml(tools, streaming = false) {
 }
 
 function liveTools() {
-  return state.liveEvents.filter((x) => x.type === 'tool').map((x) => x.data);
+  const s = activeSession();
+  return (s?.liveEvents || []).filter((x) => x.type === 'tool').map((x) => x.data);
 }
 
 function renderLiveActivity() {
@@ -267,7 +352,8 @@ const LIFECYCLE_LABELS = {
 };
 
 function renderLifecycle() {
-  const stage = state.lifecycle || 'exploring';
+  const s = activeSession();
+  const stage = (s?.lifecycle) || 'exploring';
   const label = LIFECYCLE_LABELS[stage] || stage;
   const title = $('#caseTitle');
   if (title) title.innerHTML = `<strong>临床推理中…</strong><span>${esc(label)}</span>`;
@@ -316,65 +402,6 @@ function appendProcessNode(tools, totalMs) {
       <div class="process-body hidden">${groupsHtml(tools)}</div>
     </div>`;
   $('#chat').appendChild(div);
-}
-
-function finishThinking(session) {
-  const node = document.querySelector('.thinking-msg:last-child');
-  if (node) {
-    node.classList.remove('thinking-msg');
-    node.classList.add('process-node');
-    const content = node.querySelector('.assistant-content');
-    const activity = content.querySelector('.live-activity');
-    content.querySelector('.thinking-card')?.remove();
-    const tools = liveTools();
-    if (activity && tools.length) {
-      const head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'process-head';
-      head.setAttribute('data-proc-toggle', '');
-      head.setAttribute('aria-expanded', 'false');
-      head.innerHTML = `<span class="proc-dot"></span><strong>推理过程</strong>
-        <span class="proc-meta">${tools.length} 次工具调用${session.trace?.totalMs ? ' · ' + session.trace.totalMs + 'ms' : ''}</span>
-        <svg class="proc-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>`;
-      activity.classList.add('process-body', 'hidden');
-      content.insertBefore(head, activity);
-    } else {
-      node.remove();
-    }
-  }
-  renderConclusion(session);
-  renderWorkspace(session.workspace);
-  renderTrace(session);
-}
-
-/**
- * 运行失败时不留黑箱：保留已发生的工具调用与工作区事件，并在其上追加失败原因。
- * 失败不隐藏过程——只标注没有得到可提交的结论。
- */
-function failThinking(message) {
-  const node = document.querySelector('.thinking-msg:last-child');
-  if (!node) {
-    toast(message);
-    return;
-  }
-  node.classList.remove('thinking-msg');
-  const content = node.querySelector('.assistant-content');
-  content.querySelector('.thinking-card')?.remove();
-
-  const block = document.createElement('div');
-  block.className = 'assistant-block error-block';
-  block.innerHTML = `<div class="answer-head"><h3>推理未完成</h3><span class="authority-badge BLOCKED">NO COMMIT</span></div><div class="plain-text">${esc(message)}</div><div class="error-hint">上方为本次运行已真实发生的工具调用；可在右上角 Trace 查看完整事件。</div>`;
-  content.appendChild(block);
-  renderLiveTrace(message);
-  scrollChat();
-}
-
-function renderChatFromSession(session) {
-  $('#chat').innerHTML = '';
-  appendUserMessage(session.trace.input);
-  appendProcessNode(session.trace.toolCalls, session.trace.totalMs);
-  renderConclusion(session);
-  $('#caseTitle').innerHTML = `<strong>问诊</strong><span>${esc(session.runId)} · ${esc(session.model)}</span>`;
 }
 
 function renderConclusion(session) {
@@ -533,24 +560,167 @@ function objectRowsHtml(obj, skipKeys) {
     return rowHtml(PAYLOAD_LABELS[k] || k, valueHtml(v, k));
   }).join('');
 }
-/** 三态事实（PRESENT / KNOWN_EMPTY / UNKNOWN）渲染，UNKNOWN 绝不写成「无」。 */
-function presenceHtml(fact, key) {
-  if (!fact) return '';
-  if (fact.presence === 'PRESENT') return valueHtml(fact.value, key);
-  if (fact.presence === 'KNOWN_EMPTY') return '<div class="rx-text muted">明确无</div>';
-  return '<div class="rx-text muted">未知</div>';
-}
-/** 三个加减命名空间共用：PRESENT 列出规则，KNOWN_EMPTY 为「无加减」，UNKNOWN 保持未知。 */
-function modificationHtml(fact) {
-  if (!fact) return '';
-  if (fact.presence === 'PRESENT') {
-    const items = (Array.isArray(fact.value) ? fact.value : [fact.value])
-      .map((x) => (isObj(x) ? String(x.statement ?? '') : String(x ?? '')))
-      .map((x) => x.trim()).filter(Boolean);
-    return items.length ? rulesHtml(items) : '<div class="rx-text muted">无加减</div>';
+/* ---------- 加减语义解析：纯文本 →「加 / 减 / 换」分组 ----------
+ * 原文形如「气血两亏，加党参10克、黄芪15克，去石见穿」「干姜(换炮姜5克)」。
+ * 解析只为分组呈现（医生视图不把加减混成一句）；原始文本始终在溯源区无损保留。
+ */
+const MOD_ADD_LEAD = /^(?:增入|加|增|入)/;
+const MOD_REMOVE_LEAD = /^(?:去|减|删|除)/;
+const MOD_REPLACE = /^(.*?)[（(]\s*换\s*(.+?)\s*[)）]$/;
+const MOD_LEAD_NOISE = /^(?:或|另|再|以及|及|并|且)\s*/;
+
+/** 按顶层分隔符切分（括号内不切），保证「黄芩(换黄连3克、柏子仁9克)」不被逗号拆散。 */
+function splitTopLevel(text, sepRe) {
+  const out = [];
+  let depth = 0;
+  let buf = '';
+  for (const ch of String(text)) {
+    if (ch === '（' || ch === '(') depth += 1;
+    else if (ch === '）' || ch === ')') depth = Math.max(0, depth - 1);
+    if (depth === 0 && sepRe.test(ch)) {
+      if (buf.trim()) out.push(buf.trim());
+      buf = '';
+      continue;
+    }
+    buf += ch;
   }
-  if (fact.presence === 'KNOWN_EMPTY') return '<div class="rx-text muted">无加减</div>';
-  return '<div class="rx-text muted">未知</div>';
+  if (buf.trim()) out.push(buf.trim());
+  return out;
+}
+
+function pushModItems(group, text) {
+  const cleaned = String(text).trim().replace(MOD_LEAD_NOISE, '');
+  if (!cleaned) return;
+  for (const item of splitList(cleaned)) group.items.push(item);
+}
+
+/** 一条加减文本 → [{ trigger, groups: [{kind:'add'|'remove'|'replace', items, from?}] }] */
+function parseModification(text) {
+  const clauses = [];
+  for (const clause of splitTopLevel(text, /[；;。]/)) {
+    const trigger = [];
+    const groups = [];
+    let current = null;
+    for (const fragment of splitTopLevel(clause, /[，,]/)) {
+      const replace = MOD_REPLACE.exec(fragment);
+      if (replace) {
+        groups.push({ kind: 'replace', from: replace[1].trim(), items: splitList(replace[2]) });
+        current = null;
+        continue;
+      }
+      const add = MOD_ADD_LEAD.exec(fragment);
+      if (add) {
+        current = { kind: 'add', items: [] };
+        groups.push(current);
+        pushModItems(current, fragment.slice(add[0].length));
+        continue;
+      }
+      const remove = MOD_REMOVE_LEAD.exec(fragment);
+      if (remove) {
+        current = { kind: 'remove', items: [] };
+        groups.push(current);
+        pushModItems(current, fragment.slice(remove[0].length));
+        continue;
+      }
+      if (current) pushModItems(current, fragment);
+      else trigger.push(fragment);
+    }
+    // 无「加 / 去 / 换」标记的裸药味清单：语义上即「加」的清单（患者个体化加减来自 ADD 规则，
+    // 其值本身就是待加药味，不带「加」字），因此整条归入「加」而非丢弃。
+    if (!groups.length && trigger.length) {
+      const items = splitList(trigger.join('、'));
+      if (items.length) {
+        groups.push({ kind: 'add', items });
+        trigger.length = 0;
+      }
+    }
+    if (groups.length) clauses.push({ trigger: trigger.join('，'), groups });
+  }
+  return clauses;
+}
+
+const MOD_GROUP_LABELS = { add: '加', remove: '减', replace: '换' };
+
+function modGroupLineHtml(g) {
+  if (g.kind === 'replace') {
+    const from = g.from ? `<span class="rx-chip remove">${esc(g.from)}</span><span class="rx-mod-arrow">→</span>` : '';
+    const to = g.items.length ? `<span class="rx-chips">${g.items.map((x) => `<span class="rx-chip add">${esc(x)}</span>`).join('')}</span>` : '';
+    return `<div class="rx-mod-line"><span class="rx-mod-tag replace">${MOD_GROUP_LABELS.replace}</span>${from}${to}</div>`;
+  }
+  const items = g.items.length
+    ? `<span class="rx-chips">${g.items.map((x) => `<span class="rx-chip ${g.kind}">${esc(x)}</span>`).join('')}</span>`
+    : '';
+  return `<div class="rx-mod-line"><span class="rx-mod-tag ${g.kind}">${MOD_GROUP_LABELS[g.kind]}</span>${items}</div>`;
+}
+
+/** 加减文本 → 分词块（每块先写触发条件，再按「加 / 减 / 换」分行）。 */
+function modificationGroupsHtml(text) {
+  const blocks = parseModification(text)
+    .filter((c) => c.groups.length)
+    .map(({ trigger, groups }) => `<div class="rx-mod">${trigger ? `<div class="rx-mod-when">${esc(trigger)}</div>` : ''}${groups.map(modGroupLineHtml).join('')}</div>`);
+  return blocks.length ? `<div class="rx-mod-list">${blocks.join('')}</div>` : '';
+}
+
+/**
+ * 医生视图行：PRESENT 渲染内容；KNOWN_EMPTY 渲染「无」；UNKNOWN 不进主视图，
+ * 字段名回收进溯源区（数据不删；UNKNOWN 绝不渲染成「无」）。
+ */
+function factRow(label, fact, opts = {}) {
+  if (!fact) return { html: '', unknown: false };
+  if (fact.presence === 'PRESENT') {
+    return { html: rowHtml(label, opts.render ? opts.render(fact.value) : valueHtml(fact.value, opts.key)), unknown: false };
+  }
+  if (fact.presence === 'KNOWN_EMPTY') {
+    return { html: rowHtml(label, `<div class="rx-text muted">${esc(opts.emptyText || '明确无')}</div>`), unknown: false };
+  }
+  return { html: '', unknown: true };
+}
+
+/** 三个加减命名空间合并为一行：只列 PRESENT 的分组；全 UNKNOWN 时整行不进主视图。 */
+const MODIFICATION_SCOPES = [
+  ['formulaLocal', '方内原始'],
+  ['sourceShared', '来源共享'],
+  ['patientSpecific', '患者个体化'],
+];
+
+function modificationsRow(facts) {
+  const mods = facts.modifications;
+  if (!mods) return { html: '', unknown: false };
+  const blocks = [];
+  let emptyCount = 0;
+  let unknownCount = 0;
+  for (const [key, label] of MODIFICATION_SCOPES) {
+    const fact = mods[key];
+    if (!fact) continue;
+    if (fact.presence === 'PRESENT') {
+      const statements = (Array.isArray(fact.value) ? fact.value : [fact.value])
+        .map((x) => (isObj(x) ? String(x.statement ?? '') : String(x ?? '')))
+        .map((s) => s.trim())
+        .filter(Boolean);
+      // 解析失败也绝不丢内容：退回原文成行展示。
+      const body = statements.map((s) => modificationGroupsHtml(s) || rulesHtml([s])).join('');
+      if (body) blocks.push(`<div class="rx-mod-scope"><span class="rx-mod-scope-label">${esc(label)}</span>${body}</div>`);
+      else emptyCount += 1;
+    } else if (fact.presence === 'KNOWN_EMPTY') emptyCount += 1;
+    else unknownCount += 1;
+  }
+  if (blocks.length) return { html: rowHtml('加减', blocks.join('')), unknown: false };
+  if (emptyCount > 0 && unknownCount === 0) return { html: rowHtml('加减', '<div class="rx-text muted">无加减</div>'), unknown: false };
+  return { html: '', unknown: unknownCount > 0 };
+}
+
+/** 技术标识（来源 ID / 资产 ID）：不进医生主视图，折叠保留以防溯源丢失。 */
+function techIdDetailsHtml(ids) {
+  const list = [...new Set((ids || []).map((x) => String(x ?? '').trim()).filter(Boolean))];
+  if (!list.length) return '';
+  return `<details class="rx-raw"><summary>技术标识</summary><div class="rx-raw-body"><div class="rx-kv-list">${list.map((x) => `<div class="rx-kv"><span>id</span><span>${esc(x)}</span></div>`).join('')}</div></div></details>`;
+}
+
+/** 来源未提供的字段：主视图不展示「未知」，折叠保留字段名（UNKNOWN ≠ 无）。 */
+function unknownFieldsDetailsHtml(labels) {
+  const list = [...new Set((labels || []).filter(Boolean))];
+  if (!list.length) return '';
+  return `<details class="rx-raw"><summary>来源未提供</summary><div class="rx-raw-body"><div class="rx-kv-list"><div class="rx-kv"><span>字段</span><span>${esc(list.join('、'))}</span></div><div class="rx-kv"><span>状态</span><span>未标注（≠ 无）</span></div></div></div></details>`;
 }
 function provenanceLineHtml(prov) {
   if (!isObj(prov)) return '';
@@ -575,13 +745,12 @@ function techDetailsHtml(payload) {
   const rows = entries.map(([k, v]) => `<div class="rx-kv"><span>${esc(k)}</span><span>${esc(Array.isArray(v) ? v.join('、') : String(v))}</span></div>`).join('');
   return `<details class="rx-raw"><summary>来源资产标识</summary><div class="rx-raw-body"><div class="rx-kv-list">${rows}</div></div></details>`;
 }
-function deliveryCardHtml({ kind, title, badge, ref, meta, rows, source, details, exclusion }) {
+function deliveryCardHtml({ kind, title, badge, meta, rows, source, details, exclusion }) {
   return `<div class="rx-card">
       <div class="rx-head">
         <span class="rx-kind">${esc(kind)}</span>
         <strong class="rx-title">${esc(title || kind)}</strong>
         ${badge || ''}
-        ${ref || ''}
       </div>
       ${meta ? `<div class="rx-meta">${esc(meta)}</div>` : ''}
       <div class="rx-body">${rows || '<div class="rx-text muted">该来源未提供可展示的结构化字段。</div>'}${exclusion || ''}</div>
@@ -589,43 +758,77 @@ function deliveryCardHtml({ kind, title, badge, ref, meta, rows, source, details
       ${details || ''}
     </div>`;
 }
-function formulaCardHtml(f) {
+
+/**
+ * 卡片批量渲染：当所有卡片携带同一状态（如「可执行 · 当前适用」）时上提为交付级一行，
+ * 卡片内不再逐张重复（卡片间状态不同则各自保留）。
+ */
+function cardsHtml(descriptors) {
+  const shared = descriptors.length > 1
+    && descriptors.every((d) => d.meta)
+    && new Set(descriptors.map((d) => d.meta)).size === 1
+    ? descriptors[0].meta
+    : '';
+  const body = descriptors.map((d) => deliveryCardHtml(shared ? { ...d, meta: '' } : d)).join('');
+  return (shared ? `<div class="rx-meta rx-meta-shared">${esc(shared)}</div>` : '') + body;
+}
+
+/** 方剂卡片描述符：只呈现 PRESENT 事实；技术标识与未提供字段折叠进溯源区。 */
+function formulaCard(f) {
   const facts = f.facts || {};
-  const rows = [
-    rowHtml('组成', facts.composition ? presenceHtml(facts.composition, 'composition') : valueHtml(f.composition, 'composition')),
-    rowHtml('制备', facts.preparation ? presenceHtml(facts.preparation) : ''),
-    rowHtml('用法', facts.usage ? presenceHtml(facts.usage) : (f.usage ? `<div class="rx-text">${esc(f.usage)}</div>` : '')),
-    rowHtml('方内原始加减', facts.modifications ? modificationHtml(facts.modifications.formulaLocal) : ''),
-    rowHtml('来源节点共享加减', facts.modifications ? modificationHtml(facts.modifications.sourceShared) : ''),
-    rowHtml('患者个体化加减', facts.modifications ? modificationHtml(facts.modifications.patientSpecific) : ''),
-  ].filter(Boolean).join('');
+  const unknown = [];
+  const rows = [];
+
+  const composition = facts.composition
+    ? factRow('组成', facts.composition, { key: 'composition' })
+    : { html: rowHtml('组成', valueHtml(f.composition, 'composition')), unknown: false };
+  if (composition.html) rows.push(composition.html);
+
+  const preparation = factRow('制备', facts.preparation);
+  if (preparation.html) rows.push(preparation.html);
+  else if (preparation.unknown) unknown.push('制备');
+
+  const usage = facts.usage
+    ? factRow('用法', facts.usage)
+    : { html: f.usage ? rowHtml('用法', `<div class="rx-text">${esc(f.usage)}</div>`) : '', unknown: false };
+  if (usage.html) rows.push(usage.html);
+  else if (usage.unknown) unknown.push('用法');
+
+  const modifications = modificationsRow(facts);
+  if (modifications.html) rows.push(modifications.html);
+  else if (modifications.unknown) unknown.push('加减');
+
   const ctx = f.case_context;
   const ctxText = ctx ? [
     ctx.disease ? `病名：${ctx.disease}` : '', ctx.syndrome ? `证型：${ctx.syndrome}` : '',
     ctx.treatment ? `治法：${ctx.treatment}` : '', ctx.patient ? `患者：${ctx.patient}` : '',
     ctx.symptoms ? `症状：${ctx.symptoms}` : '', ctx.sourceRef ? `来源：${ctx.sourceRef}` : '',
   ].filter(Boolean).join('\n') : '';
-  return deliveryCardHtml({
+
+  return {
     kind: '方剂',
     title: f.name,
     badge: `<span class="rx-badge ${esc(f.relation || '')}">${esc(RELATION_LABELS[f.relation] || f.relation || '来源成员')}</span>`,
-    ref: f.source_ref ? `<span class="ev-refs">${esc(f.source_ref)}</span>` : '',
-    rows,
-    details: rawDetailsHtml('来源病例上下文', ctxText),
-  });
+    meta: '',
+    rows: rows.join(''),
+    details: techIdDetailsHtml([f.source_ref]) + rawDetailsHtml('来源病例上下文', ctxText) + unknownFieldsDetailsHtml(unknown),
+  };
 }
-function legacyFormulaCardHtml(f) {
+
+function legacyFormulaCard(f) {
   const items = (f.composition || []).flatMap((x) => splitList(x));
-  return deliveryCardHtml({
+  return {
     kind: '方剂',
     title: f.name,
     badge: `<span class="rx-badge ${esc(f.authority || '')}">${esc(FORMULA_AUTHORITY_LABELS[f.authority] || f.authority || '')}</span>`,
-    ref: f.source_id ? `<span class="ev-refs">${esc(f.source_id)}</span>` : '',
+    meta: '',
     rows: rowHtml('组成', items.length ? chipsHtml(items) : ''),
-  });
+    details: techIdDetailsHtml([f.source_id]),
+  };
 }
+
 /** SOURCE_BOUND 交付：每个被采纳来源成员渲染一张卡，字段无损，形态与方剂一致。 */
-function sourceProductCardHtml(delivery, product) {
+function sourceProductCard(delivery, product) {
   const payload = isObj(product.payload) ? product.payload : {};
   const title = (typeof product.name === 'string' && product.name.trim())
     || (typeof payload.title === 'string' ? payload.title : product.productId);
@@ -636,19 +839,19 @@ function sourceProductCardHtml(delivery, product) {
   ].filter(Boolean).join(' · ');
   const exclusion = product.qualification === 'CLINICALLY_EXCLUDED'
     ? `<div class="rx-exclusion">临床排除${product.exclusionReason ? `：${esc(product.exclusionReason)}` : ''}</div>` : '';
-  return deliveryCardHtml({
+  return {
     kind: modalityLabel(delivery.outcome),
     title,
     badge: `<span class="rx-badge ${esc(product.qualification || '')}">${esc(RELATION_LABELS[product.qualification] || '来源成员')}</span>`,
-    ref: product.productId ? `<span class="ev-refs">${esc(product.productId)}</span>` : '',
     meta,
     rows: objectRowsHtml(payload, new Set(['title', 'name'])),
     source: provenanceLineHtml(payload.provenance),
-    details: techDetailsHtml(payload) + provenanceDetailsHtml(payload.provenance),
+    details: techIdDetailsHtml([product.productId]) + techDetailsHtml(payload) + provenanceDetailsHtml(payload.provenance),
     exclusion,
-  });
+  };
 }
-function advisoryDeliveryCardHtml(d) {
+
+function advisoryDeliveryCard(d) {
   const rows = [
     rowHtml('适用性', APPLICABILITY_LABELS[d.disposition] ? `<div class="rx-text">${esc(APPLICABILITY_LABELS[d.disposition])}</div>` : ''),
     rowHtml('说明', d.statement ? `<div class="rx-text">${esc(d.statement)}</div>` : ''),
@@ -657,49 +860,63 @@ function advisoryDeliveryCardHtml(d) {
     rowHtml('制备', d.preparation ? `<div class="rx-text">${esc(d.preparation)}</div>` : ''),
     rowHtml('用法', d.usage ? `<div class="rx-text">${esc(d.usage)}</div>` : ''),
   ].filter(Boolean).join('');
-  return deliveryCardHtml({
+  return {
     kind: '治疗建议',
     title: d.form || modalityLabel(d.outcome),
     badge: '<span class="rx-badge advisory">模型建议</span>',
+    meta: '',
     rows,
-  });
+  };
 }
 
 function renderClinical(r, authority) {
   const authorityState = r.formula?.authority || '';
   const badge = authorityState ? `<span class="authority-badge ${esc(authorityState)}">${esc(FORMULA_AUTHORITY_LABELS[authorityState] || authorityState)}</span>` : '';
   const missing = (r.missing_information || []).map((m) => `<li>${esc(m)}</li>`).join('');
-  const ev = (refs) => (refs || []).map((x) => `<span class="ev-refs">${esc(x)}</span>`).join('');
   // 置信度可能未给出（UNKNOWN ≠ 0）：未给出就不渲染，绝不显示 0%。
   const confidenceBadge = (value) => (typeof value === 'number' ? `<span class="confidence">${(value * 100).toFixed(0)}%</span>` : '');
 
-  const cards = [];
+  const descriptors = [];
   // 方剂：committed SourceBundle 的无损投影。UI 只渲染，不按 relation / qualification 再筛选。
   if (Array.isArray(r.formula_set) && r.formula_set.length) {
-    cards.push(...r.formula_set.map(formulaCardHtml));
+    descriptors.push(...r.formula_set.map(formulaCard));
   } else if (r.formula?.name || (r.formula?.composition || []).length) {
-    cards.push(legacyFormulaCardHtml(r.formula));
+    descriptors.push(legacyFormulaCard(r.formula));
   }
   // 其他来源绑定交付（膏方 / 针灸 / 艾灸 / 耳穴 / 外治 / 成药…）：逐来源成员渲染，一个成员一张卡。
   for (const delivery of (Array.isArray(r.deliveries) ? r.deliveries : [])) {
     if (delivery?.outcome === 'modality:herbal-formula') continue; // 已由 formula_set 无损呈现
     const products = Array.isArray(delivery?.source_bundle?.products) ? delivery.source_bundle.products : [];
-    for (const product of products) cards.push(sourceProductCardHtml(delivery, product));
+    for (const product of products) descriptors.push(sourceProductCard(delivery, product));
   }
   // 无来源包的治疗交付（模型生成的建议）：与来源交付共用同一套卡片形态。
   for (const delivery of (Array.isArray(r.treatment_deliveries) ? r.treatment_deliveries : [])) {
-    cards.push(advisoryDeliveryCardHtml(delivery));
+    descriptors.push(advisoryDeliveryCard(delivery));
   }
-  const deliveryHtml = cards.length
-    ? `<div class="rx-section-title">治疗方案</div><div class="rx-list">${cards.join('')}</div>`
+  const deliveryHtml = descriptors.length
+    ? `<div class="rx-section-title">治疗方案</div><div class="rx-list">${cardsHtml(descriptors)}</div>`
+    : '';
+
+  // 证据编号不进结论行（医生视图只留结论）；折叠保留，仍可溯源到具体病例事实。
+  const evidenceLines = [
+    ['病名', r.disease?.evidence_refs],
+    ['辨证', r.syndrome?.evidence_refs],
+    ['治法', r.treatment?.evidence_refs],
+  ].map(([label, refs]) => {
+    const list = [...new Set((refs || []).map((x) => String(x ?? '').trim()).filter(Boolean))];
+    return list.length ? `<div class="rx-kv"><span>${esc(label)}</span><span>${esc(list.join('、'))}</span></div>` : '';
+  }).filter(Boolean).join('');
+  const evidenceHtml = evidenceLines
+    ? `<details class="rx-raw"><summary>判断依据（证据编号）</summary><div class="rx-raw-body"><div class="rx-kv-list">${evidenceLines}</div></div></details>`
     : '';
 
   return `
     <div class="assistant-block">
       <div class="answer-head"><h3>临床判断</h3>${badge}</div>
-      <div class="clinical-line"><span class="k">病名</span><span class="v">${esc(r.disease?.name)}${confidenceBadge(r.disease?.confidence)}${ev(r.disease?.evidence_refs)}</span></div>
-      <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}${confidenceBadge(r.syndrome?.confidence)}${ev(r.syndrome?.evidence_refs)}</span></div>
-      <div class="clinical-line"><span class="k">治法</span><span class="v">${esc(r.treatment?.text)}${ev(r.treatment?.evidence_refs)}</span></div>
+      <div class="clinical-line"><span class="k">病名</span><span class="v">${esc(r.disease?.name)}${confidenceBadge(r.disease?.confidence)}</span></div>
+      <div class="clinical-line"><span class="k">辨证</span><span class="v">${esc(r.syndrome?.name)}${confidenceBadge(r.syndrome?.confidence)}</span></div>
+      <div class="clinical-line"><span class="k">治法</span><span class="v">${esc(r.treatment?.text)}</span></div>
+      ${evidenceHtml}
       ${deliveryHtml}
       ${missing ? `<div class="missing-info"><strong>尚缺信息</strong><ul>${missing}</ul></div>` : ''}
     </div>`;
@@ -730,7 +947,7 @@ $('#wpTabs').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-tab]');
   if (!btn) return;
   $$('#wpTabs button').forEach((b) => b.classList.toggle('active', b === btn));
-  renderWorkspace(state.activeSession?.workspace || null, btn.dataset.tab);
+  renderWorkspace(activeSession()?.session?.workspace || null, btn.dataset.tab);
 });
 $('#wpBody').addEventListener('click', (e) => {
   const src = e.target.closest('[data-source]');
@@ -824,7 +1041,7 @@ function renderOverview(ws) {
   const caps = (ws.activeCapabilities || []).map((c) => `<span class="wp-tag active">${esc(c)}</span>`).join(' ');
   const skills = (ws.activeSkills || []).map((s) => `<span class="wp-tag">${esc(s)}</span>`).join(' ');
   return `
-    ${renderStrategy(state.activeSession?.strategy)}
+    ${renderStrategy(activeSession()?.session?.strategy)}
     <div class="wp-section"><div class="wp-section-title">安全状态</div>
       <div class="wp-card"><span class="wp-tag ${esc(ws.safetyDisposition)}">${esc(ws.safetyDisposition)}</span></div></div>
     <div class="wp-section"><div class="wp-section-title">假设地图</div><div class="wp-card">${renderHypothesisMap(ws)}</div></div>
@@ -936,31 +1153,6 @@ function renderTrace(session) {
     </div>`;
 }
 
-/**
- * 失败态的 Trace：直接用流式过程中已收到的事件渲染，保证「展开推理过程」在失败时同样成立。
- */
-function renderLiveTrace(message) {
-  const tools = state.liveEvents
-    .filter((x) => x.type === 'tool')
-    .map((x) => `
-      <div class="trace-tool">
-        <div class="tool-name">${esc(x.data.toolName)}</div>
-        <div class="tool-meta">${x.data.ms}ms${x.data.error ? ' · ' + esc(x.data.error) : ''}</div>
-        <pre>${esc(JSON.stringify(x.data.input, null, 2))}</pre>
-        ${x.data.output !== undefined ? `<pre>${esc(JSON.stringify(x.data.output, null, 2))}</pre>` : ''}
-      </div>`).join('');
-  const events = state.liveEvents
-    .filter((x) => x.type === 'workspace')
-    .map((x) => `<div class="trace-event"><span class="ev-type">${esc(x.data.type)}</span></div>`).join('');
-  $('#traceBody').innerHTML = `
-    <div class="trace-section"><h3>Run</h3>
-      <div class="trace-kv"><span class="k">状态</span><span>未完成 · NO COMMIT</span></div>
-      <div class="trace-kv"><span class="k">原因</span><span>${esc(message)}</span></div>
-    </div>
-    <div class="trace-section"><h3>工具调用（${state.liveEvents.filter((x) => x.type === 'tool').length}）</h3>${tools || '<div class="muted">—</div>'}</div>
-    <div class="trace-section"><h3>Workspace 事件（${state.liveEvents.filter((x) => x.type === 'workspace').length}）</h3>${events || '<div class="muted">—</div>'}</div>`;
-}
-
 /* ---------- 知识来源 Modal ---------- */
 $('#sourceClose').addEventListener('click', () => $('#sourceModal').classList.add('hidden'));
 async function openSource(sourceId) {
@@ -983,6 +1175,71 @@ async function openSource(sourceId) {
 
 /* ---------- 发送 / SSE 流 ---------- */
 const inputEl = $('#input');
+
+/** 根据当前会话运行状态，切换发送/停止按钮图标与工作台运行态。 */
+function updateComposer() {
+  const s = activeSession();
+  const running = s?.status === 'running';
+  $('#send').classList.toggle('stop', running);
+  $('#send .send-icon').classList.toggle('hidden', running);
+  $('#send .stop-square').classList.toggle('hidden', !running);
+  $('#wpRunState').textContent = running ? 'running' : 'idle';
+  $('#wpRunState').className = 'wp-run-state' + (running ? ' running' : '');
+}
+
+/** 追加一条终止/失败说明块（用户消息 + 过程节点之后）。 */
+function appendTerminalBlock(title, badge, text) {
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = `<img class="bot-avatar" src="/logo.png" alt="蒲公英中医" /><div class="assistant-content"><div class="assistant-block error-block"><div class="answer-head"><h3>${esc(title)}</h3><span class="authority-badge BLOCKED">${esc(badge)}</span></div><div class="plain-text">${esc(text)}</div></div></div>`;
+  $('#chat').appendChild(div);
+  scrollChat();
+}
+
+/** 根据当前会话状态重建聊天区（切换会话 / 运行结束 / 停止后统一入口）。 */
+function renderChatForActive() {
+  const s = activeSession();
+  if (!s) {
+    $('#chat').innerHTML = EMPTY_STATE_HTML;
+    $('#caseTitle').innerHTML = '<strong>新问诊</strong><span>输入病例开始临床推理</span>';
+    return;
+  }
+  $('#chat').innerHTML = '';
+  if (s.status === 'done' && s.session) {
+    appendUserMessage(s.session.trace.input);
+    appendProcessNode(s.session.trace.toolCalls, s.session.trace.totalMs);
+    renderConclusion(s.session);
+    $('#caseTitle').innerHTML = `<strong>问诊</strong><span>${esc(s.session.runId)} · ${esc(s.session.model)}</span>`;
+  } else if (s.status === 'running') {
+    appendUserMessage(s.input);
+    showThinking();
+    renderLiveActivity();
+    renderLifecycle();
+  } else if (s.status === 'aborted') {
+    appendUserMessage(s.input);
+    appendProcessNode(liveTools(), undefined);
+    appendTerminalBlock('已停止', 'ABORTED', '本次运行已被手动终止；上方为已真实发生的工具调用，可在 Trace 查看完整事件。');
+    $('#caseTitle').innerHTML = '<strong>已停止</strong><span>本次运行已中止</span>';
+  } else if (s.status === 'error') {
+    appendUserMessage(s.input);
+    appendProcessNode(liveTools(), undefined);
+    appendTerminalBlock('推理未完成', 'NO COMMIT', s.error || '本次运行未产生可提交的结论。');
+    $('#caseTitle').innerHTML = '<strong>推理未完成</strong><span>已保留本次运行的工具调用轨迹</span>';
+  } else {
+    $('#caseTitle').innerHTML = '<strong>新问诊</strong><span>输入病例开始临床推理</span>';
+  }
+}
+
+/** 停止当前会话正在进行的运行：本地 abort + 通知后端终止。 */
+function stopCurrentRun() {
+  const s = activeSession();
+  if (!s || s.status !== 'running') return;
+  s.abortController?.abort();
+  if (s.requestId) {
+    api('/api/run/abort', { method: 'POST', body: JSON.stringify({ requestId: s.requestId }) }).catch(() => {});
+  }
+}
+
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
@@ -991,28 +1248,35 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 170) + 'px';
 });
 $('#send').addEventListener('click', () => {
-  if (state.streaming) return;
+  const s = activeSession();
+  if (s?.status === 'running') { stopCurrentRun(); return; }
   send();
 });
 
 async function send() {
+  const s = activeSession();
+  if (!s) return;
   const text = inputEl.value.trim();
   if (!text) return;
-  if (state.streaming) return;
-  state.streaming = true;
-  $('#send').classList.add('stop');
-  $('#send .send-icon').classList.add('hidden');
-  $('#send .stop-square').classList.remove('hidden');
-  $('#wpRunState').textContent = 'running';
-  $('#wpRunState').className = 'wp-run-state running';
+  if (s.status === 'running') return;
+
+  // 进入运行态：本次运行的所有中间状态都挂在该会话对象上，切换会话互不影响、可并行。
+  s.status = 'running';
+  s.input = text;
+  s.liveEvents = [];
+  s.lifecycle = 'exploring';
+  s.session = null;
+  s.model = '';
+  s.title = text.slice(0, 24) || '问诊';
+  s.requestId = 'req_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  s.abortController = new AbortController();
+
   inputEl.value = '';
   inputEl.style.height = 'auto';
 
-  appendUserMessage(text);
-  showThinking();
-  state.liveEvents = [];
-  state.lifecycle = 'exploring';
-  renderLifecycle();
+  renderSessions();
+  updateComposer();
+  renderChatForActive();
 
   try {
     const res = await fetch('/api/run/stream', {
@@ -1020,12 +1284,14 @@ async function send() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         input: text,
+        requestId: s.requestId,
         ...(modelCatalog?.active ? {
           modelOptionId: modelCatalog.active.optionId,
           thinking: Boolean(modelCatalog.active.thinking),
           budget: modelCatalog.active.budget || 'off',
         } : {}),
       }),
+      signal: s.abortController.signal,
     });
     if (res.status === 401) { window.location.replace('/login'); return; }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -1035,23 +1301,26 @@ async function send() {
     let buffer = '';
     let session = null;
     let failure = '';
+    let aborted = false;
 
     const handle = (event, data) => {
       if (event === 'meta') {
         if (data.asrEnabled === false) $('#mic').classList.add('hidden');
       } else if (event === 'tool') {
-        state.liveEvents.push({ type: 'tool', data });
-        renderLiveActivity();
+        s.liveEvents.push({ type: 'tool', data });
+        if (s.id === state.activeId) renderLiveActivity();
       } else if (event === 'workspace') {
-        (data.events || []).forEach((e) => state.liveEvents.push({ type: 'workspace', data: e }));
+        (data.events || []).forEach((e) => s.liveEvents.push({ type: 'workspace', data: e }));
       } else if (event === 'lifecycle') {
-        state.lifecycle = data.stage;
-        renderLifecycle();
+        s.lifecycle = data.stage;
+        if (s.id === state.activeId) renderLifecycle();
       } else if (event === 'result') {
         session = data;
       } else if (event === 'error') {
         failure = data.message || '运行失败';
-        toast(failure);
+        if (s.id === state.activeId) toast(failure);
+      } else if (event === 'aborted') {
+        aborted = true;
       } else if (event === 'done') {
         /* 结束 */
       }
@@ -1070,25 +1339,34 @@ async function send() {
     }
 
     if (session) {
-      state.activeSession = session;
-      finishThinking(session);
-      addSession(session.trace.input.slice(0, 24) || '问诊', session);
-      $('#caseTitle').innerHTML = `<strong>问诊完成</strong><span>${esc(session.runId)} · ${esc(session.model)}</span>`;
+      s.session = session;
+      s.status = 'done';
+      s.runId = session.runId;
+      s.model = session.model;
+    } else if (aborted) {
+      s.status = 'aborted';
     } else {
-      failThinking(failure || '本次运行未产生可提交的结论。');
-      $('#caseTitle').innerHTML = '<strong>推理未完成</strong><span>已保留本次运行的工具调用轨迹</span>';
+      s.status = 'error';
+      s.error = failure || '本次运行未产生可提交的结论。';
     }
   } catch (e) {
-    toast(e.message || '请求失败');
-    failThinking(e.message || '请求失败');
-    $('#caseTitle').innerHTML = '<strong>推理未完成</strong><span>已保留本次运行的工具调用轨迹</span>';
+    if (e.name === 'AbortError') {
+      s.status = 'aborted';
+    } else {
+      s.status = 'error';
+      s.error = e.message || '请求失败';
+      if (s.id === state.activeId) toast(e.message || '请求失败');
+    }
   } finally {
-    state.streaming = false;
-    $('#send').classList.remove('stop');
-    $('#send .send-icon').classList.remove('hidden');
-    $('#send .stop-square').classList.add('hidden');
-    $('#wpRunState').textContent = 'idle';
-    $('#wpRunState').className = 'wp-run-state';
+    s.abortController = null;
+    if (s.id === state.activeId) {
+      renderChatForActive();
+      renderWorkspace(s.session?.workspace || null);
+      renderTrace(s.session || null);
+    }
+    renderSessions();
+    updateComposer();
+    persistSessions();
   }
 }
 
@@ -1398,5 +1676,9 @@ async function loadModels() {
     const h = await api('/api/health');
     if (!h.asr?.enabled) $('#mic').classList.add('hidden');
   } catch { /* 健康探针失败不阻塞；模型目录单独加载并自行提示 */ }
+  restoreSessions();
+  renderSessions();
+  renderChatForActive();
+  updateComposer();
   await loadModels();
 })();
