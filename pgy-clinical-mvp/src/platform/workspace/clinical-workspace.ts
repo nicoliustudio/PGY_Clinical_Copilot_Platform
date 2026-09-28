@@ -745,11 +745,31 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
           })
           .filter((item): item is NonNullable<typeof item> => item !== undefined)
       : [];
+    const productDecisions = Array.isArray(payload.productDecisions)
+      ? payload.productDecisions
+          .map((raw) => {
+            if (!raw || typeof raw !== 'object') return undefined;
+            const item = raw as Record<string, unknown>;
+            const formulaRef = asString(item.formulaRef);
+            const disposition = asString(item.disposition);
+            if (!formulaRef || !['SELECT', 'EXCLUDE', 'LEAVE_UNASSESSED'].includes(disposition ?? '')) return undefined;
+            return {
+              formulaRef,
+              disposition: disposition as 'SELECT' | 'EXCLUDE' | 'LEAVE_UNASSESSED',
+              rationale: asString(item.rationale),
+              supportingFactRefs: asStringArray(item.supportingFactRefs),
+              contradictingFactRefs: asStringArray(item.contradictingFactRefs),
+              missingCriticalEvidence: asStringArray(item.missingCriticalEvidence),
+            };
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== undefined)
+      : [];
     const next = {
       selectedCandidateRef: asString(payload.selectedCandidateRef),
       selectedSourceRef: asString(payload.selectedSourceRef),
       primaryFormulaRef: asString(payload.primaryFormulaRef),
       candidateDecisions,
+      productDecisions,
       rationale: asString(payload.rationale),
       supportingEvidenceRefs: asStringArray(payload.supportingEvidenceRefs),
       contradictingEvidenceRefs: asStringArray(payload.contradictingEvidenceRefs),
@@ -760,6 +780,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
       selectedSourceRef: existing.selectedSourceRef,
       primaryFormulaRef: existing.primaryFormulaRef,
       candidateDecisions: existing.candidateDecisions ?? [],
+      productDecisions: existing.productDecisions ?? [],
       rationale: existing.rationale,
       supportingEvidenceRefs: existing.supportingEvidenceRefs,
       contradictingEvidenceRefs: existing.contradictingEvidenceRefs,
@@ -1125,9 +1146,15 @@ export function isArtifactSatisfied(workspace: ClinicalWorkspace, artifact: stri
     case 'patternAssessment': return spine.patternAssessmentRef !== undefined;
     case 'treatmentPlan': return spine.treatmentPlan !== undefined;
     case 'formulaSelection': {
-      // H15.2.1：已声明的 formulaSelection 必须具有非空 selectedCandidateRef，关闭「空选方仍判定完成」。
+      // A source-node is only the source decision. A P1 herbal formula selection is complete only
+      // after an explicit product qualification has produced primaryFormulaRef. Product-specific
+      // candidate identities (e.g. P2 CASE_VISIT / legacy source::formula) are already product decisions.
       const sel = spine.formulaSelection;
-      return sel !== undefined && typeof sel.selectedCandidateRef === 'string' && sel.selectedCandidateRef.trim() !== '';
+      if (!sel || typeof sel.selectedCandidateRef !== 'string' || sel.selectedCandidateRef.trim() === '') return false;
+      if (sel.selectedCandidateRef.startsWith('source-node:')) {
+        return typeof sel.primaryFormulaRef === 'string' && sel.primaryFormulaRef.trim() !== '';
+      }
+      return true;
     }
     case 'formulaReview': return spine.formulaReview !== undefined;
     case 'formalHypotheses': return spine.patternHypothesisRefs.length > 0;

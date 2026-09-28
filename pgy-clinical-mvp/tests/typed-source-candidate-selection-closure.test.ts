@@ -102,7 +102,7 @@ test('P2 structured case source hydrates every visit in the same historical case
   assert.equal(set?.parentRecordRef, 'P2:DC_CASE_1');
   assert.equal(set?.formulas.length, 2);
   assert.equal(set?.formulas[0]?.relation, 'PRIMARY_SELECTED');
-  assert.equal(set?.formulas[1]?.relation, 'SOURCE_ALTERNATIVE');
+  assert.equal(set?.formulas[1]?.relation, 'UNASSESSED');
   assert.equal(set?.formulas[0]?.caseContext?.visit, '初诊');
   assert.equal(set?.formulas[1]?.caseContext?.visit, '二诊');
   assert.equal(set?.formulas[0]?.formulaLocalModificationPresence, 'UNKNOWN');

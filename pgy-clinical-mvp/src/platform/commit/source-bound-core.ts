@@ -99,7 +99,7 @@ export function materializeSourceBoundAssets(input: {
       // there is no array-order primary/alternative ranking (membership and qualification are orthogonal).
       membership: 'SOURCE_MEMBER',
       clinicalQualification: 'UNASSESSED',
-      qualification: 'SOURCE_ALTERNATIVE',
+      qualification: 'UNASSESSED',
       clinicalApplicability: applicability,
     });
   }

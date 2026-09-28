@@ -961,7 +961,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
     },
   }),
   'formula.select': (context) => tool({
-    description: 'Closed-world clinical selection transaction. Account for every Kernel candidate exactly once. CONSIDERED requires real supporting patient fact refs; EXCLUDED requires real contradicting patient fact refs; when the record is merely silent/unknown use INSUFFICIENT_EVIDENCE + missingCriticalEvidence, never invent an absence. Runtime owns evidence/source identities and hydrates the complete source bundle.',
+    description: 'Atomic source + product clinical selection transaction. Account for every Kernel candidate exactly once. For a selected P1 SOURCE_NODE, also account for every source product exactly once and explicitly SELECT exactly one primary product; never infer a primary from product order. CONSIDERED/SELECT require real supporting patient facts; EXCLUDED/EXCLUDE require real contradicting patient facts; silence/unknown must use INSUFFICIENT_EVIDENCE or LEAVE_UNASSESSED with missingCriticalEvidence. Runtime owns identities and canonical source membership.',
     inputSchema: z.object({
       candidateRef: z.string().min(1),
       candidateDecisions: z.array(z.discriminatedUnion('disposition', [
@@ -990,6 +990,32 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
           missingCriticalEvidence: z.array(z.string().min(1)).min(1),
         }),
       ])).min(1),
+      productDecisions: z.array(z.discriminatedUnion('disposition', [
+        z.object({
+          formulaRef: z.string().min(1),
+          disposition: z.literal('SELECT'),
+          rationale: z.string().optional(),
+          supportingFactRefs: z.array(z.string().min(1)).min(1),
+          contradictingFactRefs: z.array(z.string().min(1)).optional(),
+          missingCriticalEvidence: z.array(z.string().min(1)).optional(),
+        }),
+        z.object({
+          formulaRef: z.string().min(1),
+          disposition: z.literal('EXCLUDE'),
+          rationale: z.string().optional(),
+          supportingFactRefs: z.array(z.string().min(1)).optional(),
+          contradictingFactRefs: z.array(z.string().min(1)).min(1),
+          missingCriticalEvidence: z.array(z.string().min(1)).optional(),
+        }),
+        z.object({
+          formulaRef: z.string().min(1),
+          disposition: z.literal('LEAVE_UNASSESSED'),
+          rationale: z.string().optional(),
+          supportingFactRefs: z.array(z.string().min(1)).optional(),
+          contradictingFactRefs: z.array(z.string().min(1)).optional(),
+          missingCriticalEvidence: z.array(z.string().min(1)).min(1),
+        }),
+      ])).optional(),
       rationale: z.string().optional(),
     }),
     execute: async (input) => {
@@ -1008,7 +1034,9 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
             ? ['establish a complete CandidateSetReceipt before selecting']
             : result.code === 'CANDIDATE_DELIBERATION_INCOMPLETE'
               ? ['submit exactly one disposition for every candidate in the current CandidateSet']
-              : ['repair the deterministic selection precondition'],
+              : result.code === 'PRODUCT_DECISION_INCOMPLETE' || result.code === 'PRODUCT_DECISION_INVALID'
+                ? ['for the selected P1 source, submit exactly one product disposition for every source product and explicitly SELECT exactly one primary product using patient-fact backing']
+                : ['repair the deterministic selection precondition'],
         });
       }
       refreshControlPlaneV21(context);

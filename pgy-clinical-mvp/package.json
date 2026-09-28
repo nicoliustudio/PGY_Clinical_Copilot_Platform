@@ -38,7 +38,8 @@
     "test:authority-cutover": "node --import tsx --test tests/authority-cutover.invariants.test.ts tests/commit-boundary.invariants.test.ts tests/delivery-integrity.test.ts",
     "authority-boundary:check": "node scripts/check-authority-boundary-closure.mjs",
     "truth-genesis:check": "node scripts/check-source-authority-closure.mjs",
-    "clinical-semantics:check": "node --import tsx --test tests/clinical-semantics-closure.test.ts tests/root-invariants.test.ts tests/p04-p05-root-closure.test.ts"
+    "clinical-semantics:check": "node --import tsx --test tests/clinical-semantics-closure.test.ts tests/root-invariants.test.ts tests/p04-p05-root-closure.test.ts",
+    "selection-semantics:check": "node --import tsx --test tests/selection-product-stage-closure.test.ts tests/source-selection-delivery-semantics-closure.test.ts tests/typed-source-candidate-selection-closure.test.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.49",

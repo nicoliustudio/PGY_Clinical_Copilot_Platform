@@ -1,4 +1,4 @@
-import type { ProductQualification } from '../contracts/workspace.js';
+import type { FormulaAdoptionState, FormulaProductDecision, ProductQualification } from '../contracts/workspace.js';
 
 /**
  * Source / Product semantics —— 三个正交轴：
@@ -11,19 +11,14 @@ import type { ProductQualification } from '../contracts/workspace.js';
  */
 
 /** 一个显式产品决定（source selection 与 product qualification 分离后的产物）。 */
-export interface ProductDecision {
-  /** 引用 SourceFormulaEntry.formulaRef（`${sourceId}::${formulaId}`）。 */
-  formulaRef: string;
-  disposition: 'SELECT' | 'EXCLUDE' | 'LEAVE_UNASSESSED';
-  rationale?: string;
-  supportingFactRefs?: string[];
-  contradictingFactRefs?: string[];
-}
+export type ProductDecision = FormulaProductDecision;
 
 interface QualifiableProduct {
   formulaRef: string;
   clinicalQualification?: ProductQualification;
+  relation?: FormulaAdoptionState | 'UNASSESSED';
   exclusionReason?: string;
+  exclusionEvidenceRefs?: string[];
 }
 
 /**
@@ -44,16 +39,30 @@ export function applyProductDecisions<T extends QualifiableProduct>(
   return products.map((product) => {
     const decision = byRef.get(product.formulaRef);
     if (!decision || decision.disposition === 'LEAVE_UNASSESSED') {
-      return { ...product, clinicalQualification: 'UNASSESSED' as const, exclusionReason: undefined };
+      return {
+        ...product,
+        clinicalQualification: 'UNASSESSED' as const,
+        relation: 'UNASSESSED' as const,
+        exclusionReason: undefined,
+        exclusionEvidenceRefs: undefined,
+      };
     }
     if (decision.disposition === 'EXCLUDE') {
       return {
         ...product,
         clinicalQualification: 'CLINICALLY_EXCLUDED' as const,
+        relation: 'CLINICALLY_EXCLUDED' as const,
         exclusionReason: decision.rationale,
+        exclusionEvidenceRefs: decision.contradictingFactRefs ? [...decision.contradictingFactRefs] : undefined,
       };
     }
-    return { ...product, clinicalQualification: 'CURRENTLY_SELECTED' as const, exclusionReason: undefined };
+    return {
+      ...product,
+      clinicalQualification: 'CURRENTLY_SELECTED' as const,
+      relation: 'PRIMARY_SELECTED' as const,
+      exclusionReason: undefined,
+      exclusionEvidenceRefs: undefined,
+    };
   });
 }
 

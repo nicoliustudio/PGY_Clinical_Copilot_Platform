@@ -94,6 +94,11 @@ test('root invariant: one formula.select decision derives canonical evidence int
     candidateRef: candidate.candidateRef,
     candidateDecisions: [{ candidateRef: candidate.candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'], rationale: 'best fit' }],
     rationale: 'best fit',
+    productDecisions: ['F1', 'F2', 'F3'].map((id, index) => (
+      index === 0
+        ? { formulaRef: `P1:K_ROOT::${id}`, disposition: 'SELECT' as const, supportingFactRefs: ['CF_TEST'], rationale: '方1 best' }
+        : { formulaRef: `P1:K_ROOT::${id}`, disposition: 'LEAVE_UNASSESSED' as const, missingCriticalEvidence: ['方' + (index + 1) + ' 未获取患者充分适配依据'], rationale: '待评估' }
+    )),
   }, {
     loadIndex: async () => ({ docs: [] } as never),
     hydrateSourceFormulaSet: () => ({

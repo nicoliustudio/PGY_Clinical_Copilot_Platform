@@ -76,11 +76,11 @@ function hydrateP1(
       : exclusion
         ? 'CLINICALLY_EXCLUDED'
         : 'UNASSESSED';
-    const relation: FormulaAdoptionState = isPrimary
+    const relation: FormulaAdoptionState | 'UNASSESSED' = isPrimary
       ? 'PRIMARY_SELECTED'
       : exclusion
         ? 'CLINICALLY_EXCLUDED'
-        : 'SOURCE_ALTERNATIVE';
+        : 'UNASSESSED';
 
     const local = normalizeTextList(f.sourceModifications);
     const legacyLocal = local.presence === 'PRESENT'
@@ -176,8 +176,8 @@ function hydrateP2Case(
         : selectedIndex >= 0 && index > selectedIndex
           ? 'LATER_VISIT'
           : 'UNKNOWN';
-    const relation: FormulaAdoptionState = isSelected ? 'PRIMARY_SELECTED' : 'SOURCE_ALTERNATIVE';
     const exclusion = options.exclusions?.[formulaRef];
+    const relation: FormulaAdoptionState | 'UNASSESSED' = isSelected ? 'PRIMARY_SELECTED' : (exclusion ? 'CLINICALLY_EXCLUDED' : 'UNASSESSED');
     const exclusionReason: string | undefined = exclusion?.reason;
     const exclusionEvidenceRefs: string[] | undefined = exclusion?.evidenceRefs;
     return {

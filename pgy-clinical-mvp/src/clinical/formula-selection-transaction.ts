@@ -1,10 +1,11 @@
 import type { RuntimeContext } from '../contracts/runtime.js';
-import type { CandidateReference, CaseFact, FormulaCandidateDecision, SourceFormulaSet } from '../contracts/workspace.js';
+import type { CandidateReference, CaseFact, FormulaCandidateDecision, FormulaProductDecision, SourceFormulaSet } from '../contracts/workspace.js';
 import { loadIndex } from '../knowledge/build.js';
 import type { KnowledgeIndex } from '../knowledge/types.js';
 import { formulaSelectionReady, focusedFormulaCandidateRefs, missingFocusedFormulaEvidence } from './formula-selection.js';
 import { hydrateSourceFormulaSetForCandidate } from './source-formula-set.js';
 import { caseFactCanBackDecision } from './canonical-clinical-state.js';
+import { applyProductDecisions } from './source-semantics.js';
 
 export type FormulaSelectionTransactionResult =
   | {
@@ -20,7 +21,7 @@ export type FormulaSelectionTransactionResult =
     }
   | {
       ok: false;
-      code: 'UNKNOWN_CANDIDATE_REF' | 'CANDIDATE_NOT_FOCUSED' | 'CANDIDATE_EXCLUDED' | 'CANDIDATE_DELIBERATION_INCOMPLETE' | 'FORMULA_EVIDENCE_INCOMPLETE' | 'CANONICAL_HYDRATION_FAILED' | 'FACT_BACKING_INVALID';
+      code: 'UNKNOWN_CANDIDATE_REF' | 'CANDIDATE_NOT_FOCUSED' | 'CANDIDATE_EXCLUDED' | 'CANDIDATE_DELIBERATION_INCOMPLETE' | 'FORMULA_EVIDENCE_INCOMPLETE' | 'CANONICAL_HYDRATION_FAILED' | 'FACT_BACKING_INVALID' | 'PRODUCT_DECISION_INCOMPLETE' | 'PRODUCT_DECISION_INVALID';
       details: string[];
     };
 
@@ -112,10 +113,57 @@ export function validateFactBackedDecision(
 }
 
 /**
+ * Product qualification is a second closed-world decision inside the selected P1 source.
+ * Kernel validates identity/completeness/provenance only; semantic fit remains Agent judgment.
+ */
+export function validateProductDecisions(
+  caseFacts: CaseFact[],
+  productRefs: readonly string[],
+  decisions: FormulaProductDecision[],
+): { ok: true } | { ok: false; code: 'PRODUCT_DECISION_INCOMPLETE' | 'PRODUCT_DECISION_INVALID'; details: string[] } {
+  const expected = new Set(productRefs);
+  const byFact = new Map(caseFacts.map((fact) => [fact.id, fact]));
+  const seen = new Set<string>();
+  const details: string[] = [];
+
+  for (const decision of decisions) {
+    if (!expected.has(decision.formulaRef)) details.push(`product decision outside selected source: ${decision.formulaRef}`);
+    if (seen.has(decision.formulaRef)) details.push(`duplicate product decision: ${decision.formulaRef}`);
+    seen.add(decision.formulaRef);
+
+    const support = decision.supportingFactRefs ?? [];
+    const contradiction = decision.contradictingFactRefs ?? [];
+    const missing = decision.missingCriticalEvidence ?? [];
+    for (const ref of [...support, ...contradiction]) {
+      const fact = byFact.get(ref);
+      if (!fact) details.push(`product decision fact ref is not a patient fact: ${ref}`);
+      else if (!caseFactCanBackDecision(fact)) details.push(`product decision fact ref is UNKNOWN/NOT_MENTIONED: ${ref}`);
+    }
+    if (decision.disposition === 'SELECT' && support.length === 0) {
+      details.push(`SELECT product requires supportingFactRefs: ${decision.formulaRef}`);
+    }
+    if (decision.disposition === 'EXCLUDE' && contradiction.length === 0) {
+      details.push(`EXCLUDE product requires contradictingFactRefs: ${decision.formulaRef}`);
+    }
+    if (decision.disposition === 'LEAVE_UNASSESSED' && missing.length === 0) {
+      details.push(`LEAVE_UNASSESSED product requires missingCriticalEvidence: ${decision.formulaRef}`);
+    }
+  }
+
+  for (const ref of productRefs) if (!seen.has(ref)) details.push(`source product has no clinical disposition: ${ref}`);
+  const selectedCount = decisions.filter((decision) => decision.disposition === 'SELECT').length;
+  if (selectedCount !== 1) details.push(`selected P1 source requires exactly one explicit SELECT product; got ${selectedCount}`);
+
+  if (details.length === 0) return { ok: true };
+  const incomplete = productRefs.some((ref) => !seen.has(ref)) || selectedCount !== 1;
+  return { ok: false, code: incomplete ? 'PRODUCT_DECISION_INCOMPLETE' : 'PRODUCT_DECISION_INVALID', details };
+}
+
+/**
  * Closed-world semantic selection transaction.
  *
- * Runtime owns CandidateSet membership and canonical evidence linkage. The model submits one clinical
- * decision over that immutable universe: selected candidate + one disposition per candidate + rationale.
+ * Runtime owns CandidateSet/source-product membership and canonical evidence linkage. The model submits
+ * one closed-world source decision and, for a selected P1 source, one closed-world product qualification.
  * No opaque evidence ids or hypothesis ids are required from the model.
  */
 export async function selectCanonicalFormula(
@@ -123,6 +171,7 @@ export async function selectCanonicalFormula(
   input: {
     candidateRef: string;
     candidateDecisions: FormulaCandidateDecision[];
+    productDecisions?: FormulaProductDecision[];
     rationale?: string;
   },
   dependencies: Partial<FormulaSelectionDependencies> = {},
@@ -179,19 +228,38 @@ export async function selectCanonicalFormula(
 
   const isP2CaseSource = candidate.sourceAuthority === 'P2_CASE_DERIVED' || sourceFormulaSet.sourceAuthority === 'P2_CASE_DERIVED';
 
+  let productDecisions: FormulaProductDecision[] = input.productDecisions ?? [];
+  if (!isP2CaseSource) {
+    const productCheck = validateProductDecisions(
+      context.workspace.caseFacts,
+      sourceFormulaSet.formulas.map((formula) => formula.formulaRef),
+      productDecisions,
+    );
+    if (!productCheck.ok) {
+      return { ok: false, code: productCheck.code, details: productCheck.details };
+    }
+    sourceFormulaSet = {
+      ...sourceFormulaSet,
+      formulas: applyProductDecisions(sourceFormulaSet.formulas, productDecisions),
+    };
+  } else {
+    // A P2 CASE_VISIT candidate is itself product-specific. Its selected encounter remains the explicit product decision.
+    productDecisions = [];
+  }
+
   const receipt = context.workspace.candidateSetReceipt;
   const selectedBinding = receipt?.evidenceBindings.find((binding) => binding.candidateRef === input.candidateRef);
   const selectedSourceRef = candidate.sourceId ?? sourceFormulaSet.parentRecordRef;
-  // Product qualification is the only source of a primary ref. Source hydration alone yields 0 CURRENTLY_SELECTED.
   const primaryFormulaRef = sourceFormulaSet.formulas.find((formula) => formula.clinicalQualification === 'CURRENTLY_SELECTED')?.formulaRef;
 
-  // Complete source membership becomes durable truth at selection time. Downstream may qualify but not erase it.
+  // Complete source membership + explicit product qualification become durable truth at selection time.
   context.workspace.sourceFormulaSet = sourceFormulaSet;
   context.workspaceStore.append('formula.selection.recorded', {
     selectedCandidateRef: input.candidateRef,
     selectedSourceRef,
     primaryFormulaRef,
     candidateDecisions: input.candidateDecisions,
+    productDecisions,
     rationale: input.rationale,
     // Canonical evidence linkage comes from CandidateSetReceipt, never from model-authored ref copying.
     supportingEvidenceRefs: selectedBinding?.evidenceRefs ?? [],

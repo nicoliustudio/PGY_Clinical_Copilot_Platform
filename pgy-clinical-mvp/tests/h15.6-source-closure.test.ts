@@ -45,23 +45,25 @@ test('A1: parent 有 1 方 → 恰好 1 个 PRIMARY_SELECTED，无 SOURCE_ALTERN
   assert.equal(countPrimarySelected(set), 1);
 });
 
-test('A2: parent 有 2 方 → 主选 PRIMARY + 其余 SOURCE_ALTERNATIVE（不标 rejected）', () => {
+test('A2: parent 有 2 方 → 主选 PRIMARY + 其余 UNASSESSED（不标 SOURCE_ALTERNATIVE，避免暗示假主方存在）', () => {
   const docs = [p1Doc({ id: 'P1:K1', formulas: [formula('F1', '方A'), formula('F2', '方B')] })];
   const set = hydrateSourceFormulaSet(docs, 'P1:K1::F1');
   assert.ok(set);
   assert.equal(set.formulas.length, 2);
   assert.equal(set.formulas.find((f) => f.formulaId === 'F1')!.relation, 'PRIMARY_SELECTED');
-  assert.equal(set.formulas.find((f) => f.formulaId === 'F2')!.relation, 'SOURCE_ALTERNATIVE');
+  assert.equal(set.formulas.find((f) => f.formulaId === 'F2')!.relation, 'UNASSESSED');
   assert.ok(set.formulas.every((f) => f.relation !== 'CLINICALLY_EXCLUDED'));
+  assert.ok(set.formulas.every((f) => f.relation !== 'SOURCE_ALTERNATIVE'));
 });
 
-test('A3: parent 有 >=3 方 → 全部 ACTIVE 水合，不被 topK 截断', () => {
+test('A3: parent 有 >=3 方 → 全部 ACTIVE 水合，不被 topK 截断；非主方为 UNASSESSED', () => {
   const docs = [p1Doc({ id: 'P1:K1', formulas: [formula('F1', 'A'), formula('F2', 'B'), formula('F3', 'C')] })];
   const set = hydrateSourceFormulaSet(docs, 'P1:K1::F2');
   assert.ok(set);
   assert.equal(set.formulas.length, 3);
   assert.equal(set.formulas.find((f) => f.formulaId === 'F2')!.relation, 'PRIMARY_SELECTED');
-  assert.equal(set.formulas.filter((f) => f.relation === 'SOURCE_ALTERNATIVE').length, 2);
+  assert.equal(set.formulas.filter((f) => f.relation === 'UNASSESSED').length, 2);
+  assert.equal(set.formulas.filter((f) => f.relation === 'SOURCE_ALTERNATIVE').length, 0);
 });
 
 test('A4: INACTIVE 方不入集合；明确排除的方标 CLINICALLY_EXCLUDED', () => {

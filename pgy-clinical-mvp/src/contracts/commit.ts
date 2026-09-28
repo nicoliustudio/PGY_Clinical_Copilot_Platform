@@ -47,10 +47,12 @@ export interface CommittedSourceProduct {
   /** P2 visit sequence is source truth, not a clinical ranking. */
   sequenceRelation?: 'SELECTED_VISIT' | 'SAME_SOURCE_MEMBER' | 'EARLIER_VISIT' | 'LATER_VISIT' | 'UNKNOWN';
   /** @deprecated Compatibility projection only. Runtime authority must read clinicalQualification instead. */
-  qualification: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
+  qualification: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED' | 'UNASSESSED';
   /** Optional patient timing/applicability. This never changes source membership. */
   clinicalApplicability?: ClinicalApplicability;
   exclusionReason?: string;
+  /** Patient-fact provenance for an explicit clinical exclusion; source membership remains unchanged. */
+  exclusionEvidenceRefs?: readonly string[];
 }
 
 /** 被 commit 的完整来源包：所有 ACTIVE sibling 产品都必须无损保留。 */

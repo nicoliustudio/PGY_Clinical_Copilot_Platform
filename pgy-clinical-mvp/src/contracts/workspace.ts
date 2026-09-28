@@ -307,6 +307,21 @@ export interface FormulaCandidateDecision {
   missingCriticalEvidence?: string[];
 }
 
+export type FormulaProductDisposition = 'SELECT' | 'EXCLUDE' | 'LEAVE_UNASSESSED';
+
+/**
+ * Explicit product-level decision inside one already selected source.
+ * Source membership is Kernel truth; this only qualifies members for the current patient.
+ */
+export interface FormulaProductDecision {
+  formulaRef: string;
+  disposition: FormulaProductDisposition;
+  rationale?: string;
+  supportingFactRefs?: string[];
+  contradictingFactRefs?: string[];
+  missingCriticalEvidence?: string[];
+}
+
 export interface FormulaSelection {
   /** Stable selection-unit identity exposed to the model (source-node / case-visit). */
   selectedCandidateRef?: string;
@@ -316,6 +331,8 @@ export interface FormulaSelection {
   primaryFormulaRef?: string;
   /** Closed-world accounting of the Kernel-owned CandidateSet. */
   candidateDecisions?: FormulaCandidateDecision[];
+  /** Closed-world product qualification inside the selected P1 source. P2 CASE_VISIT selection is already product-specific. */
+  productDecisions?: FormulaProductDecision[];
   rationale?: string;
   /** Runtime-derived evidence refs. Models do not need to copy opaque evidence ids. */
   supportingEvidenceRefs?: string[];
@@ -353,7 +370,7 @@ export interface FormulaReview {
  * `SourceFormulaEntry.clinicalQualification` 承载（UNASSESSED / CURRENTLY_SELECTED / CLINICALLY_EXCLUDED），
  * 它独立于 source membership，且不得由 `products[]` 数组顺序隐式产生。
  */
-export type FormulaAdoptionState = 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
+export type FormulaAdoptionState = 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED' | 'UNASSESSED';
 
 /** 产品的临床采纳状态（正交于 source membership）。仅显式 product decision 才可产生 CURRENTLY_SELECTED。 */
 export type ProductQualification = 'UNASSESSED' | 'CURRENTLY_SELECTED' | 'CLINICALLY_EXCLUDED';

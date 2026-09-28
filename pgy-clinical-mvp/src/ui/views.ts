@@ -141,6 +141,7 @@ export interface WorkspaceView {
   candidates: CandidateViewItem[];
   deliberation: DeliberationView;
   candidateSetReceipt?: ClinicalWorkspace['candidateSetReceipt'];
+  formulaSelection?: ClinicalWorkspace['clinicalDecisionSpine']['formulaSelection'];
 }
 
 export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
@@ -198,6 +199,9 @@ export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
       coverage: ws.deliberationState.coverage.map((c) => ({ ...c })),
     },
     candidateSetReceipt: ws.candidateSetReceipt ? JSON.parse(JSON.stringify(ws.candidateSetReceipt)) : undefined,
+    formulaSelection: ws.clinicalDecisionSpine.formulaSelection
+      ? JSON.parse(JSON.stringify(ws.clinicalDecisionSpine.formulaSelection))
+      : undefined,
   };
 }
 

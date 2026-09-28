@@ -35,12 +35,22 @@ export interface ProjectedFormula {
   sourceLevelModifications: string[];
   modificationStatus: SourceFormulaSet['formulas'][number]['modificationStatus'];
   usage?: string;
+  /** Product-local authored stage semantics. */
+  stageGuidance?: SourceFormulaSet['formulas'][number]['stageGuidance'];
+  conditionalGuidance?: SourceFormulaSet['formulas'][number]['conditionalGuidance'];
+  sequence?: SourceFormulaSet['formulas'][number]['sequence'];
+  /** Parent/source-level authored stage semantics. Kept distinct from product-local facts. */
+  sourceStageGuidance?: SourceFormulaSet['stageGuidance'];
+  sourceConditionalGuidance?: SourceFormulaSet['conditionalGuidance'];
+  sourceSequence?: SourceFormulaSet['sequence'];
   /** First-truth source membership / patient qualification. */
   membership: 'SOURCE_MEMBER';
   clinicalQualification: SourceFormulaSet['formulas'][number]['clinicalQualification'];
+  exclusionReason?: string;
+  exclusionEvidenceRefs?: string[];
   sequenceRelation?: SourceFormulaSet['formulas'][number]['sequenceRelation'];
   /** @deprecated compatibility projection only; never use as selection authority. */
-  relation: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED';
+  relation: 'PRIMARY_SELECTED' | 'SOURCE_ALTERNATIVE' | 'CLINICALLY_EXCLUDED' | 'UNASSESSED';
   applicableModifications: SourceFormulaSet['formulas'][number]['applicableModifications'];
   caseContext?: SourceFormulaSet['formulas'][number]['caseContext'];
   /** Lossless product facts. Legacy flat fields above remain compatibility helpers only. */
@@ -74,6 +84,14 @@ export function projectFormulaSet(
     usage: f.usage,
     membership: 'SOURCE_MEMBER',
     clinicalQualification: f.clinicalQualification,
+    ...(f.exclusionReason ? { exclusionReason: f.exclusionReason } : {}),
+    ...(f.exclusionEvidenceRefs && f.exclusionEvidenceRefs.length > 0 ? { exclusionEvidenceRefs: [...f.exclusionEvidenceRefs] } : {}),
+    ...(f.stageGuidance !== undefined ? { stageGuidance: [...f.stageGuidance] } : {}),
+    ...(f.conditionalGuidance !== undefined ? { conditionalGuidance: [...f.conditionalGuidance] } : {}),
+    ...(f.sequence !== undefined ? { sequence: f.sequence.map((step) => ({ ...step })) } : {}),
+    ...(set.stageGuidance !== undefined ? { sourceStageGuidance: [...set.stageGuidance] } : {}),
+    ...(set.conditionalGuidance !== undefined ? { sourceConditionalGuidance: [...set.conditionalGuidance] } : {}),
+    ...(set.sequence !== undefined ? { sourceSequence: set.sequence.map((step) => ({ ...step })) } : {}),
     ...(f.sequenceRelation ? { sequenceRelation: f.sequenceRelation } : {}),
     relation: f.relation,
     applicableModifications: f.applicableModifications,

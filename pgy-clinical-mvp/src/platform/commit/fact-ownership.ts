@@ -11,6 +11,9 @@ export const CLINICAL_ASSESSMENT_FACT_FIELDS = [
   'treatmentPrinciple',
   'treatmentTarget',
   'rationale',
+  'diseaseEvidenceRefs',
+  'syndromeEvidenceRefs',
+  'treatmentEvidenceRefs',
 ] as const;
 
 const ASSESSMENT_FACT_FIELD_SET = new Set<string>(CLINICAL_ASSESSMENT_FACT_FIELDS);
@@ -21,6 +24,10 @@ export interface ClinicalAssessmentProductInput {
   treatmentPrinciple: string;
   treatmentTarget?: string;
   rationale?: string;
+  /** Durable provenance of the committed clinical claims. These refs are validated upstream. */
+  diseaseEvidenceRefs?: string[];
+  syndromeEvidenceRefs?: string[];
+  treatmentEvidenceRefs?: string[];
 }
 
 export function buildClinicalAssessmentProduct(input: ClinicalAssessmentProductInput): Readonly<Record<string, unknown>> {
@@ -30,6 +37,9 @@ export function buildClinicalAssessmentProduct(input: ClinicalAssessmentProductI
     treatmentPrinciple: input.treatmentPrinciple,
     ...(input.treatmentTarget?.trim() ? { treatmentTarget: input.treatmentTarget } : {}),
     ...(input.rationale?.trim() ? { rationale: input.rationale } : {}),
+    ...(input.diseaseEvidenceRefs ? { diseaseEvidenceRefs: [...input.diseaseEvidenceRefs] } : {}),
+    ...(input.syndromeEvidenceRefs ? { syndromeEvidenceRefs: [...input.syndromeEvidenceRefs] } : {}),
+    ...(input.treatmentEvidenceRefs ? { treatmentEvidenceRefs: [...input.treatmentEvidenceRefs] } : {}),
   };
 }
 

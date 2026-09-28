@@ -25,10 +25,10 @@ function fact<T>(presence: FieldPresence, value: T | undefined, provenanceRefs: 
 function legacyQualification(clinicalQualification: SourceFormulaSet['formulas'][number]['clinicalQualification']): CommittedSourceProduct['qualification'] {
   if (clinicalQualification === 'CURRENTLY_SELECTED') return 'PRIMARY_SELECTED';
   if (clinicalQualification === 'CLINICALLY_EXCLUDED') return 'CLINICALLY_EXCLUDED';
-  return 'SOURCE_ALTERNATIVE';
+  return 'UNASSESSED';
 }
 
-function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): CommittedSourceBundle {
+export function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): CommittedSourceBundle {
   const patientPlan = context.workspace.clinicalDecisionSpine.modificationPlan;
   const patientItems = patientPlan?.items ?? [];
   const selectedProducts = set.formulas.filter((formula) => formula.clinicalQualification === 'CURRENTLY_SELECTED');
@@ -64,6 +64,9 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
         composition: fact(compositionPresence, compositionPresence === 'PRESENT' ? formula.composition : undefined, [set.parentRecordRef]),
         preparation: fact(preparationPresence, preparationPresence === 'PRESENT' ? formula.preparation : undefined, [set.parentRecordRef]),
         usage: fact(usagePresence, usagePresence === 'PRESENT' ? formula.usage : undefined, [set.parentRecordRef]),
+        ...(formula.stageGuidance !== undefined ? { stageGuidance: [...formula.stageGuidance] } : {}),
+        ...(formula.conditionalGuidance !== undefined ? { conditionalGuidance: [...formula.conditionalGuidance] } : {}),
+        ...(formula.sequence !== undefined ? { sequence: formula.sequence.map((step) => ({ ...step })) } : {}),
         ...(formula.caseContext ? { caseContext: Object.freeze({ ...formula.caseContext }) } : {}),
         modifications: {
           formulaLocal: fact(localPresence, localPresence === 'PRESENT' ? formula.sourceModifications : undefined, [formula.formulaRef]),
@@ -94,6 +97,9 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
       // Compatibility projection only. Downstream authority must read clinicalQualification.
       qualification: legacyQualification(formula.clinicalQualification),
       ...(formula.exclusionReason ? { exclusionReason: formula.exclusionReason } : {}),
+      ...(formula.exclusionEvidenceRefs && formula.exclusionEvidenceRefs.length > 0
+        ? { exclusionEvidenceRefs: [...formula.exclusionEvidenceRefs] }
+        : {}),
     };
   });
 
@@ -107,6 +113,9 @@ function sourceBundleFromSet(context: RuntimeContext, set: SourceFormulaSet): Co
       membershipCompleteness: set.completeness,
       sourceKind: set.sourceKind ?? 'P1_NORMATIVE_SOURCE',
       sourceAuthority: set.sourceAuthority ?? 'P1',
+      ...(set.stageGuidance !== undefined ? { stageGuidance: [...set.stageGuidance] } : {}),
+      ...(set.conditionalGuidance !== undefined ? { conditionalGuidance: [...set.conditionalGuidance] } : {}),
+      ...(set.sequence !== undefined ? { sequence: set.sequence.map((step) => ({ ...step })) } : {}),
       ...(set.sourceCaseRef ? { sourceCaseRef: set.sourceCaseRef } : {}),
     },
   };
@@ -353,13 +362,18 @@ export async function commitDeliveryOutcome(context: RuntimeContext, outcome: st
   }
 
   if (owner.obligation.materialization === 'CANONICAL_CANDIDATE') {
-    // Commit from durable selection/source truth, not from retrieval-card display metadata.
-    // A P1 source-node candidate may carry a representative formula only for display; the authoritative
-    // commit unit may be the complete SourceBundle when no product has been explicitly qualified.
+    // The canonical delivery unit remains the complete SourceBundle, while a P1 SOURCE_NODE needs
+    // an explicit product decision before herbal-formula delivery is allowed to close.
     const selection = context.workspace.clinicalDecisionSpine.formulaSelection;
     const set = context.workspace.sourceFormulaSet;
     if (!selection?.selectedCandidateRef || !set || set.completeness !== 'COMPLETE') {
       return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };
+    }
+    // A P1 SOURCE_NODE is source truth, not yet formula authority. Herbal delivery cannot be
+    // committed until the product-decision transaction has produced one explicit primaryFormulaRef.
+    // This prevents direct callers from bypassing the control-plane formulaSelection invariant.
+    if (selection.selectedCandidateRef.startsWith('source-node:') && !selection.primaryFormulaRef) {
+      return { ok: false, code: 'CANONICAL_HYDRATION_FAILED', details: ['selected P1 source has no explicit product decision'] };
     }
     const truth = canonicalSelectionTruthFromSourceFormulaSet(set);
     if (!truth) return { ok: false, code: 'CANONICAL_HYDRATION_FAILED' };

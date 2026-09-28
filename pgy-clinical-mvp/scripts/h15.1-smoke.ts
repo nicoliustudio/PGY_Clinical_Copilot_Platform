@@ -37,7 +37,15 @@ const CASES: CaseDef[] = [
 
 // === Reference（离线，只在 run 完成后比较；provenance 见 ReferenceFormula.provenance） ===
 type Provenance = 'expert_final' | 'original_case' | 'standard' | 'textbook_reference' | 'acceptable_alternative';
-interface ReferenceFormula { name: string; provenance: Provenance; }
+interface ReferenceFormula {
+  name: string;
+  provenance: Provenance;
+  /**
+   * Explicit primary role. When absent the formula is an acceptable alternative only.
+   * First-child array order must NOT be used as selection authority (permutation-invariant gold reference).
+   */
+  role?: 'primary' | 'alt';
+}
 interface CaseReference { disease: string; patterns: string[]; formulas: ReferenceFormula[]; }
 
 const REFERENCE: Record<string, CaseReference> = {
@@ -45,24 +53,24 @@ const REFERENCE: Record<string, CaseReference> = {
     disease: '痛经',
     patterns: ['气滞血瘀', '膜样痛经', '气滞'],
     formulas: [
-      { name: '加味乌药汤合失笑散加味', provenance: 'textbook_reference' },
-      { name: '少腹逐瘀汤加减', provenance: 'acceptable_alternative' },
-      { name: '膈下逐瘀汤加减', provenance: 'acceptable_alternative' },
+      { name: '加味乌药汤合失笑散加味', provenance: 'textbook_reference', role: 'primary' },
+      { name: '少腹逐瘀汤加减', provenance: 'acceptable_alternative', role: 'alt' },
+      { name: '膈下逐瘀汤加减', provenance: 'acceptable_alternative', role: 'alt' },
     ],
   },
   'CASE-M': {
     disease: '月经过多',
     patterns: ['气虚血瘀', '气血两虚', '气虚'],
     formulas: [
-      { name: '举元煎加减', provenance: 'textbook_reference' },
-      { name: '圣愈汤加味', provenance: 'acceptable_alternative' },
+      { name: '举元煎加减', provenance: 'textbook_reference', role: 'primary' },
+      { name: '圣愈汤加味', provenance: 'acceptable_alternative', role: 'alt' },
     ],
   },
   'CASE3': {
     disease: '子宫肌瘤',
     patterns: ['肝郁脾虚型', '肝郁脾虚'],
     formulas: [
-      { name: '妇2号方', provenance: 'original_case' },
+      { name: '妇2号方', provenance: 'original_case', role: 'primary' },
     ],
   },
 };
@@ -213,6 +221,8 @@ function pct(n: number, d: number): string { return d === 0 ? 'n/a' : `${Math.ro
 type Attribution =
   | 'REFERENCE_NOT_IN_KB'
   | 'REFERENCE_IN_KB_BUT_NO_CONTEXT_METADATA'
+  | 'REFERENCE_HAS_NO_EXPLICIT_PRIMARY'
+  | 'REFERENCE_HAS_MULTIPLE_PRIMARIES'
   | 'INDEX_NOT_BUILT'
   | 'RETRIEVAL_MISS'
   | 'IDENTITY_MISMATCH'
@@ -229,7 +239,10 @@ function attributeFormula(s: RunSummary, ref: CaseReference): Attribution | null
   });
   if (hit) return null; // 命中，无需归因
 
-  const primary = ref.formulas[0];
+  const primaries = ref.formulas.filter((f) => f.role === 'primary');
+  if (primaries.length === 0) return 'REFERENCE_HAS_NO_EXPLICIT_PRIMARY';
+  if (primaries.length > 1) return 'REFERENCE_HAS_MULTIPLE_PRIMARIES';
+  const primary = primaries[0]!;
   const meta = kbMetaFor(primary.name);
   if (!meta) return 'REFERENCE_NOT_IN_KB';
   if (!meta.disease && !meta.syndrome && !meta.treatment) return 'REFERENCE_IN_KB_BUT_NO_CONTEXT_METADATA';

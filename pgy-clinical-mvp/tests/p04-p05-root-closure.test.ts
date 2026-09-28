@@ -112,14 +112,17 @@ function selectionContext(caseFacts: CaseFact[]) {
     hydratedEvidence: [{ candidateRef: candidate.candidateRef, evidence: { sourceId: candidate.sourceId, sourceTier: candidate.sourceTier } }],
   }));
   const context = { workspace: ws, workspaceStore: store } as unknown as RuntimeContext;
-  const run = (candidateDecisions: Parameters<typeof selectCanonicalFormula>[1]['candidateDecisions']) =>
-    selectCanonicalFormula(context, { candidateRef: candidate.candidateRef, candidateDecisions }, {
+  const run = (
+    candidateDecisions: Parameters<typeof selectCanonicalFormula>[1]['candidateDecisions'],
+    productDecisions: Parameters<typeof selectCanonicalFormula>[1]['productDecisions'] = [],
+  ) =>
+    selectCanonicalFormula(context, { candidateRef: candidate.candidateRef, candidateDecisions, productDecisions }, {
       loadIndex: async () => ({ docs: [] } as never),
       hydrateSourceFormulaSet: () => ({
         parentRecordRef: 'P1:K_ROOT', sourceKind: 'P1_NORMATIVE_SOURCE', sourceAuthority: 'P1',
         disease: '测试病', syndrome: '测试证', treatmentMethod: '测试治法', completeness: 'COMPLETE',
         sourceLevelModifications: [], sourceLevelModificationPresence: 'KNOWN_EMPTY',
-        formulas: [{ formulaRef: 'P1:K_ROOT::F1', formulaId: 'F1', formulaName: '方一', composition: '药A', compositionPresence: 'PRESENT', sourceModifications: [], formulaLocalModificationPresence: 'KNOWN_EMPTY', modificationStatus: 'KNOWN_EMPTY', relation: 'SOURCE_ALTERNATIVE', clinicalQualification: 'UNASSESSED', applicableModifications: [] }],
+        formulas: [{ formulaRef: 'P1:K_ROOT::F1', formulaId: 'F1', formulaName: '方一', composition: '药A', compositionPresence: 'PRESENT', sourceModifications: [], formulaLocalModificationPresence: 'KNOWN_EMPTY', modificationStatus: 'KNOWN_EMPTY', relation: 'UNASSESSED', clinicalQualification: 'UNASSESSED', applicableModifications: [] }],
       }),
     });
   return run;
@@ -132,7 +135,10 @@ const EXPLICIT_ABSENT_FACT: CaseFact = { id: 'CF_ABSENT', kind: 'symptom', value
 test('P0-5: PRESENT and explicitly_absent are admissible facts; UNKNOWN is not', async () => {
   const run = selectionContext([PRESENT_FACT, NOT_MENTIONED_FACT, EXPLICIT_ABSENT_FACT]);
 
-  const considered = await run([{ candidateRef: 'source-node:P1:K_ROOT', disposition: 'CONSIDERED', supportingFactRefs: ['CF_PRESENT'] }]);
+  const considered = await run(
+    [{ candidateRef: 'source-node:P1:K_ROOT', disposition: 'CONSIDERED', supportingFactRefs: ['CF_PRESENT'] }],
+    [{ formulaRef: 'P1:K_ROOT::F1', disposition: 'SELECT', supportingFactRefs: ['CF_PRESENT'], rationale: 'P1 单产品显式 SELECT' }],
+  );
   assert.equal(considered.ok, true);
 
   const excludedByPresent = await run([{ candidateRef: 'source-node:P1:K_ROOT', disposition: 'EXCLUDED', contradictingFactRefs: ['CF_PRESENT'] }]);

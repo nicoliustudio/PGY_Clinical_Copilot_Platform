@@ -64,7 +64,7 @@ test('SOURCE_BOUND preserves canonical payload while TREAT_FIRST_THEN_FORM becom
   assert.equal(result.clinicalApplicability, 'DEFERRED');
   assert.equal(result.sourceBundle.products.length, 1);
   assert.deepEqual(result.sourceBundle.products[0]?.payload, asset);
-  assert.equal(result.sourceBundle.products[0]?.qualification, 'SOURCE_ALTERNATIVE');
+  assert.equal(result.sourceBundle.products[0]?.qualification, 'UNASSESSED');
   assert.equal((result.product as Record<string, unknown>).statement, undefined);
 });
 
@@ -216,6 +216,11 @@ test('formula.select preserves N source siblings from one source-node candidate 
   const result = await selectCanonicalFormula(context, {
     candidateRef,
     candidateDecisions: [{ candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'], rationale: 'best source-node fit' }],
+    productDecisions: productRefs.map((ref, index) => (
+      index === 0
+        ? { formulaRef: ref, disposition: 'SELECT' as const, supportingFactRefs: ['CF_TEST'], rationale: '方1 best fit' }
+        : { formulaRef: ref, disposition: 'LEAVE_UNASSESSED' as const, missingCriticalEvidence: ['方' + (index + 1) + ' 尚未明确适配患者事实'], rationale: '暂未评估' }
+    )),
   }, {
     loadIndex: async () => ({ docs: [] } as never),
     hydrateSourceFormulaSet: () => ({
@@ -274,6 +279,7 @@ test('formula.select succeeds even when modification rule store is unavailable (
   const result = await selectCanonicalFormula(context, {
     candidateRef,
     candidateDecisions: [{ candidateRef, disposition: 'CONSIDERED', supportingFactRefs: ['CF_TEST'] }],
+    productDecisions: [{ formulaRef: 'P1:K_PARENT::F1', disposition: 'SELECT' as const, supportingFactRefs: ['CF_TEST'], rationale: 'only product' }],
   }, {
     loadIndex: async () => ({ docs: [] } as never),
     hydrateSourceFormulaSet: () => ({

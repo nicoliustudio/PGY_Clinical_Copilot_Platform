@@ -133,18 +133,27 @@ function buildCommitEnvironment(context: RuntimeContext, proposal: AgentResult):
     readReasoningProduct: (ref) => {
       if (ref === 'clinical-assessment') {
         const plan = context.workspace.clinicalDecisionSpine.treatmentPlan;
-        const disease = context.workspace.clinicalDecisionSpine.diseaseAssessment?.statement
+        const diseaseAssessment = context.workspace.clinicalDecisionSpine.diseaseAssessment;
+        const patternPrimary = context.workspace.patternAssessment?.primary;
+        const disease = diseaseAssessment?.statement
           ?? (proposal.mode === 'clinical' ? proposal.disease?.name : '');
-        const syndrome = context.workspace.patternAssessment?.primary?.statement
+        const syndrome = patternPrimary?.statement
           ?? (proposal.mode === 'clinical' ? proposal.syndrome?.name : '');
         const treatmentPrinciple = plan?.primaryPrinciple
           ?? (proposal.mode === 'clinical' ? proposal.treatment?.text : '');
-        // Fact Ownership: the assessment commit owns principle-level clinical facts only. Exact
-        // modality execution is owned by its treatment delivery CommitRecord.
+        const diseaseEvidenceRefs = diseaseAssessment?.evidenceRefs
+          ?? (proposal.mode === 'clinical' ? proposal.disease?.evidence_refs : undefined);
+        const syndromeEvidenceRefs = patternPrimary?.supportingEvidenceRefs
+          ?? (proposal.mode === 'clinical' ? proposal.syndrome?.evidence_refs : undefined);
+        const treatmentEvidenceRefs = plan?.evidenceRefs
+          ?? (proposal.mode === 'clinical' ? proposal.treatment?.evidence_refs : undefined);
         return buildClinicalAssessmentProduct({
           disease, syndrome, treatmentPrinciple,
           treatmentTarget: plan?.treatmentTarget,
           rationale: plan?.rationale,
+          diseaseEvidenceRefs,
+          syndromeEvidenceRefs,
+          treatmentEvidenceRefs,
         });
       }
       const deliveries = treatmentDeliveryArtifacts(context.workspace);
@@ -240,6 +249,18 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
     if (record.outcome !== 'modality:herbal-formula') return [];
     const bundle = record.sourceBundle;
     if (!bundle || record.deliveryStatus !== 'DELIVERED') return [];
+    const sourceFacts = (bundle.sourceFacts && typeof bundle.sourceFacts === 'object')
+      ? bundle.sourceFacts as Record<string, unknown>
+      : {};
+    const sourceStageGuidance = Array.isArray(sourceFacts.stageGuidance)
+      ? sourceFacts.stageGuidance.filter((x): x is string => typeof x === 'string')
+      : undefined;
+    const sourceConditionalGuidance = Array.isArray(sourceFacts.conditionalGuidance)
+      ? sourceFacts.conditionalGuidance.filter((x): x is string => typeof x === 'string')
+      : undefined;
+    const sourceSequence = Array.isArray(sourceFacts.sequence)
+      ? sourceFacts.sequence as ProjectedFormula['sourceSequence']
+      : undefined;
     return bundle.products.map((product): ProjectedFormula => {
       const payload = product.payload as Record<string, unknown>;
       const composition = factProjection<string>(payload.composition);
@@ -251,6 +272,15 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
       const patientSpecific = factProjection<Array<{ statement?: string }>>(modifications.patientSpecific);
       const preparation = factProjection<string>(payload.preparation);
       const usage = factProjection<string>(payload.usage);
+      const stageGuidance = Array.isArray(payload.stageGuidance)
+        ? payload.stageGuidance.filter((x): x is string => typeof x === 'string')
+        : undefined;
+      const conditionalGuidance = Array.isArray(payload.conditionalGuidance)
+        ? payload.conditionalGuidance.filter((x): x is string => typeof x === 'string')
+        : undefined;
+      const sequence = Array.isArray(payload.sequence)
+        ? payload.sequence as ProjectedFormula['sequence']
+        : undefined;
       const localPresence = formulaLocal.presence === 'PRESENT'
         ? 'PRESENT'
         : formulaLocal.presence === 'KNOWN_EMPTY'
@@ -268,14 +298,28 @@ function committedFormulaSet(records: readonly CommitRecord[]): ProjectedFormula
         sourceLevelModifications: sourceShared.presence === 'PRESENT' ? sourceShared.value ?? [] : [],
         modificationStatus: localPresence,
         ...(usage.presence === 'PRESENT' && usage.value ? { usage: usage.value } : {}),
+        ...(stageGuidance !== undefined ? { stageGuidance } : {}),
+        ...(conditionalGuidance !== undefined ? { conditionalGuidance } : {}),
+        ...(sequence !== undefined ? { sequence } : {}),
+        ...(sourceStageGuidance !== undefined ? { sourceStageGuidance } : {}),
+        ...(sourceConditionalGuidance !== undefined ? { sourceConditionalGuidance } : {}),
+        ...(sourceSequence !== undefined ? { sourceSequence } : {}),
         membership: product.membership,
         clinicalQualification: product.clinicalQualification,
+        ...(typeof (product as unknown as Record<string, unknown>).exclusionReason === 'string'
+          ? { exclusionReason: (product as unknown as Record<string, unknown>).exclusionReason as string }
+          : {}),
+        ...(Array.isArray((product as unknown as Record<string, unknown>).exclusionEvidenceRefs)
+          ? {
+              exclusionEvidenceRefs: (product as unknown as Record<string, unknown>).exclusionEvidenceRefs as string[],
+            }
+          : {}),
         ...(product.sequenceRelation ? { sequenceRelation: product.sequenceRelation } : {}),
         relation: product.clinicalQualification === 'CURRENTLY_SELECTED'
           ? 'PRIMARY_SELECTED'
           : product.clinicalQualification === 'CLINICALLY_EXCLUDED'
             ? 'CLINICALLY_EXCLUDED'
-            : 'SOURCE_ALTERNATIVE',
+            : 'UNASSESSED',
         applicableModifications: [],
         ...(payload.caseContext && typeof payload.caseContext === 'object' ? { caseContext: payload.caseContext as ProjectedFormula['caseContext'] } : {}),
         facts: {
@@ -324,6 +368,23 @@ function committedLegacyFormula(records: readonly CommitRecord[]): Record<string
 function committedClinicalAssessment(records: readonly CommitRecord[]): Record<string, unknown> | undefined {
   const record = records.find((item) => item.deliveryStatus === 'DELIVERED' && item.outcome === 'outcome:clinical-assessment');
   return record?.product as Record<string, unknown> | undefined;
+}
+
+/**
+ * 从 committed clinical assessment 中读 evidence refs。
+ * 第一真源优先于 proposal time 引用，保证 patient-backed CF refs 能够 round-trip。
+ */
+function committedEvidenceRefs(
+  assessment: Record<string, unknown> | undefined,
+  field: 'diseaseEvidenceRefs' | 'syndromeEvidenceRefs' | 'treatmentEvidenceRefs',
+  fallback: readonly string[] | undefined,
+): string[] {
+  const refs = assessment?.[field];
+  if (Array.isArray(refs)) {
+    const filtered = refs.filter((r): r is string => typeof r === 'string');
+    if (filtered.length > 0) return filtered;
+  }
+  return Array.isArray(fallback) ? fallback.filter((r): r is string => typeof r === 'string') : [];
 }
 
 function committedTreatmentDeliveries(records: readonly CommitRecord[]): Array<Record<string, unknown>> {
@@ -539,6 +600,21 @@ export class ClinicalRuntime {
     const fallbackPrinciple = typeof assessment?.treatmentPrinciple === 'string'
       ? assessment.treatmentPrinciple
       : context.workspace.clinicalDecisionSpine.treatmentPlan?.primaryPrinciple ?? '交付未完全收口';
+    const diseaseEvidenceRefs = committedEvidenceRefs(
+      assessment,
+      'diseaseEvidenceRefs',
+      context.workspace.clinicalDecisionSpine.diseaseAssessment?.evidenceRefs,
+    );
+    const syndromeEvidenceRefs = committedEvidenceRefs(
+      assessment,
+      'syndromeEvidenceRefs',
+      context.workspace.patternAssessment?.primary?.supportingEvidenceRefs,
+    );
+    const treatmentEvidenceRefs = committedEvidenceRefs(
+      assessment,
+      'treatmentEvidenceRefs',
+      context.workspace.clinicalDecisionSpine.treatmentPlan?.evidenceRefs,
+    );
     const baseClinical = proposal.mode === 'clinical'
       ? proposal
       : {
@@ -596,7 +672,6 @@ export class ClinicalRuntime {
         source_ref: formula.sourceRef,
         modification_rules: formula.sourceModifications,
         modification_status: formula.modificationStatus,
-        // Compatibility summary. The three ownership namespaces below are authoritative for rendering.
         modification_text: `方内原始：${formulaLocalText}；病证共享：${sourceSharedText}；患者特异：${patientSpecificText}`,
         formula_local_modification_text: formulaLocalText,
         source_shared_modification_text: sourceSharedText,
@@ -605,10 +680,19 @@ export class ClinicalRuntime {
           ? { source_level_modification_rules: formula.sourceLevelModifications }
           : {}),
         ...(formula.usage ? { usage: formula.usage } : {}),
+        ...(formula.stageGuidance !== undefined ? { stage_guidance: formula.stageGuidance } : {}),
+        ...(formula.conditionalGuidance !== undefined ? { conditional_guidance: formula.conditionalGuidance } : {}),
+        ...(formula.sequence !== undefined ? { sequence: formula.sequence } : {}),
+        ...(formula.sourceStageGuidance !== undefined ? { source_stage_guidance: formula.sourceStageGuidance } : {}),
+        ...(formula.sourceConditionalGuidance !== undefined ? { source_conditional_guidance: formula.sourceConditionalGuidance } : {}),
+        ...(formula.sourceSequence !== undefined ? { source_sequence: formula.sourceSequence } : {}),
         membership: formula.membership,
         clinical_qualification: formula.clinicalQualification,
+        ...(formula.exclusionReason ? { exclusion_reason: formula.exclusionReason } : {}),
+        ...(formula.exclusionEvidenceRefs && formula.exclusionEvidenceRefs.length > 0
+          ? { exclusion_evidence_refs: formula.exclusionEvidenceRefs }
+          : {}),
         ...(formula.sequenceRelation ? { sequence_relation: formula.sequenceRelation } : {}),
-        // Legacy compatibility only. New consumers must use membership + clinical_qualification.
         relation: formula.relation,
         ...(formula.caseContext ? { case_context: formula.caseContext } : {}),
         ...(formula.facts ? { facts: formula.facts } : {}),
@@ -626,9 +710,9 @@ export class ClinicalRuntime {
       proposal: {
         ...proposalWithoutProducts,
         status: controlPlane.contractSatisfied ? 'COMPLETED' : 'BLOCKED',
-        disease: { ...baseClinical.disease, name: diseaseName },
-        syndrome: { ...baseClinical.syndrome, name: syndromeName },
-        treatment: { ...baseClinical.treatment, text: treatmentPrinciple },
+        disease: { ...baseClinical.disease, name: diseaseName, evidence_refs: diseaseEvidenceRefs },
+        syndrome: { ...baseClinical.syndrome, name: syndromeName, evidence_refs: syndromeEvidenceRefs },
+        treatment: { ...baseClinical.treatment, text: treatmentPrinciple, evidence_refs: treatmentEvidenceRefs },
         ...(committedFormula ? { formula: committedFormula } : {}),
         ...(formulaProjection.length ? { formula_set: formulaProjection } : {}),
         ...(treatmentDeliveries.length ? { treatment_deliveries: treatmentDeliveries } : {}),
