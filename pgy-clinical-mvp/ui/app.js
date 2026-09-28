@@ -445,6 +445,8 @@ const MODALITY_LABELS = {
   'modality:preparation': '成药',
 };
 const RELATION_LABELS = { PRIMARY_SELECTED: '主选', SOURCE_ALTERNATIVE: '同源备选', CLINICALLY_EXCLUDED: '已排除' };
+/** 第一真源 qualification（Selection Semantics 闭环）：UNASSESSED 必须如实显示「未评估」，不得伪装成主选/备选。 */
+const QUALIFICATION_LABELS = { UNASSESSED: '未评估', CURRENTLY_SELECTED: '已选用', CLINICALLY_EXCLUDED: '临床排除' };
 const FORMULA_AUTHORITY_LABELS = { NORMATIVE: '规范来源', GENERATED_DRAFT: '生成草稿', BLOCKED: '已阻断' };
 const CLEARANCE_LABELS = { CLEARED: '可执行', REVIEW_REQUIRED: '需医生复核', BLOCKED: '暂不可执行' };
 const APPLICABILITY_LABELS = { CURRENTLY_SUITABLE: '当前适用', DEFERRED: '择期适用', CURRENTLY_NOT_SUITABLE: '当前不适用' };
@@ -773,6 +775,49 @@ function cardsHtml(descriptors) {
   return (shared ? `<div class="rx-meta rx-meta-shared">${esc(shared)}</div>` : '') + body;
 }
 
+/**
+ * qualification 徽章：clinical_qualification（第一真源）优先，relation 仅兼容回退。
+ * 未评估产品如实显示「未评估」——UI 投影真话，不重新解释、不挑主次。
+ */
+function qualificationBadgeHtml(item, fallbackLabel) {
+  const qualification = item?.clinical_qualification ?? item?.clinicalQualification;
+  if (qualification) {
+    return `<span class="rx-badge ${esc(qualification)}">${esc(QUALIFICATION_LABELS[qualification] || qualification)}</span>`;
+  }
+  const relation = item?.relation ?? item?.qualification;
+  if (relation) return `<span class="rx-badge ${esc(relation)}">${esc(RELATION_LABELS[relation] || relation)}</span>`;
+  return fallbackLabel ? `<span class="rx-badge">${esc(fallbackLabel)}</span>` : '';
+}
+
+/** 单层 stage 语义：guidance / conditional / sequence 按原文渲染，不做任何关键词再推断。 */
+function stageLayerBodyHtml(stageGuidance, conditionalGuidance, sequence) {
+  const parts = [];
+  const stages = (stageGuidance || []).map((x) => String(x).trim()).filter(Boolean);
+  if (stages.length) parts.push(rulesHtml(stages));
+  const conditionals = (conditionalGuidance || []).map((x) => String(x).trim()).filter(Boolean);
+  if (conditionals.length) parts.push(rulesHtml(conditionals));
+  const steps = (sequence || [])
+    .slice()
+    .sort((a, b) => (Number(a?.order) || 0) - (Number(b?.order) || 0))
+    .map((s) => `${s?.stage ? `${String(s.stage).trim()}：` : ''}${String(s?.instruction ?? '').trim()}${s?.condition ? `（${String(s.condition).trim()}）` : ''}`)
+    .filter((x) => x.replace(/[：\s（）]/g, '').length > 0);
+  if (steps.length) parts.push(rulesHtml(steps));
+  return parts.join('');
+}
+
+/**
+ * Stage 分层展示：来源层（整个来源病例的「先/待/再」）与本方层（该方专属时机）各自成行，永不合并。
+ * 两层语义作用域不同——来源层属于 source trajectory，本方层属于 product；平铺合并等于篡改 authored 语义。
+ */
+function stageScopeRowsHtml(f) {
+  const rows = [];
+  const sourceBody = stageLayerBodyHtml(f.source_stage_guidance, f.source_conditional_guidance, f.source_sequence);
+  if (sourceBody) rows.push(rowHtml('时机 · 来源层', sourceBody));
+  const productBody = stageLayerBodyHtml(f.stage_guidance, f.conditional_guidance, f.sequence);
+  if (productBody) rows.push(rowHtml('时机 · 本方层', productBody));
+  return rows.join('');
+}
+
 /** 方剂卡片描述符：只呈现 PRESENT 事实；技术标识与未提供字段折叠进溯源区。 */
 function formulaCard(f) {
   const facts = f.facts || {};
@@ -798,6 +843,10 @@ function formulaCard(f) {
   if (modifications.html) rows.push(modifications.html);
   else if (modifications.unknown) unknown.push('加减');
 
+  // Stage 分层展示：来源层与本方层各自成行（评估状态由徽章如实呈现，不在此重复）。
+  const stageRows = stageScopeRowsHtml(f);
+  if (stageRows) rows.push(stageRows);
+
   const ctx = f.case_context;
   const ctxText = ctx ? [
     ctx.disease ? `病名：${ctx.disease}` : '', ctx.syndrome ? `证型：${ctx.syndrome}` : '',
@@ -808,7 +857,7 @@ function formulaCard(f) {
   return {
     kind: '方剂',
     title: f.name,
-    badge: `<span class="rx-badge ${esc(f.relation || '')}">${esc(RELATION_LABELS[f.relation] || f.relation || '来源成员')}</span>`,
+    badge: qualificationBadgeHtml(f, '来源成员'),
     meta: '',
     rows: rows.join(''),
     details: techIdDetailsHtml([f.source_ref]) + rawDetailsHtml('来源病例上下文', ctxText) + unknownFieldsDetailsHtml(unknown),
@@ -842,7 +891,7 @@ function sourceProductCard(delivery, product) {
   return {
     kind: modalityLabel(delivery.outcome),
     title,
-    badge: `<span class="rx-badge ${esc(product.qualification || '')}">${esc(RELATION_LABELS[product.qualification] || '来源成员')}</span>`,
+    badge: qualificationBadgeHtml(product, '来源成员'),
     meta,
     rows: objectRowsHtml(payload, new Set(['title', 'name'])),
     source: provenanceLineHtml(payload.provenance),

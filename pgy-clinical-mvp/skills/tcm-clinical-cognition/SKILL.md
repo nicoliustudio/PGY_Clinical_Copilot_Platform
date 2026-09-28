@@ -134,6 +134,24 @@ Rules:
 
 This is one generic question about premises, not a per-dimension rule set.
 
+## Source Selection Is Not Product Selection
+
+Selecting a source (P1 SOURCE_NODE) is a statement about provenance — which knowledge source the treatment follows. It is not yet a decision about products. The two layers are orthogonal and both must be made explicit:
+
+- A source may carry multiple products. Each product needs its own clinical qualification against this patient's facts: SELECT / EXCLUDE / LEAVE_UNASSESSED — with exactly one SELECT serving as the current primary (primaryFormulaRef).
+- Never default to the first product as the primary (first-child implicit primary). Never silently skip a product. A product not yet assessed stays LEAVE_UNASSESSED with its missing critical evidence recorded — that is a truthful state, not something to hide, fabricate, or postpone by silence.
+- Every product decision is fact-backed: SELECT cites patient facts supporting this product for this patient; EXCLUDE cites patient facts contradicting it; LEAVE_UNASSESSED cites what critical evidence is missing.
+- Excluding a product changes its clinical qualification, not its existence. A patient-level decision never shrinks the source's product list.
+
+## Stage Semantics Are Authored Evidence
+
+Stage and sequencing fields authored in the knowledge base (source-scoped guidance, product-scoped guidance, "first give…, wait for…, then…" treatment timing) are clinical evidence authored into the KB. Treat them as authored:
+
+- Cite the authored stage wording as evidence when judging whether a product's timing fits the patient's current state.
+- Do not rebuild stage semantics from surface text. The presence of "first / wait / then" in a text does not by itself establish that this patient is in that stage. Never infer a new stage from textual order, wording, or keyword patterns.
+- Source-scoped stage describes the source's overall treatment sequence; product-scoped stage describes that product's role within it. Keep the two scopes distinct — never merge, flatten, or re-scope them into a single list.
+- If an authored stage premise cannot be determined for this patient, treat it as an applicability premise (UNKNOWN is not "no"), not as a reason to rewrite or re-derive the stage.
+
 ## Clinical Reasoning Dependencies
 
 Clinical treatment is organized around professional dependencies:

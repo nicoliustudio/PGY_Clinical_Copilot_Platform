@@ -269,6 +269,49 @@ runs.forEach((r, idx) => {
   }
   body.push('');
 
+  // 1.6 选方事务（formula.select → workspace.formulaSelection · ProductDecision × 两层 stage）
+  const fsel = r.workspace?.formulaSelection;
+  body.push('## 1.6 选方事务（formula.select → formulaSelection）');
+  body.push('');
+  body.push('> Source selection ≠ Product selection：`selectedSourceRef` 是来源节点身份（P1 SOURCE_NODE），`primaryFormulaRef` / `productDecisions` 才是产品层选择。stage 为 KB authored 原文，此处只渲染、绝不从「先/待/再」文本再推断。');
+  body.push('');
+  if (fsel) {
+    body.push(`- selectionUnit（selectedCandidateRef）：${jv(fsel.selectedCandidateRef)}`);
+    body.push(`- selectedSourceRef：${jv(fsel.selectedSourceRef)}｜primaryFormulaRef：${jv(fsel.primaryFormulaRef)}`);
+    body.push(`- rationale：${jv(fsel.rationale)}`);
+    body.push(`- runtime evidence refs：supporting=${asList(fsel.supportingEvidenceRefs ?? [])}｜contradicting=${asList(fsel.contradictingEvidenceRefs ?? [])}`);
+    const cd: any[] = Array.isArray(fsel.candidateDecisions) ? fsel.candidateDecisions : [];
+    body.push(`- candidateDecisions（${cd.length}，闭世界：每个候选一个 disposition）：`);
+    if (cd.length) {
+      body.push('');
+      body.push('| candidateRef | disposition | supportingFactRefs | contradictingFactRefs | missingCriticalEvidence | rationale |');
+      body.push('|---|---|---|---|---|---|');
+      for (const d of cd) {
+        const cell = (v: unknown) => String(v ?? '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+        body.push(`| ${cell(d.candidateRef)} | ${cell(d.disposition)} | ${cell(asList(d.supportingFactRefs ?? []))} | ${cell(asList(d.contradictingFactRefs ?? []))} | ${cell(asList(d.missingCriticalEvidence ?? []))} | ${cell(d.rationale)} |`);
+      }
+    } else {
+      body.push('  - （无）');
+    }
+    const pd: any[] = Array.isArray(fsel.productDecisions) ? fsel.productDecisions : [];
+    body.push('');
+    body.push(`- productDecisions（${pd.length}，P1 source-node 内产品资格：SELECT / EXCLUDE / LEAVE_UNASSESSED 三选一，exactly-one-SELECT）：`);
+    if (pd.length) {
+      body.push('');
+      body.push('| formulaRef | disposition | supportingFactRefs | contradictingFactRefs | missingCriticalEvidence | rationale |');
+      body.push('|---|---|---|---|---|---|');
+      for (const d of pd) {
+        const cell = (v: unknown) => String(v ?? '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+        body.push(`| ${cell(d.formulaRef)} | ${cell(d.disposition)} | ${cell(asList(d.supportingFactRefs ?? []))} | ${cell(asList(d.contradictingFactRefs ?? []))} | ${cell(asList(d.missingCriticalEvidence ?? []))} | ${cell(d.rationale)} |`);
+      }
+    } else {
+      body.push('  - （无显式产品决策——需核对是否为 P2 CASE_VISIT 或未评估路径）');
+    }
+  } else {
+    body.push('（无 formulaSelection——该 run 未进入选方事务）');
+  }
+  body.push('');
+
   // 2. 最终结果
   const res = r.result;
   body.push('## 2. 最终结果（session.result）');
@@ -289,10 +332,16 @@ runs.forEach((r, idx) => {
       body.push('  - （无）');
     }
     const fset: any[] = res.formula_set ?? [];
-    body.push(`- formula_set（${fset.length}）：`);
+    const unassessedCount = fset.filter((f) => f.clinical_qualification === 'UNASSESSED').length;
+    body.push(`- formula_set（${fset.length}，UNASSESSED=${unassessedCount}）：`);
     if (fset.length) {
       for (const f of fset) {
-        body.push(`  - ${f.formula_ref}｜${f.name}｜relation=${f.relation}｜mod_status=${f.modification_status}`);
+        body.push(`  - ${f.formula_ref}｜${f.name}｜qualification=${jv(f.clinical_qualification)}｜relation=${f.relation}（兼容投影）｜mod_status=${f.modification_status}`);
+        if (f.exclusion_reason) {
+          body.push(`    - 排除：${f.exclusion_reason}｜evidence=${asList(f.exclusion_evidence_refs ?? [])}`);
+        }
+        body.push(`    - stage·来源层（source-scoped）：guidance=${asList(f.source_stage_guidance ?? [])}｜conditional=${asList(f.source_conditional_guidance ?? [])}｜sequence=${j(f.source_sequence ?? null)}`);
+        body.push(`    - stage·本方层（product-scoped）：guidance=${asList(f.stage_guidance ?? [])}｜conditional=${asList(f.conditional_guidance ?? [])}｜sequence=${j(f.sequence ?? null)}`);
         body.push(`    - 方内原始（${f.formula_local_modification_text ?? '-'}）`);
         body.push(`    - 病证共享（${f.source_shared_modification_text ?? '-'}）`);
         body.push(`    - 患者特异（${f.patient_specific_modification_text ?? '-'}）`);
@@ -408,7 +457,7 @@ runs.forEach((r, idx) => {
       const sb = c.sourceBundle;
       body.push(`- sourceBundle.sourceId：${sb.sourceId ?? '-'}｜products=${(sb.products ?? []).length}`);
       for (const p of sb.products ?? []) {
-        body.push(`  - ${p.productId}｜${p.name}｜qualification=${p.qualification}`);
+        body.push(`  - ${p.productId}｜${p.name}｜clinicalQualification=${jv(p.clinicalQualification)}｜qualification=${p.qualification}（兼容）｜sequenceRelation=${jv(p.sequenceRelation)}${p.exclusionReason ? `｜排除：${p.exclusionReason}` : ''}`);
         body.push('```json');
         body.push(jp(p.payload));
         body.push('```');

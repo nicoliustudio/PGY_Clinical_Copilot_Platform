@@ -131,6 +131,13 @@ function hydrateP1(
     conditionalGuidance: parent.conditionalGuidance,
     sequence: parent.sequence,
     formulas,
+    selectionContract: {
+      unitRef: sourceId,
+      memberRefs: formulas.map((f) => f.formulaRef),
+      requireDispositionForAll: true,
+      minSelected: 1,
+      maxSelected: 1,
+    },
   };
 }
 
@@ -221,6 +228,13 @@ function hydrateP2Case(
     sourceLevelModifications: [],
     sourceLevelModificationPresence: 'UNKNOWN',
     formulas,
+    selectionContract: {
+      unitRef: caseRef,
+      memberRefs: [],
+      requireDispositionForAll: false,
+      minSelected: 0,
+      maxSelected: 0,
+    },
   };
 }
 

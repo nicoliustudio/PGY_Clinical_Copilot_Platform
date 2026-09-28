@@ -36,8 +36,8 @@ export interface RetrievalDiagnostics {
   p2Attempted?: boolean;
   /** P1 是否返回可用证据（observable floor：命中 ≥1 条；最终语义判断由 Agent 完成）。 */
   p1Usable?: boolean;
-  /** 是否发生 P1 → P2 fallback。 */
-  fallbackToP2?: boolean;
+  /** 是否尝试了 P2（CLINICAL_CASE）双车道召回（独立召回车道，非失败后 fallback）。 */
+  p2LaneAttempted?: boolean;
   /** fallback 原因（可选，由 Agent/调用方标注）。 */
   fallbackReason?: string;
   /** dense 召回 Top-K 候选（未 rerank） */

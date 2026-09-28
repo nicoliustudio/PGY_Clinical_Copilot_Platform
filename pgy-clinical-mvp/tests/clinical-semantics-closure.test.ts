@@ -78,7 +78,7 @@ test('Clinical Semantics: decisive pattern claims require durable patient-fact b
     primary: { statement: '湿热', supportingEvidenceRefs: ['S1:wet-heat'] },
     currentDominantMechanism: { statement: '湿热为主导', supportingEvidenceRefs: ['S1:wet-heat'] },
   };
-  assert.match(validatePatternAssessmentPatientBacking(ws, knowledgeOnly)[0] ?? '', /patient-derived/);
+  assert.match(validatePatternAssessmentPatientBacking(ws, knowledgeOnly)[0]?.message ?? '', /patient-derived/);
   const factBacked = {
     primary: { statement: '湿热', supportingEvidenceRefs: ['CF_001', 'S1:wet-heat'] },
     currentDominantMechanism: { statement: '湿热为主导', supportingEvidenceRefs: ['CF_001', 'S1:wet-heat'] },

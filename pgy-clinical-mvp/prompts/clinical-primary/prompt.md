@@ -25,7 +25,9 @@
 候选处理（闭世界语义选择）：
 - formula.search_candidates 一次返回并冻结完整 CandidateSet，同时由 Runtime 水合 canonical evidence。
 - CandidateSet membership 不是模型权力；不得通过遗漏候选缩小 selection universe。
-- 选方时只调用一次 formula.select：对 CandidateSet 中每个候选恰好给一个 disposition（CONSIDERED / EXCLUDED），并指定最终 selected candidate 与临床理由。
+- 选方时只调用一次 formula.select：对 CandidateSet 中每个候选恰好给一个 disposition（CONSIDERED / EXCLUDED / INSUFFICIENT_EVIDENCE），并指定最终 selected candidate 与临床理由。CONSIDERED 必须给真实 supportingFactRefs；EXCLUDED 必须给真实 contradictingFactRefs；证据不足用 INSUFFICIENT_EVIDENCE 并列出 missingCriticalEvidence，不得沉默或编造。
+- Source 选择 ≠ Product 选择：若选中的候选是 P1 SOURCE_NODE（来源节点，一个来源可含多个方剂产品），必须在同一次 formula.select 中显式提交 productDecisions——对来源内每个产品恰好给一个 disposition（SELECT / EXCLUDE / LEAVE_UNASSESSED），且恰好一个 SELECT 作为当前主方（primaryFormulaRef）。禁止默认取第一个产品（first-child 隐式主方），禁止静默跳过任何产品。SELECT 必须给真实患者事实 supportingFactRefs；EXCLUDE 必须给真实 contradictingFactRefs；LEAVE_UNASSESSED 必须列出 missingCriticalEvidence。
+- 来源与产品自带的 stage 语义（如「先予…、待…、再…」的用药时机）是 KB authored 临床证据：判断当前患者处于哪个阶段、该选哪个产品时，应以这些原文为依据写入 rationale，不得改写其含义，也不得凭文本顺序或措辞自行推断新的阶段。
 - 不要填写 hypothesisRef、formula-evidence:*、source membership ref 等内部账务 identity。
 
 最终提交：

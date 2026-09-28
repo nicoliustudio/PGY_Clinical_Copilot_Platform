@@ -1257,6 +1257,13 @@ function isPatientEvidenceRef(workspace: ClinicalWorkspace, ref: string): boolea
   return ev?.evidenceKind === 'patient';
 }
 
+export interface ConstraintViolation {
+  path: string;
+  expected: { evidenceKind?: string; minItems?: number; allowedRefs?: string[] };
+  receivedCount: number;
+  message: string;
+}
+
 /**
  * H15.2 PatternAssessment Readiness —— 治疗层消费前结构校验。
  * 只检查可稳定满足的结构（primary 存在 + 非空 supportingEvidenceRefs + 至少 patient-derived evidence）。
@@ -1271,8 +1278,8 @@ export interface PatternAssessmentReadinessResult {
 export function checkPatternAssessmentReadiness(workspace: ClinicalWorkspace): PatternAssessmentReadinessResult {
   const pa = workspace.patternAssessment;
   if (!pa) return { ok: false, missing: ['patternAssessment'] };
-  const missing = validatePatternAssessmentPatientBacking(workspace, pa);
-  return { ok: missing.length === 0, missing };
+  const violations = validatePatternAssessmentPatientBacking(workspace, pa);
+  return { ok: violations.length === 0, missing: violations.map((v) => v.message) };
 }
 
 
@@ -1286,25 +1293,52 @@ export function checkPatternAssessmentReadiness(workspace: ClinicalWorkspace): P
 export function validatePatternAssessmentPatientBacking(
   workspace: ClinicalWorkspace,
   assessment: PatternAssessment,
-): string[] {
-  const errors: string[] = [];
+): ConstraintViolation[] {
+  const violations: ConstraintViolation[] = [];
+  const allowedPatientRefs: string[] = [];
+  for (const f of workspace.caseFacts) allowedPatientRefs.push(f.id);
+  for (const e of workspace.evidenceState.evidenceItems) {
+    if (e.evidenceKind === 'patient') {
+      allowedPatientRefs.push(e.id);
+      if (e.sourceRef) allowedPatientRefs.push(e.sourceRef);
+    }
+  }
   const validate = (claim: PatternClaim | undefined, label: string, required: boolean) => {
+    const fullPath = `${label}.supportingEvidenceRefs`;
     if (!claim) {
-      if (required) errors.push(`${label} is required`);
+      if (required) {
+        violations.push({
+          path: label,
+          expected: { evidenceKind: 'patient', minItems: 1, allowedRefs: allowedPatientRefs },
+          receivedCount: 0,
+          message: `${label} is required`,
+        });
+      }
       return;
     }
     const refs = claim.supportingEvidenceRefs ?? [];
+    const validPatientCount = refs.filter((ref) => isPatientEvidenceRef(workspace, ref)).length;
     if (refs.length === 0) {
-      errors.push(`${label}.supportingEvidenceRefs requires patient-fact backing`);
+      violations.push({
+        path: fullPath,
+        expected: { evidenceKind: 'patient', minItems: 1, allowedRefs: allowedPatientRefs },
+        receivedCount: 0,
+        message: `${fullPath} requires patient-fact backing`,
+      });
       return;
     }
-    if (!refs.some((ref) => isPatientEvidenceRef(workspace, ref))) {
-      errors.push(`${label} must include at least one patient-derived evidence ref`);
+    if (validPatientCount === 0) {
+      violations.push({
+        path: fullPath,
+        expected: { evidenceKind: 'patient', minItems: 1, allowedRefs: allowedPatientRefs },
+        receivedCount: 0,
+        message: `${label} must include at least one patient-derived evidence ref`,
+      });
     }
   };
   validate(assessment.primary, 'primary', true);
   validate(assessment.currentDominantMechanism, 'currentDominantMechanism', false);
-  return errors;
+  return violations;
 }
 
 /** H15.2：primary 是否关联 formal hypothesis（可观测指标，非硬门禁）。 */

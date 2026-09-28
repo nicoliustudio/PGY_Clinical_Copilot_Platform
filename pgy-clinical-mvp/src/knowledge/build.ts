@@ -190,6 +190,22 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
         entityStatus: str(f.entity_status),
       };
     });
+    const activeFormulas = formulas.filter((f) => f.entityStatus !== 'INACTIVE');
+    const idSeen = new Map<string, number>();
+    const duplicates: string[] = [];
+    for (const f of activeFormulas) {
+      if (!f.id) continue;
+      if (idSeen.has(f.id)) {
+        duplicates.push(f.id);
+      } else {
+        idSeen.set(f.id, 1);
+      }
+    }
+    if (duplicates.length > 0) {
+      const sourceId = n.id ?? 'UNKNOWN';
+      const dupeList = Array.from(new Set(duplicates)).join(', ');
+      throw new Error(`[P0-A Identity Closure] P1 source ${sourceId} has colliding ACTIVE formula.id: ${dupeList}. Release copy must have authoritatively unique ids per source.`);
+    }
     const sourceModificationsDeclared = Object.prototype.hasOwnProperty.call(n, 'modification')
       || Object.prototype.hasOwnProperty.call(n, 'modification_rules');
     const sourceModifications = sourceModificationsDeclared

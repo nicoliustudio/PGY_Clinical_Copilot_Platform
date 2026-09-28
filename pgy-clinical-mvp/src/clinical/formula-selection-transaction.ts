@@ -226,13 +226,20 @@ export async function selectCanonicalFormula(
     };
   }
 
-  const isP2CaseSource = candidate.sourceAuthority === 'P2_CASE_DERIVED' || sourceFormulaSet.sourceAuthority === 'P2_CASE_DERIVED';
+  const selectionContract = sourceFormulaSet.selectionContract ?? (
+    // Backward compat: sources hydrated by legacy paths/tests don't carry the contract yet.
+    // Synthesize topology from existing authority + formula membership.
+    sourceFormulaSet.sourceAuthority === 'P2_CASE_DERIVED'
+      ? { unitRef: sourceFormulaSet.parentRecordRef, memberRefs: [] as string[], requireDispositionForAll: false, minSelected: 0, maxSelected: 0 }
+      : { unitRef: sourceFormulaSet.parentRecordRef, memberRefs: sourceFormulaSet.formulas.map((f) => f.formulaRef), requireDispositionForAll: true, minSelected: 1, maxSelected: 1 }
+  );
+  const hasMemberRefs = selectionContract.memberRefs.length > 0;
 
   let productDecisions: FormulaProductDecision[] = input.productDecisions ?? [];
-  if (!isP2CaseSource) {
+  if (hasMemberRefs) {
     const productCheck = validateProductDecisions(
       context.workspace.caseFacts,
-      sourceFormulaSet.formulas.map((formula) => formula.formulaRef),
+      selectionContract.memberRefs,
       productDecisions,
     );
     if (!productCheck.ok) {
@@ -243,7 +250,6 @@ export async function selectCanonicalFormula(
       formulas: applyProductDecisions(sourceFormulaSet.formulas, productDecisions),
     };
   } else {
-    // A P2 CASE_VISIT candidate is itself product-specific. Its selected encounter remains the explicit product decision.
     productDecisions = [];
   }
 
@@ -276,7 +282,7 @@ export async function selectCanonicalFormula(
     primaryFormulaRef,
     sourceFormulaCount: sourceFormulaSet.formulas.length,
     modificationRuleCount: 0,
-    modificationState: isP2CaseSource ? 'NOT_APPLICABLE' : 'UNKNOWN',
-    sourceAuthority: isP2CaseSource ? 'P2_CASE_DERIVED' : 'P1',
+    modificationState: hasMemberRefs ? 'UNKNOWN' : 'NOT_APPLICABLE',
+    sourceAuthority: sourceFormulaSet.sourceAuthority ?? 'P1',
   };
 }

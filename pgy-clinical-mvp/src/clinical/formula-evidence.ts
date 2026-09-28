@@ -35,10 +35,18 @@ export interface FormulaEvidenceCard {
   provenance: unknown;
   /** H15.2.7：P2 病例方药单元的组成（source fidelity，不升级处方权）。 */
   composition?: string[];
-  /** Parent/source stage semantics, structurally ingested from KB. */
+  /** Parent/source stage semantics, structurally ingested from KB. (Legacy flattened field, backward compat) */
   stageGuidance?: string[];
   conditionalGuidance?: string[];
   sequence?: SourceSequenceStep[];
+  /** Scoped stage semantics from source/doc level. */
+  sourceStageGuidance?: string[];
+  sourceConditionalGuidance?: string[];
+  sourceSequence?: Array<{ order: number; instruction: string }>;
+  /** Scoped stage semantics from product/formula level. */
+  productStageGuidance?: string[];
+  productConditionalGuidance?: string[];
+  productSequence?: Array<{ order: number; instruction: string }>;
   /** Formula-local stage semantics retain product identity inside a source-level candidate. */
   productGuidance?: Array<{
     formulaId: string;
@@ -83,7 +91,6 @@ export interface FormulaCandidateCard {
   /** Retrieval lane is descriptive provenance, not authority or ranking preference. */
   retrievalLane?: 'NORMATIVE' | 'CASE_ANALOG';
   retrievalLanes?: FormulaRetrievalLane[];
-  /** @deprecated pre-closure fallback marker; P1/P2 are now independent recall lanes. */
   fallbackReason?: string;
   /** H15.2.7：formula-level 证据单元追溯字段（encounter-level）。 */
   sourceEvidenceRef?: string;
@@ -372,6 +379,12 @@ function docToEvidenceCard(doc: KnowledgeDoc, formulaId: string): FormulaEvidenc
     stageGuidance: [...new Set([...(doc.stageGuidance ?? []), ...(f.stageGuidance ?? [])])],
     conditionalGuidance: [...new Set([...(doc.conditionalGuidance ?? []), ...(f.conditionalGuidance ?? [])])],
     sequence: [...(doc.sequence ?? []), ...(f.sequence ?? [])],
+    sourceStageGuidance: doc.stageGuidance,
+    sourceConditionalGuidance: doc.conditionalGuidance,
+    sourceSequence: doc.sequence?.map((s) => ({ order: s.order, instruction: s.instruction })),
+    productStageGuidance: f.stageGuidance,
+    productConditionalGuidance: f.conditionalGuidance,
+    productSequence: f.sequence?.map((s) => ({ order: s.order, instruction: s.instruction })),
     provenance: {
       source: doc.source,
       sourceFile: doc.sourceFile,

@@ -265,8 +265,8 @@ function renderRetrievalDetail(trace: any): string {
     lines.push(
       `- 范围：scopes=[${(d.scopes ?? []).join(', ')}] · topK=${d.topK} · 请求角色=\`${d.requestedRole ?? '-'}\` · 命中层级=\`${d.sourceTier ?? '-'}\` · 流派=\`${d.sourceSchool ?? '-'}\``,
     );
-    if (d.p1Attempted != null || d.fallbackToP2 != null) {
-      lines.push(`- P1 尝试=${d.p1Attempted ?? '-'} · P1 可用=${d.p1Usable ?? '-'} · P2 尝试=${d.p2Attempted ?? '-'} · fallback=${d.fallbackToP2 ?? '-'}`);
+    if (d.p1Attempted != null || d.p2LaneAttempted != null) {
+      lines.push(`- P1 尝试=${d.p1Attempted ?? '-'} · P1 可用=${d.p1Usable ?? '-'} · P2 尝试=${d.p2Attempted ?? '-'} · P2车道=${d.p2LaneAttempted ?? '-'}`);
     }
     if (d.retrievalContext) {
       const rc = d.retrievalContext;

@@ -417,9 +417,10 @@ td .input-preview { max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 .rx-kind { flex: 0 0 auto; font-size: 11px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 7px; }
 .rx-title { font-size: 14px; color: #173a2c; }
 .rx-badge { font-size: 10px; border-radius: 999px; padding: 2px 8px; background: var(--soft); color: #4d5650; }
-.rx-badge.PRIMARY_SELECTED, .rx-badge.NORMATIVE { background: #e8f5ed; color: #187448; }
+.rx-badge.PRIMARY_SELECTED, .rx-badge.NORMATIVE, .rx-badge.CURRENTLY_SELECTED { background: #e8f5ed; color: #187448; }
 .rx-badge.SOURCE_ALTERNATIVE { background: #eef3f7; color: #40607a; }
 .rx-badge.CLINICALLY_EXCLUDED { background: #f1f2f1; color: var(--muted); }
+.rx-badge.UNASSESSED { background: #f4f4f2; color: #8a938c; border: 1px dashed #c9cfc9; }
 .rx-badge.GENERATED_DRAFT, .rx-badge.advisory { background: #fff3dc; color: #9a6a1b; }
 .rx-badge.BLOCKED { background: #feeceb; color: #a83e3b; }
 .rx-meta { margin-top: 5px; font-size: 11px; color: var(--muted); }

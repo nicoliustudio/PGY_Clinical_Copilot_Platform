@@ -18,7 +18,8 @@ import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveHypothesisRef, resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
 import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs,
-  validatePatternAssessmentPatientBacking, computeClinicalClosure, checkClinicalCoreCompletion } from '../../platform/workspace/clinical-workspace.js';
+  validatePatternAssessmentPatientBacking, computeClinicalClosure, checkClinicalCoreCompletion,
+  type ConstraintViolation } from '../../platform/workspace/clinical-workspace.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
 import { admissibleEffects, effectiveRequestIRV21, effectiveRequiredOutcomesV21, refreshControlPlaneV21, requiredArtifactsFromGraphV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
@@ -468,8 +469,18 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       assertDeclaredDeliveryOutcomes(context, canonicalTreatmentPlan);
       const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
       const backingErrors = validatePatternAssessmentPatientBacking(context.workspace, patternAssessment as PatternAssessment);
-      const allErrors = [...errors, ...backingErrors];
-      if (allErrors.length > 0) throw toolContractError('VALIDATION_FAILED', allErrors.join('; '), { details: allErrors });
+      const backingMessages = backingErrors.map((v) => v.message);
+      const allMessages = [...errors, ...backingMessages];
+      if (allMessages.length > 0 || backingErrors.length > 0) {
+        if (backingErrors.length > 0) {
+          throw toolContractError('VALIDATION_FAILED', allMessages.join('; '), {
+            details: backingErrors,
+            allowedNextActions: ['add at least one valid patient fact CaseFact ref (CF_xxx) to the path supportingEvidenceRefs array — see violation.expected.allowedRefs for exact valid IDs'],
+          });
+        } else {
+          throw toolContractError('VALIDATION_FAILED', allMessages.join('; '), { details: errors });
+        }
+      }
       return {
         accepted: true,
         updatedArtifacts: ['diseaseAssessment', 'patternAssessment', 'treatmentPlan'],
@@ -913,8 +924,18 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       if (patternAssessment) {
         const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
         const backingErrors = validatePatternAssessmentPatientBacking(context.workspace, patternAssessment as PatternAssessment);
-        const allErrors = [...errors, ...backingErrors];
-        if (allErrors.length > 0) throw toolContractError('VALIDATION_FAILED', allErrors.join('; '), { details: allErrors });
+        const backingMessages = backingErrors.map((v) => v.message);
+        const allMessages = [...errors, ...backingMessages];
+        if (allMessages.length > 0 || backingErrors.length > 0) {
+          if (backingErrors.length > 0) {
+            throw toolContractError('VALIDATION_FAILED', allMessages.join('; '), {
+              details: backingErrors,
+              allowedNextActions: ['add at least one valid patient fact CaseFact ref (CF_xxx) to the path supportingEvidenceRefs array — see violation.expected.allowedRefs for exact valid IDs'],
+            });
+          } else {
+            throw toolContractError('VALIDATION_FAILED', allMessages.join('; '), { details: errors });
+          }
+        }
       }
       // H15.5 compact receipt：不回显完整 payload，只返回本次写入的 artifact 摘要 + 剩余未决项。
       const updatedArtifacts: string[] = [];

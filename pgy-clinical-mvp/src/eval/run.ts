@@ -37,6 +37,8 @@ type ErrorLayer =
   | 'DISEASE_REASONING_ERROR'
   | 'SYNDROME_REASONING_ERROR'
   | 'FORMULA_RETRIEVAL_MISS'
+  | 'SOURCE_SELECTION_MISMATCH'
+  | 'PRODUCT_SELECTION_MISMATCH'
   | 'FORMULA_AUTHORITY_ERROR';
 
 interface RowResult {
@@ -56,6 +58,8 @@ interface RowResult {
   capabilities?: string[];
   skills?: string[];
   knowledgeScopes?: string[];
+  candidateSourceIds?: string[];
+  candidateFormulaIds?: string[];
   // gold 对比
   hasGold?: boolean;
   diseaseHit?: boolean;
@@ -154,7 +158,14 @@ async function main(): Promise<void> {
         if (auth === 'BLOCKED') layer = result.safety.status === 'BLOCK' ? 'SAFETY_BLOCK' : 'FORMULA_AUTHORITY_ERROR';
         else if (!dHit) layer = 'DISEASE_REASONING_ERROR';
         else if (!sHit) layer = 'SYNDROME_REASONING_ERROR';
+        // TODO(P1-F): Once runCase exposes CandidateSet.ids — split here: if gold.source in candidateSources => SOURCE_SELECTION_MISMATCH; else => FORMULA_RETRIEVAL_MISS
         else if (!fHit) layer = 'FORMULA_RETRIEVAL_MISS';
+        if (layer === 'FORMULA_RETRIEVAL_MISS') {
+          const srcId = result.formula?.source_id ?? '';
+          if (srcId.includes('case') || srcId.startsWith('DE_')) {
+            layer = 'SOURCE_SELECTION_MISMATCH';
+          }
+        }
       } else if (auth === 'BLOCKED') {
         layer = result.safety.status === 'BLOCK' ? 'SAFETY_BLOCK' : 'FORMULA_AUTHORITY_ERROR';
       }

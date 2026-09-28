@@ -138,7 +138,7 @@ export async function searchWithDiagnostics(
     p1Attempted: options.role === 'NORMATIVE_TREATMENT' || options.role === undefined,
     p2Attempted: options.role === 'CLINICAL_CASE',
     p1Usable,
-    fallbackToP2: options.role === 'CLINICAL_CASE',
+    p2LaneAttempted: options.role === 'CLINICAL_CASE',
     fallbackReason: options.fallbackReason,
     dense,
     reranked,

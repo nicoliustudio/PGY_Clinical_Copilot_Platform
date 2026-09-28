@@ -432,6 +432,14 @@ export interface SourceFormulaEntry {
   applicableModifications: ModificationEvidenceCandidate[];
 }
 
+export interface SelectionContract {
+  unitRef: string;
+  memberRefs: string[];
+  requireDispositionForAll: boolean;
+  minSelected: number;
+  maxSelected: number;
+}
+
 /**
  * H15.6 Source Formula Set —— 确定性水合一个已采用 P1 parent 下的全部 ACTIVE 方。
  * 由 Runtime 直接 hydrate，不经过 semantic search / topK / rerank / candidate frontier 截断。
@@ -456,6 +464,7 @@ export interface SourceFormulaSet {
   conditionalGuidance?: string[];
   sequence?: SourceSequenceStep[];
   formulas: SourceFormulaEntry[];
+  selectionContract?: SelectionContract;
 }
 
 /**
