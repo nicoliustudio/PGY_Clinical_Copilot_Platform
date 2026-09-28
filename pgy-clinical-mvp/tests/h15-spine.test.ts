@@ -112,7 +112,7 @@ test('H15.2 readiness: primary without patient evidence is incomplete', () => {
   // storeWithSpine 的 primary 无 supportingEvidenceRefs。
   const result = checkPatternAssessmentReadiness(ws);
   assert.equal(result.ok, false);
-  assert.ok(result.missing.includes('primary.supportingEvidenceRefs'));
+  assert.ok(result.missing.includes('primary.supportingEvidenceRefs requires patient-fact backing'));
 });
 
 test('H15.2 readiness: primary with patient evidence passes', () => {

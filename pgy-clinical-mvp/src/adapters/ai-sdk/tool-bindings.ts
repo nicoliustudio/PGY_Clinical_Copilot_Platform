@@ -17,7 +17,8 @@ import { proposalSubmitInputSchema, type ProposalSubmitInput } from '../../contr
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import { addRetrievalDiagnostics } from '../../trace.js';
 import { resolveHypothesisRef, resolveWorkItemRef } from '../../platform/workspace/hypothesis-projection.js';
-import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs, computeClinicalClosure, checkClinicalCoreCompletion } from '../../platform/workspace/clinical-workspace.js';
+import { validateCandidateAssessmentRefs, validatePatternAssessmentRefs,
+  validatePatternAssessmentPatientBacking, computeClinicalClosure, checkClinicalCoreCompletion } from '../../platform/workspace/clinical-workspace.js';
 import { evaluateProposalReadiness } from '../../platform/workspace/proposal-readiness.js';
 import { admissibleEffects, effectiveRequestIRV21, effectiveRequiredOutcomesV21, refreshControlPlaneV21, requiredArtifactsFromGraphV21, runnableObligations } from '../../platform/control-plane/control-plane-v21-session.js';
 import type { PatternAssessment } from '../../contracts/workspace.js';
@@ -466,7 +467,9 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       assertV21DeliberationLegality(context, { diseaseAssessment, patternAssessment });
       assertDeclaredDeliveryOutcomes(context, canonicalTreatmentPlan);
       const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
-      if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
+      const backingErrors = validatePatternAssessmentPatientBacking(context.workspace, patternAssessment as PatternAssessment);
+      const allErrors = [...errors, ...backingErrors];
+      if (allErrors.length > 0) throw toolContractError('VALIDATION_FAILED', allErrors.join('; '), { details: allErrors });
       return {
         accepted: true,
         updatedArtifacts: ['diseaseAssessment', 'patternAssessment', 'treatmentPlan'],
@@ -500,14 +503,16 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
   }),
   'knowledge.search': (context) => tool({
     description:
-      '在当前已激活知识 scope 中检索证据。可用 role 限定知识角色：NORMATIVE_TREATMENT（规范治法/方）、CLINICAL_CASE（P1 不足后的经验性病例）、DIAGNOSTIC_DIFFERENTIAL（症状辨证鉴别）、DIAGNOSTIC_STANDARD（病名诊断依据）。仅在预计会改变当前临床判断时才再次检索；若已有证据已足以支撑可辩护的 Proposal，直接提交。',
+      '在当前已激活知识 scope 中检索证据。可用 role 限定知识角色。若 query 由某个 formal hypothesis 主动条件化，必须填写 purpose + hypothesisRefs；这些命中只记录为该假设条件下召回的知识，不会自动升级为患者证据。临床主证/主导病机提交仍必须有真实 CaseFact backing。仅在预计会改变当前临床判断时才再次检索。',
     inputSchema: z.object({
       query: z.string(),
       topK: z.number().optional(),
       role: z.enum(['DIAGNOSTIC_DIFFERENTIAL', 'DIAGNOSTIC_STANDARD', 'NORMATIVE_TREATMENT', 'CLINICAL_CASE']).optional(),
       fallbackReason: z.string().optional(),
+      purpose: z.enum(['PATIENT_FACT_GROUNDING', 'DIFFERENTIAL', 'HYPOTHESIS_SUPPORT', 'HYPOTHESIS_CHALLENGE', 'TREATMENT_RECALL', 'UNATTRIBUTED']).optional(),
+      hypothesisRefs: z.array(z.string()).optional(),
     }),
-    execute: async ({ query, topK, role, fallbackReason }) => {
+    execute: async ({ query, topK, role, fallbackReason, purpose, hypothesisRefs }) => {
       // H15.5.1：确定性临床收敛边界 —— closure 时压缩 broad knowledge.search，不再泛检索。
       // V2.1.1：但 runtime 已施加 typed NEED_EVIDENCE（存在 runnable evidence-gap 义务）时，
       // 定向检索是 V2.1 明确授权的义务，legacy closure 收敛不得把它变成 no-op ——
@@ -520,6 +525,15 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
             'Clinical closure reached: core formed + non-urgent + candidate/evidence surface available. Broad knowledge.search is curtailed. Proceed to a clinical decision via formula.get_evidence / workspace.commit_clinical_model / proposal.submit; patient-specific unavailable investigations go to missing_information + reviewRequired (not clarification-only).',
           skippedQuery: query,
         };
+      }
+      if ((purpose === 'HYPOTHESIS_SUPPORT' || purpose === 'HYPOTHESIS_CHALLENGE') && (hypothesisRefs ?? []).length === 0) {
+        throw toolContractError('VALIDATION_FAILED', `${purpose} retrieval requires at least one formal hypothesisRef`);
+      }
+      const unknownHypothesisRefs = (hypothesisRefs ?? []).filter(
+        (ref) => !context.workspace.hypothesisState.hypotheses.some((hypothesis) => hypothesis.id === ref),
+      );
+      if (unknownHypothesisRefs.length > 0) {
+        throw toolContractError('VALIDATION_FAILED', `unknown retrieval hypothesis refs: ${unknownHypothesisRefs.join(', ')}`);
       }
       const { hits, diagnostics } = await searchWithDiagnostics(query, topK ?? 10, context.knowledgeScopes, 'knowledge.search', { role, fallbackReason });
       addRetrievalDiagnostics(context.runId, { ...diagnostics, retrievalContext: buildRetrievalContext(context) });
@@ -686,9 +700,17 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         });
         const refs = (cached.candidates as { candidateRef?: string }[]).map((c) => c.candidateRef ?? '').filter(Boolean);
         const hydratedEvidence = await hydrateCandidateSetEvidence(context, refs);
-        return { projection: cached.projection, candidates: cached.candidates, hydratedEvidence, reused: 'REUSED_EXISTING_CANDIDATES' };
+        const cachedCandidates = cached.candidates as Array<{ candidateRef?: string; retrievalLanes?: string[] }>;
+        const candidateSetContract = {
+          exactDiseaseNames: context.workspace.candidateSetReceipt?.exactDiseaseNames ?? [],
+          requiredExactDiseaseCandidateRefs: cachedCandidates
+            .filter((candidate) => candidate.retrievalLanes?.includes('EXACT_DISEASE_FAMILY'))
+            .map((candidate) => candidate.candidateRef ?? '')
+            .filter(Boolean),
+        };
+        return { projection: cached.projection, candidates: cached.candidates, hydratedEvidence, candidateSetContract, reused: 'REUSED_EXISTING_CANDIDATES' };
       }
-      const { candidates, projection, diagnostics } = await searchFormulaCandidates(context.workspace, context.knowledgeScopes, topK ?? 5);
+      const { candidates, projection, diagnostics, candidateSetContract } = await searchFormulaCandidates(context.workspace, context.knowledgeScopes, topK ?? 5);
       candidateSearchCache.set(cacheKey, { signature, candidates, projection });
       addRetrievalDiagnostics(context.runId, {
         ...(diagnostics ?? { tool: 'formula.search_candidates' as const, query: '', scopes: context.knowledgeScopes, topK: topK ?? 5, dense: [], reranked: [] }),
@@ -696,7 +718,7 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
         retrievalContext: buildRetrievalContext(context),
       });
       const hydratedEvidence = await hydrateCandidateSetEvidence(context, candidates.map((candidate) => candidate.candidateRef));
-      return { projection, candidates, hydratedEvidence };
+      return { projection, candidates, hydratedEvidence, candidateSetContract };
     },
   }),
   'formula.get_evidence': (context) => tool({
@@ -890,7 +912,9 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       for (const u of hypothesisUpdates ?? []) assertKnownHypothesisRef(context, u.hypothesisRef);
       if (patternAssessment) {
         const errors = validatePatternAssessmentRefs(context.workspace, patternAssessment as PatternAssessment);
-        if (errors.length > 0) throw toolContractError('VALIDATION_FAILED', errors.join('; '), { details: errors });
+        const backingErrors = validatePatternAssessmentPatientBacking(context.workspace, patternAssessment as PatternAssessment);
+        const allErrors = [...errors, ...backingErrors];
+        if (allErrors.length > 0) throw toolContractError('VALIDATION_FAILED', allErrors.join('; '), { details: allErrors });
       }
       // H15.5 compact receipt：不回显完整 payload，只返回本次写入的 artifact 摘要 + 剩余未决项。
       const updatedArtifacts: string[] = [];

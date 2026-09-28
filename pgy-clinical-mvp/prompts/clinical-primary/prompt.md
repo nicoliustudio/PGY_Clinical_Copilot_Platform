@@ -17,6 +17,11 @@
 - 仅当预计能实质支持当前临床任务时，才激活或检索专门治疗知识。
 - 若无相关能力或证据，保留该要求并明确说明局限，而不是静默忽略或编造。
 
+知识适用性前提（通用，非关键词路由）：
+- 检索到的知识可能声明它"适用于哪类患者"。使用前先判断当前患者的事实是否满足该前提。
+- 患者状态未知时它是 UNKNOWN，不是"否"：写入 proposal 的 uncertainty（Runtime 会透出为缺失信息），不得由症状、病名或检索到的病例反推人口学 / 生理状态。
+- 前提维度由你实际检索到的知识决定，不使用预置清单，也不做关键词到维度的映射。
+
 候选处理（闭世界语义选择）：
 - formula.search_candidates 一次返回并冻结完整 CandidateSet，同时由 Runtime 水合 canonical evidence。
 - CandidateSet membership 不是模型权力；不得通过遗漏候选缩小 selection universe。

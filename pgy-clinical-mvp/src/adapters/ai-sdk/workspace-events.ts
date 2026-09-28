@@ -40,7 +40,7 @@ function stableHypothesisId(label: string): string {
   return `H_${h.toString(16).padStart(6, '0')}`;
 }
 
-function evidenceItemDraft(hit: Record<string, unknown>): WorkspaceEventDraft | null {
+function evidenceItemDraft(hit: Record<string, unknown>, retrievalContext?: Record<string, unknown>): WorkspaceEventDraft | null {
   const sourceId = readField(hit, 'sourceId');
   if (typeof sourceId !== 'string') return null;
   return {
@@ -58,6 +58,7 @@ function evidenceItemDraft(hit: Record<string, unknown>): WorkspaceEventDraft | 
       relatedCandidates: formulaIds(readField(hit, 'formulas')),
       supportingSignals: [],
       contradictingSignals: [],
+      ...(retrievalContext ? { retrievalContexts: [retrievalContext] } : {}),
     },
   };
 }
@@ -93,8 +94,14 @@ export function workspaceEventsForTool(
         evidenceIds: output.map((hit) => readField(hit, 'sourceId')).filter((x): x is string => typeof x === 'string'),
       },
     };
+    const retrievalContext = {
+      surface: 'KNOWLEDGE_SEARCH',
+      query: readField(input, 'query'),
+      purpose: readField(input, 'purpose') ?? 'UNATTRIBUTED',
+      hypothesisRefs: Array.isArray(readField(input, 'hypothesisRefs')) ? readField(input, 'hypothesisRefs') : [],
+    };
     const added = output
-      .map((hit) => (typeof hit === 'object' && hit !== null ? evidenceItemDraft(hit as Record<string, unknown>) : null))
+      .map((hit) => (typeof hit === 'object' && hit !== null ? evidenceItemDraft(hit as Record<string, unknown>, retrievalContext) : null))
       .filter((x): x is WorkspaceEventDraft => x !== null);
 
     // Candidate Authority is intentionally single-surface: generic knowledge.search contributes
@@ -211,6 +218,7 @@ export function workspaceEventsForTool(
           retrievalRank: readField(c, 'retrievalRank'),
           retrievalScore: readField(c, 'retrievalScore'),
           retrievalLane: readField(c, 'retrievalLane'),
+          retrievalLanes: readField(c, 'retrievalLanes'),
           selectionUnit: readField(c, 'selectionUnit'),
           sourceProductRefs: readField(c, 'sourceProductRefs'),
           sourceProductNames: readField(c, 'sourceProductNames'),
@@ -237,7 +245,15 @@ export function workspaceEventsForTool(
       drafts.push(...workspaceEventsForTool('formula.get_evidence', { candidateRef }, evidence));
     }
     if (candidateRefs.length > 0) {
-      drafts.push({ type: 'candidate.frontier.set', payload: { candidateRefs } });
+      const contract = readField(result, 'candidateSetContract');
+      drafts.push({
+        type: 'candidate.frontier.set',
+        payload: {
+          candidateRefs,
+          requiredExactDiseaseCandidateRefs: readField(contract, 'requiredExactDiseaseCandidateRefs'),
+          exactDiseaseNames: readField(contract, 'exactDiseaseNames'),
+        },
+      });
     }
     return drafts;
   }

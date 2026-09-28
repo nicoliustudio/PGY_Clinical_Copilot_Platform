@@ -484,9 +484,10 @@ test('V2.1.1 一次调用内补齐 clinical core 并写 delivery 不得被整体
   assert.equal(nodeOf(context, 'artifact:treatment-delivery', 'modality:acupuncture')!.status, 'OPEN');
   const factory = DEFAULT_AI_SDK_TOOL_BINDINGS['workspace.record_deliberation'];
   const tool = factory(context) as unknown as { execute: (input: unknown) => Promise<unknown> };
+  context.workspace.caseFacts = [{ id: 'CF_PATIENT', kind: 'symptom', value: '现症', polarity: 'present' }];
   await tool.execute({
     diseaseAssessment: { statement: 'd', evidenceRefs: ['P1:x'] },
-    patternAssessment: { primary: { statement: 'p', supportingEvidenceRefs: ['E1'] } },
+    patternAssessment: { primary: { statement: 'p', supportingEvidenceRefs: ['CF_PATIENT'] } },
     treatmentPlan: {
       primaryPrinciple: 'p',
       treatmentTarget: 't',

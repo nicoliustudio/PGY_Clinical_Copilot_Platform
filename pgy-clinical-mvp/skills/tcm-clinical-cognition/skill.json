@@ -1,5 +1,5 @@
 {
   "id": "tcm-clinical-cognition",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Core TCM clinical cognition: case-frame reasoning, discriminating evidence, convergence, and source-grounded submission."
 }

@@ -249,16 +249,18 @@ runs.forEach((r, idx) => {
   body.push('');
 
   // 1.5 患者事实（CF_* patient facts）
-  const facts = Array.isArray(r.workspace?.facts) ? r.workspace.facts : [];
+  const facts = Array.isArray(r.workspace?.caseFacts) && r.workspace.caseFacts.length > 0
+    ? r.workspace.caseFacts
+    : (Array.isArray(r.workspace?.facts) ? r.workspace.facts : []);
   body.push('## 1.5 患者事实（CF_* patient facts）');
   body.push('');
-  body.push('> id 按 `understanding.facts` 顺序重建（`CF_` + 三位序号）。Runtime 内 `CaseFact.id` 即此编号；落盘 `session.workspace.facts` 投影未保留 id 字段，此处按原顺序还原，供 `formula.select` 的 `supportingFactRefs / contradictingFactRefs` 精确溯源。');
+  body.push('> `CaseFact.id` 由 Runtime 创建后原样进入 workspace snapshot/session persistence；渲染只读 durable id，不再按数组顺序重建。');
   body.push('');
   if (facts.length) {
     body.push('| id | kind | value | polarity | temporalRole | source |');
     body.push('|---|---|---|---|---|---|');
-    facts.forEach((f, i) => {
-      const id = `CF_${String(i + 1).padStart(3, '0')}`;
+    facts.forEach((f: any, i: number) => {
+      const id = typeof f.id === 'string' ? f.id : `LEGACY_CF_${String(i + 1).padStart(3, '0')}`;
       const cell = (v: unknown) => String(v ?? '-').replace(/\|/g, '\\|').replace(/\n/g, ' ');
       body.push(`| ${id} | ${cell(f.kind)} | ${cell(f.value)} | ${cell(f.polarity)} | ${cell(f.temporalRole)} | ${cell(f.source)} |`);
     });

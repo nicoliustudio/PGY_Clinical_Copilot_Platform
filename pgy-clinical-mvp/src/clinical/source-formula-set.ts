@@ -106,6 +106,9 @@ function hydrateP1(
       preparationPresence: textPresence(f.preparation),
       usage: f.usage,
       usagePresence: textPresence(f.usage),
+      stageGuidance: f.stageGuidance,
+      conditionalGuidance: f.conditionalGuidance,
+      sequence: f.sequence,
       relation,
       clinicalQualification,
       exclusionReason: exclusion?.reason,
@@ -124,6 +127,9 @@ function hydrateP1(
     completeness: 'COMPLETE',
     sourceLevelModifications: shared.values,
     sourceLevelModificationPresence: shared.presence,
+    stageGuidance: parent.stageGuidance,
+    conditionalGuidance: parent.conditionalGuidance,
+    sequence: parent.sequence,
     formulas,
   };
 }

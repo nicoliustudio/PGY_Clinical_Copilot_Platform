@@ -5,6 +5,7 @@ import type {
   DeliberationCoverage,
   DiseaseConcept,
   EvidenceItem,
+  RetrievalEvidenceContext,
   HypothesisCandidate,
   PatternAssessment,
   PatternClaim,
@@ -289,12 +290,17 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         disease: asString(payload.sourceDisease),
         syndrome: asString(payload.sourceSyndrome),
       },
+      retrievalContexts: Array.isArray(payload.retrievalContexts)
+        ? payload.retrievalContexts.filter((x): x is RetrievalEvidenceContext => Boolean(x && typeof x === 'object'))
+        : [],
     };
 
     // H15.5 deterministic dedup：同一 canonical evidence id 不重复写入（不产生重复 evidence.added event）。
     const existing = this.workspace.evidenceState.evidenceItems.find((e) => e.id === id);
     if (existing) {
-      Object.assign(existing, evidence);
+      const mergedRetrieval = [...(existing.retrievalContexts ?? []), ...(evidence.retrievalContexts ?? [])]
+        .filter((ctx, index, all) => all.findIndex((other) => JSON.stringify(other) === JSON.stringify(ctx)) === index);
+      Object.assign(existing, evidence, { retrievalContexts: mergedRetrieval });
       return false;
     }
     this.workspace.evidenceState.evidenceItems.push(evidence);
@@ -317,6 +323,8 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         sourceKind: asString(payload.sourceKind) as 'P1_NORMATIVE_SOURCE' | 'P2_CASE_SOURCE' | undefined,
         retrievalRank: typeof payload.retrievalRank === 'number' ? payload.retrievalRank : undefined,
         retrievalScore: typeof payload.retrievalScore === 'number' ? payload.retrievalScore : undefined,
+        retrievalLane: asString(payload.retrievalLane) as 'NORMATIVE' | 'CASE_ANALOG' | undefined,
+        retrievalLanes: asStringArray(payload.retrievalLanes) as import('../../contracts/workspace.js').FormulaRetrievalLane[],
         selectionUnit: asString(payload.selectionUnit) as 'SOURCE_NODE' | 'CASE_VISIT' | undefined,
         sourceProductRefs: asStringArray(payload.sourceProductRefs),
         sourceProductNames: asStringArray(payload.sourceProductNames),
@@ -328,11 +336,17 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         originatingHypothesisRefs: originating,
       });
       changed = true;
-    } else if (originating.length > 0) {
-      // H15.5 deterministic dedup：同一 candidate id 不重复 present；仅当新增 originating 关联时才视为有意义变化。
-      const before = new Set(existing.originatingHypothesisRefs ?? []);
+    } else {
+      // Candidate identity is stable, but provenance may become richer when the same source is
+      // reached through another recall lane or hypothesis. Merge provenance; never re-present or re-rank.
+      const beforeHypotheses = new Set(existing.originatingHypothesisRefs ?? []);
       existing.originatingHypothesisRefs = Array.from(new Set([...(existing.originatingHypothesisRefs ?? []), ...originating]));
-      if (existing.originatingHypothesisRefs.some((r) => !before.has(r))) changed = true;
+      if (existing.originatingHypothesisRefs.some((r) => !beforeHypotheses.has(r))) changed = true;
+
+      const incomingLanes = asStringArray(payload.retrievalLanes) as import('../../contracts/workspace.js').FormulaRetrievalLane[];
+      const beforeLanes = new Set(existing.retrievalLanes ?? []);
+      existing.retrievalLanes = Array.from(new Set([...(existing.retrievalLanes ?? []), ...incomingLanes]));
+      if (existing.retrievalLanes.some((lane) => !beforeLanes.has(lane))) changed = true;
     }
 
     const sourceId = asString(payload.sourceId);
@@ -444,7 +458,19 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         sourceRefs: [...new Set(evidence.map((item) => item.sourceRef).filter(Boolean))],
       };
     });
-    this.workspace.candidateSetReceipt = { candidateRefs: refs, evidenceBindings, workspaceVersion: this.version };
+    const requiredExactDiseaseCandidateRefs = [...new Set(asStringArray(payload.requiredExactDiseaseCandidateRefs))];
+    const missingRequired = requiredExactDiseaseCandidateRefs.filter((ref) => !refs.includes(ref));
+    if (missingRequired.length > 0) {
+      throw new Error(`candidate recall completeness invariant violated: exact disease family members missing: ${missingRequired.join(', ')}`);
+    }
+    this.workspace.candidateSetReceipt = {
+      candidateRefs: refs,
+      evidenceBindings,
+      requiredExactDiseaseCandidateRefs,
+      exactDiseaseNames: [...new Set(asStringArray(payload.exactDiseaseNames))],
+      recallCompleteness: 'COMPLETE',
+      workspaceVersion: this.version,
+    };
     return changed || refs.length > 0;
   }
 
@@ -1217,17 +1243,41 @@ export interface PatternAssessmentReadinessResult {
 
 export function checkPatternAssessmentReadiness(workspace: ClinicalWorkspace): PatternAssessmentReadinessResult {
   const pa = workspace.patternAssessment;
-  const missing: string[] = [];
-  if (!pa?.primary) {
-    return { ok: false, missing: ['primary'] };
-  }
-  const refs = pa.primary.supportingEvidenceRefs ?? [];
-  if (refs.length === 0) {
-    missing.push('primary.supportingEvidenceRefs');
-  } else if (!refs.some((ref) => isPatientEvidenceRef(workspace, ref))) {
-    missing.push('patient-derived evidence ref');
-  }
+  if (!pa) return { ok: false, missing: ['patternAssessment'] };
+  const missing = validatePatternAssessmentPatientBacking(workspace, pa);
   return { ok: missing.length === 0, missing };
+}
+
+
+
+/**
+ * Clinical Evidence Independence invariant.
+ * Decisive patient-level pattern claims cannot be committed using only knowledge retrieved under a
+ * hypothesis. At least one durable patient fact must directly back primary and current-dominant claims.
+ * This is structural provenance validation, not a medical scoring rule.
+ */
+export function validatePatternAssessmentPatientBacking(
+  workspace: ClinicalWorkspace,
+  assessment: PatternAssessment,
+): string[] {
+  const errors: string[] = [];
+  const validate = (claim: PatternClaim | undefined, label: string, required: boolean) => {
+    if (!claim) {
+      if (required) errors.push(`${label} is required`);
+      return;
+    }
+    const refs = claim.supportingEvidenceRefs ?? [];
+    if (refs.length === 0) {
+      errors.push(`${label}.supportingEvidenceRefs requires patient-fact backing`);
+      return;
+    }
+    if (!refs.some((ref) => isPatientEvidenceRef(workspace, ref))) {
+      errors.push(`${label} must include at least one patient-derived evidence ref`);
+    }
+  };
+  validate(assessment.primary, 'primary', true);
+  validate(assessment.currentDominantMechanism, 'currentDominantMechanism', false);
+  return errors;
 }
 
 /** H15.2：primary 是否关联 formal hypothesis（可观测指标，非硬门禁）。 */

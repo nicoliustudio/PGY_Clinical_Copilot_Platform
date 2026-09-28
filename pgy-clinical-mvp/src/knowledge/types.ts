@@ -23,6 +23,14 @@ export type Kind = 'normative' | 'case' | 'case-formula' | 'diagnostic' | 'stand
 /** 来源流派（School-aware Evidence 元数据）。 */
 export type SourceSchool = 'shen_zhongli' | 'national_standard' | 'classical' | 'general_tcm';
 
+export interface KnowledgeSequenceStep {
+  order: number;
+  instruction: string;
+  stage?: string;
+  condition?: string;
+  transition?: string;
+}
+
 export interface NormativeFormula {
   id: string;
   name: string;
@@ -38,12 +46,12 @@ export interface NormativeFormula {
   /** Optional formula-local source note. */
   sourceNote?: string;
   /**
-   * Reserved typed contract for the upstream knowledge builder (P0-4 指令四).
-   * Staged guidance ("先…待…再…") must be ingested as structured fields, never regex-inferred
-   * by the Runtime. Bump `KnowledgeIndex.schemaVersion` when upstream starts populating these.
+   * Typed stage contract. Upstream authors/builders populate these fields explicitly; Runtime never
+   * regex-infers staged semantics from composition prose. Index schema v5 makes this shape durable.
    */
   stageGuidance?: string[];
   conditionalGuidance?: string[];
+  sequence?: KnowledgeSequenceStep[];
   /** 公式级 source_tier（源自源数据，provenance 字符串，非 doc.sourceTier）。 */
   sourceTier: string;
   /** 公式级 knowledge_role（源自源数据，provenance 字符串）。 */
@@ -76,12 +84,12 @@ export interface KnowledgeDoc {
   /** Parent/source-node modification text that could not safely be attributed to one formula. */
   sourceModifications?: string[];
   /**
-   * Reserved typed contract for the upstream knowledge builder (P0-4 指令四): parent-level staged /
-   * conditional guidance. Runtime must not regex-parse composition to recover these. Bump
-   * `KnowledgeIndex.schemaVersion` when upstream starts populating them.
+   * Parent-level typed stage contract. Runtime must not regex-parse composition to recover these;
+   * index schema v5 preserves them as source truth.
    */
   stageGuidance?: string[];
   conditionalGuidance?: string[];
+  sequence?: KnowledgeSequenceStep[];
   /** 原资产 identity（不通过文本重新推断）。 */
   diseaseId?: string;
   syndromeId?: string;
@@ -116,7 +124,7 @@ export interface IndexBreakdown {
 
 export interface KnowledgeIndex {
   /** Runtime index schema. Bump when durable knowledge shape changes so stale .kb-cache cannot mask new fields. */
-  schemaVersion: 4;
+  schemaVersion: 5;
   version: string;
   releaseVersion: string;
   builtAt: string;

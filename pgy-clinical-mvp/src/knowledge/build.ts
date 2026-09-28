@@ -10,7 +10,7 @@ import type {
   KnowledgeIndex,
   NormativeFormula,
 } from './types.js';
-import { normalizeSourceModificationList, splitInlineFormulaModification } from './source-normalization.js';
+import { normalizeSourceModificationList, normalizeSourceSequence, normalizeSourceTextList, splitInlineFormulaModification } from './source-normalization.js';
 
 function loadJson<T>(p: string): T {
   return JSON.parse(readFileSync(p, 'utf8')) as T;
@@ -62,9 +62,15 @@ interface NormativeEntry {
     inline_modifications?: unknown[];
     usage?: string;
     source_note?: string;
+    stage_guidance?: unknown;
+    conditional_guidance?: unknown;
+    sequence?: unknown;
   }[];
   modification?: string;
   modification_rules?: unknown[];
+  stage_guidance?: unknown;
+  conditional_guidance?: unknown;
+  sequence?: unknown;
 }
 
 interface CaseEntry {
@@ -176,6 +182,9 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
         ...(localPresence !== 'UNKNOWN' ? { sourceModifications: localModifications } : {}),
         ...(usageDeclared ? { usage: str(f.usage) } : {}),
         sourceNote: str(f.source_note) || undefined,
+        ...(Object.prototype.hasOwnProperty.call(f, 'stage_guidance') ? { stageGuidance: normalizeSourceTextList(f.stage_guidance) } : {}),
+        ...(Object.prototype.hasOwnProperty.call(f, 'conditional_guidance') ? { conditionalGuidance: normalizeSourceTextList(f.conditional_guidance) } : {}),
+        ...(Object.prototype.hasOwnProperty.call(f, 'sequence') ? { sequence: normalizeSourceSequence(f.sequence) } : {}),
         sourceTier: str(f.source_tier),
         knowledgeRole: str(f.knowledge_role),
         entityStatus: str(f.entity_status),
@@ -186,6 +195,12 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
     const sourceModifications = sourceModificationsDeclared
       ? normalizeSourceModificationList(n.modification, n.modification_rules)
       : undefined;
+    const stageGuidanceDeclared = Object.prototype.hasOwnProperty.call(n, 'stage_guidance');
+    const conditionalGuidanceDeclared = Object.prototype.hasOwnProperty.call(n, 'conditional_guidance');
+    const sequenceDeclared = Object.prototype.hasOwnProperty.call(n, 'sequence');
+    const stageGuidance = stageGuidanceDeclared ? normalizeSourceTextList(n.stage_guidance) : undefined;
+    const conditionalGuidance = conditionalGuidanceDeclared ? normalizeSourceTextList(n.conditional_guidance) : undefined;
+    const sequence = sequenceDeclared ? normalizeSourceSequence(n.sequence) : undefined;
     const parts = [
       n.disease ? `病名：${n.disease}` : '',
       n.syndrome ? `证型：${n.syndrome}` : '',
@@ -196,8 +211,14 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
         ...((f.sourceModifications ?? []).length > 0 ? [`方剂加减：${(f.sourceModifications ?? []).join('；')}`] : []),
         ...(f.preparation ? [`方剂制备：${f.preparation}`] : []),
         ...(f.usage ? [`方剂用法：${f.usage}`] : []),
+        ...((f.stageGuidance?.length ?? 0) > 0 ? [`方剂阶段指导：${f.stageGuidance!.join('；')}`] : []),
+        ...((f.conditionalGuidance?.length ?? 0) > 0 ? [`方剂条件指导：${f.conditionalGuidance!.join('；')}`] : []),
+        ...((f.sequence?.length ?? 0) > 0 ? [`方剂顺序：${f.sequence!.map((step) => `${step.order}.${step.instruction}`).join('；')}`] : []),
       ]),
       ...((sourceModifications?.length ?? 0) > 0 ? [`来源节点加减：${sourceModifications!.join('；')}`] : []),
+      ...((stageGuidance?.length ?? 0) > 0 ? [`来源阶段指导：${stageGuidance!.join('；')}`] : []),
+      ...((conditionalGuidance?.length ?? 0) > 0 ? [`来源条件指导：${conditionalGuidance!.join('；')}`] : []),
+      ...((sequence?.length ?? 0) > 0 ? [`来源顺序：${sequence!.map((step) => `${step.order}.${step.instruction}`).join('；')}`] : []),
     ].filter(Boolean);
     return baseDoc(layer, {
       id: `P1:${n.id}`,
@@ -212,6 +233,9 @@ function loadNormative(layer: RuntimeLayer): KnowledgeDoc[] {
       sourceSchool: classifySourceSchool(str(n.source)),
       formulas,
       ...(sourceModificationsDeclared ? { sourceModifications: sourceModifications ?? [] } : {}),
+      ...(stageGuidanceDeclared ? { stageGuidance: stageGuidance ?? [] } : {}),
+      ...(conditionalGuidanceDeclared ? { conditionalGuidance: conditionalGuidance ?? [] } : {}),
+      ...(sequenceDeclared ? { sequence: sequence ?? [] } : {}),
       raw: n,
     });
   });
@@ -423,7 +447,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   if (!force && existsSync(cacheFile)) {
     const cached = loadJson<KnowledgeIndex>(cacheFile);
     // Durable knowledge shape changed: stale caches must never hide source-preserved product fields.
-    if (cached.schemaVersion === 4 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
+    if (cached.schemaVersion === 5 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
       return cached;
     }
     console.log('[index] 检测到旧 schema 缓存，重建索引');
@@ -439,7 +463,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const vectors = await embed(docs.map((d) => d.text));
 
   const index: KnowledgeIndex = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: releaseVersion,
     releaseVersion,
     builtAt: new Date().toISOString(),

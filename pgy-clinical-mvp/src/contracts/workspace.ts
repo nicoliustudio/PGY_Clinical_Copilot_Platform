@@ -15,6 +15,35 @@ export type TemporalRole = 'current' | 'historical' | 'post_treatment' | 'baseli
 /** H15.2：证据极性（显性阴性也作为证据保留）。 */
 export type EvidencePolarity = 'present' | 'explicitly_absent' | 'unknown';
 
+/** Retrieval provenance is epistemic context, never patient evidence or ranking authority. */
+export type RetrievalEvidencePurpose =
+  | 'PATIENT_FACT_GROUNDING'
+  | 'DIFFERENTIAL'
+  | 'HYPOTHESIS_SUPPORT'
+  | 'HYPOTHESIS_CHALLENGE'
+  | 'TREATMENT_RECALL'
+  | 'UNATTRIBUTED';
+
+export interface RetrievalEvidenceContext {
+  surface: 'KNOWLEDGE_SEARCH' | 'FORMULA_PATIENT_RECALL' | 'FORMULA_HYPOTHESIS_RECALL' | 'CANONICAL_HYDRATION';
+  query?: string;
+  purpose: RetrievalEvidencePurpose;
+  /** Formal hypotheses that intentionally conditioned this retrieval. Empty = not hypothesis-conditioned. */
+  hypothesisRefs: string[];
+}
+
+/** Candidate recall provenance. Recall lanes may broaden CandidateSet; none owns selection authority. */
+export type FormulaRetrievalLane = 'EXACT_DISEASE_FAMILY' | 'PHENOTYPE' | 'HYPOTHESIS' | 'CASE_ANALOG';
+
+/** Source-authored ordered guidance. Runtime never infers these steps from composition prose. */
+export interface SourceSequenceStep {
+  order: number;
+  instruction: string;
+  stage?: string;
+  condition?: string;
+  transition?: string;
+}
+
 export interface EvidenceItem {
   id: string;
   sourceRef: string;
@@ -40,6 +69,8 @@ export interface EvidenceItem {
     disease?: string;
     syndrome?: string;
   };
+  /** How this knowledge entered the workspace. Multiple contexts are merged on dedup. */
+  retrievalContexts?: RetrievalEvidenceContext[];
 }
 
 export interface CandidateComparison {
@@ -354,6 +385,10 @@ export interface SourceFormulaEntry {
   /** Optional source-preserved usage text for this formula. */
   usage?: string;
   usagePresence?: SourceFieldPresence;
+  /** Formula-local stage/condition/sequence semantics, source-authored and structurally ingested. */
+  stageGuidance?: string[];
+  conditionalGuidance?: string[];
+  sequence?: SourceSequenceStep[];
   /** 来源完整性与临床采纳的分离状态（向后兼容投影；见 clinicalQualification）。 */
   relation: FormulaAdoptionState;
   /**
@@ -399,6 +434,10 @@ export interface SourceFormulaSet {
   sourceLevelModifications: string[];
   /** Presence of source/node-shared modification facts. */
   sourceLevelModificationPresence?: SourceFieldPresence;
+  /** Parent/source-node stage semantics. Never reconstructed from composition text at Runtime. */
+  stageGuidance?: string[];
+  conditionalGuidance?: string[];
+  sequence?: SourceSequenceStep[];
   formulas: SourceFormulaEntry[];
 }
 
@@ -553,6 +592,8 @@ export interface CandidateReference {
   retrievalRank?: number;
   retrievalScore?: number;
   retrievalLane?: 'NORMATIVE' | 'CASE_ANALOG';
+  /** Additive recall provenance; exact-family completeness is represented explicitly here. */
+  retrievalLanes?: FormulaRetrievalLane[];
   selectionUnit?: 'SOURCE_NODE' | 'CASE_VISIT';
   sourceProductRefs?: string[];
   sourceProductNames?: string[];
@@ -576,6 +617,14 @@ export interface CaseFact {
   temporalRole?: TemporalRole;
   /** H15.2：极性（present / explicitly_absent / unknown）。 */
   polarity?: EvidencePolarity;
+  /** Time at which this fact was observed/extracted into the current encounter. */
+  observedAt?: string;
+  /** Explicit event/examination time normalized from source text or model-provided temporal evidence. */
+  eventTime?: string;
+  /** Source-preserved relative time phrase; never collapsed into current/historical by the model alone. */
+  relativeTimeExpression?: string;
+  /** Audit trail when deterministic normalization overrides an inconsistent model temporalRole. */
+  reportedTemporalRole?: TemporalRole;
 }
 
 /**
@@ -644,6 +693,10 @@ export interface CandidateSetEvidenceBinding {
 export interface CandidateSetReceipt {
   candidateRefs: string[];
   evidenceBindings: CandidateSetEvidenceBinding[];
+  /** Exact canonical disease family members that must survive retrieval ranking/truncation. */
+  requiredExactDiseaseCandidateRefs?: string[];
+  exactDiseaseNames?: string[];
+  recallCompleteness?: 'COMPLETE';
   workspaceVersion: number;
 }
 

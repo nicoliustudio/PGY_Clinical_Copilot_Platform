@@ -85,6 +85,10 @@ export interface EvidenceViewItem {
   relatedCandidates: string[];
   supportingSignals: string[];
   contradictingSignals: string[];
+  evidenceKind?: EvidenceItem['evidenceKind'];
+  temporalRole?: EvidenceItem['temporalRole'];
+  polarity?: EvidenceItem['polarity'];
+  retrievalContexts?: EvidenceItem['retrievalContexts'];
 }
 
 export interface HypothesisViewItem {
@@ -106,6 +110,8 @@ export interface CandidateViewItem {
   composition?: string[];
   status: 'presented' | 'selected' | 'rejected' | 'unknown';
   hypothesisRefs: string[];
+  retrievalLane?: CandidateReference['retrievalLane'];
+  retrievalLanes?: CandidateReference['retrievalLanes'];
 }
 
 export interface DeliberationView {
@@ -124,6 +130,7 @@ export interface DeliberationView {
 
 export interface WorkspaceView {
   facts: unknown[];
+  caseFacts: ClinicalWorkspace['caseFacts'];
   informationGaps: string[];
   uncertainties: string[];
   safetyDisposition: ClinicalWorkspace['safetyDisposition'];
@@ -133,6 +140,7 @@ export interface WorkspaceView {
   hypotheses: HypothesisViewItem[];
   candidates: CandidateViewItem[];
   deliberation: DeliberationView;
+  candidateSetReceipt?: ClinicalWorkspace['candidateSetReceipt'];
 }
 
 export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
@@ -142,6 +150,7 @@ export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
 
   return {
     facts: ws.facts,
+    caseFacts: ws.caseFacts.map((fact) => ({ ...fact })),
     informationGaps: ws.informationGaps,
     uncertainties: ws.uncertainties,
     safetyDisposition: ws.safetyDisposition,
@@ -157,6 +166,10 @@ export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
       relatedCandidates: e.relatedCandidates,
       supportingSignals: e.supportingSignals,
       contradictingSignals: e.contradictingSignals,
+      evidenceKind: e.evidenceKind,
+      temporalRole: e.temporalRole,
+      polarity: e.polarity,
+      retrievalContexts: e.retrievalContexts?.map((ctx) => ({ ...ctx, hypothesisRefs: [...ctx.hypothesisRefs] })),
     })),
     hypotheses: ws.hypothesisState.hypotheses.map((h: HypothesisCandidate) => ({
       id: h.id,
@@ -176,12 +189,15 @@ export function buildWorkspaceView(ws: ClinicalWorkspace): WorkspaceView {
       composition: c.composition,
       status: statusById.get(c.id) ?? 'unknown',
       hypothesisRefs: c.originatingHypothesisRefs ?? [],
+      retrievalLane: c.retrievalLane,
+      retrievalLanes: c.retrievalLanes,
     })),
     deliberation: {
       rows: buildComparisonMatrix(ws).rows.map((r) => ({ ...r })),
       assessments: ws.deliberationState.assessments.map((a) => ({ ...a })),
       coverage: ws.deliberationState.coverage.map((c) => ({ ...c })),
     },
+    candidateSetReceipt: ws.candidateSetReceipt ? JSON.parse(JSON.stringify(ws.candidateSetReceipt)) : undefined,
   };
 }
 

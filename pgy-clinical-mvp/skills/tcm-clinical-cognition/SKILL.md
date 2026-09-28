@@ -112,6 +112,28 @@ A source's syndrome/disease label describes the knowledge source, not the patien
 - Retrieval should preserve both relevant source roles when available; source-role comparison belongs to clinical selection, not to a P1-or-P2 fallback switch.
 - There is no fixed S1 → Standard → P1 → P2 pipeline; choose evidence according to the current decision while preserving source authority.
 
+## Knowledge Applicability Premises vs Patient Facts
+
+Retrieved knowledge may declare premises about which patients it applies to: a source case's patient, an asset's target population, or a modality's suitability range. Such a premise is metadata about the knowledge — it is never a conclusion about this patient.
+
+For every knowledge item you intend to actually use, answer one question: **does this patient's known state satisfy this item's premises?**
+
+Only three outcomes exist:
+
+- **Satisfied** — reasonable to use it as support; keep the premise refs alongside the evidence.
+- **Explicitly not satisfied** — the item does not hold for this patient. Do not use it as support, and do not rewrite the patient's state so that it fits.
+- **Undeterminable because the patient state is unknown** — this is UNKNOWN, not "no".
+
+Rules:
+
+- Never convert UNKNOWN into a value by inference. Do not derive demographic or physiological state (sex, age, pregnancy/lactation, constitution, comorbidity, and so on) from symptoms, disease names, or retrieved cases. The typical population of a topic does not by itself establish a patient fact.
+- Premise dimensions are determined by the knowledge you actually retrieved — not by a pre-enumerated checklist, and never by keyword → dimension mapping.
+- If a premise conflicts with a stated patient fact, keep the conflict visible; do not silently choose one side.
+- If an undeterminable premise could change disease, pattern, treatment principle, base formula or selection, safety, or review status, carry it in `uncertainty` — use `clarification` only when it truly blocks the minimal clinical recommendation. Otherwise still carry it in `uncertainty`, alongside the Kernel-set `reviewRequired`.
+- Undeterminable but non-decisive premises are recorded as well. Silent omission is not allowed.
+
+This is one generic question about premises, not a per-dimension rule set.
+
 ## Clinical Reasoning Dependencies
 
 Clinical treatment is organized around professional dependencies:

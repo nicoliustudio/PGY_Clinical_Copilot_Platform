@@ -15,6 +15,7 @@ import { ClinicalWorkspaceStore, createClinicalWorkspace } from '../workspace/cl
 import { deriveGraphV21 } from '../control-plane/control-plane-v21-session.js';
 import { CommitLedger } from '../commit/commit-ledger.js';
 import type { ModelExecutionReceipt } from '../../model/model-registry.js';
+import { normalizeCaseFacts } from '../../clinical/case-fact-normalization.js';
 
 export interface RuntimePreparerDependencies {
   understanding: ClinicalUnderstandingPort;
@@ -65,16 +66,9 @@ export class RuntimePreparer implements RuntimePreparationPort {
 
     const workspace = createClinicalWorkspace();
     const workspaceStore = new ClinicalWorkspaceStore(workspace, runId);
-    workspace.facts = [...understanding.facts];
-    workspace.caseFacts = understanding.facts.map((f, i) => ({
-      id: `CF_${String(i + 1).padStart(3, '0')}`,
-      kind: f.kind,
-      value: f.value,
-      source: f.source,
-      evidenceKind: 'patient',
-      temporalRole: f.temporalRole,
-      polarity: f.polarity,
-    }));
+    workspace.caseFacts = normalizeCaseFacts(understanding.facts);
+    // `facts` is a compatibility projection of the durable CaseFact truth; identity is never stripped.
+    workspace.facts = workspace.caseFacts.map((fact) => ({ ...fact }));
     workspace.informationGaps = understanding.informationGaps.map((g) => g.question);
     workspace.uncertainties = understanding.uncertainties.map((u) => u.item);
     workspace.safetyDisposition =

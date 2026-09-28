@@ -1254,11 +1254,19 @@ $('#send').addEventListener('click', () => {
 });
 
 async function send() {
-  const s = activeSession();
-  if (!s) return;
   const text = inputEl.value.trim();
   if (!text) return;
-  if (s.status === 'running') return;
+
+  // 新浏览器 / 清空 localStorage 后没有任何会话：就地建一个再发送。
+  // 若此处直接返回，发送按钮会静默无响应（既不报错也不发请求）。
+  let s = activeSession();
+  if (s && s.status === 'running') return;
+  if (!s) {
+    s = createSession();
+    state.sessions.unshift(s);
+    if (state.sessions.length > SESSION_STORE_MAX) state.sessions.pop();
+    state.activeId = s.id;
+  }
 
   // 进入运行态：本次运行的所有中间状态都挂在该会话对象上，切换会话互不影响、可并行。
   s.status = 'running';

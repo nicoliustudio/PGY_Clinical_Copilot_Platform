@@ -84,3 +84,71 @@ export function normalizeSourceModificationList(...values: unknown[]): string[] 
   for (const value of values) push(value);
   return out;
 }
+
+
+/** Generic source text-list normalization. It preserves authored strings and never infers semantics. */
+export function normalizeSourceTextList(...values: unknown[]): string[] {
+  const out: string[] = [];
+  const push = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) push(item);
+      return;
+    }
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (text && !out.includes(text)) out.push(text);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const obj = value as Record<string, unknown>;
+    for (const key of ['text', 'statement', 'instruction', 'raw']) {
+      const candidate = obj[key];
+      if (typeof candidate === 'string' && candidate.trim()) {
+        const text = candidate.trim();
+        if (!out.includes(text)) out.push(text);
+        return;
+      }
+    }
+  };
+  for (const value of values) push(value);
+  return out;
+}
+
+export interface NormalizedSequenceStep {
+  order: number;
+  instruction: string;
+  stage?: string;
+  condition?: string;
+  transition?: string;
+}
+
+/**
+ * Normalize an already-structured sequence field. Strings become ordered source instructions;
+ * objects preserve explicit stage/condition/transition keys. This never parses composition prose.
+ */
+export function normalizeSourceSequence(value: unknown): NormalizedSequenceStep[] {
+  const items = Array.isArray(value) ? value : (value === undefined || value === null ? [] : [value]);
+  const out: NormalizedSequenceStep[] = [];
+  for (const item of items) {
+    if (typeof item === 'string') {
+      const instruction = item.trim();
+      if (instruction) out.push({ order: out.length + 1, instruction });
+      continue;
+    }
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const instruction = [obj.instruction, obj.text, obj.statement]
+      .find((candidate) => typeof candidate === 'string' && candidate.trim()) as string | undefined;
+    if (!instruction) continue;
+    const order = typeof obj.order === 'number' && Number.isFinite(obj.order) ? obj.order : out.length + 1;
+    const optional = (key: string) => typeof obj[key] === 'string' && (obj[key] as string).trim() ? (obj[key] as string).trim() : undefined;
+    out.push({
+      order,
+      instruction: instruction.trim(),
+      ...(optional('stage') ? { stage: optional('stage') } : {}),
+      ...(optional('condition') ? { condition: optional('condition') } : {}),
+      ...(optional('transition') ? { transition: optional('transition') } : {}),
+    });
+  }
+  return out.sort((a, b) => a.order - b.order);
+}
