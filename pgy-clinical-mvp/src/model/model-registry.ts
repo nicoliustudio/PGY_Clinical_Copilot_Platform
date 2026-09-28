@@ -11,18 +11,18 @@ import type { ModelProfile } from '../contracts/runtime.js';
  * 语言模型在**每次调用时**按当前选择解析，因此切换后无需重启即可生效。
  *
  * 边界：
- * - 本模块只决定「用哪个模型 / 是否发送 enable_thinking」这一事实，不做任何临床判断；
+ * - 本模块只决定「用哪个模型 / 是否发送思考开关」这一事实，不做任何临床判断；
  * - 目录内每个模型的 thinking 语义都来自实测（见 thinking 字段注释），不靠文档推断，
  *   避免出现「点了没反应」或「发送参数直接 400」的死开关。
  */
 
-export type ModelChannel = 'official' | 'aliyun';
+export type ModelChannel = 'official' | 'aliyun' | 'ark';
 
 /**
- * 推理开关的实际可用性（实测三态，决定前端开关是否可点、以及是否发送 enable_thinking）：
- * - `toggle`：可通过 `enable_thinking` 开关。部分模型默认开（可关），部分默认关（可开）。
- * - `always`：总是思考，前端开关置灰。**绝不发送该参数**——其中 glm-5.3 / MiniMax-M2.5 实测
- *   发送 `enable_thinking:false` 会直接返回 HTTP 400。
+ * 推理开关的实际可用性（实测三态，决定前端开关是否可点、以及是否发送思考开关参数）：
+ * - `toggle`：可开关思考。参数形态随通道方言（见 thinkingParamFor）：
+ *   百炼用 `enable_thinking`，火山方舟 / DeepSeek 官方用 `thinking.type`。部分模型默认开（可关），部分默认关（可开）。
+ * - `always`：总是思考，前端开关置灰。**绝不发送该参数**——部分模型实测发送关闭值会直接返回 HTTP 400。
  * - `none`：非推理模型，本就不产生 reasoning，前端开关置灰。
  */
 export type ThinkingMode = 'toggle' | 'always' | 'none';
@@ -68,6 +68,7 @@ export interface ModelOption {
 const CHANNEL_LABEL: Record<ModelChannel, string> = {
   official: 'DeepSeek 官方',
   aliyun: '阿里云百炼',
+  ark: '火山方舟',
 };
 
 type ModelOptionSeed = Omit<ModelOption, 'channelLabel'>;
@@ -78,6 +79,11 @@ const CATALOG: ModelOption[] = ([
   { id: 'official:deepseek-chat', label: 'deepseek-chat', channel: 'official', modelId: 'deepseek-chat', thinking: 'none', defaultThinking: false, budget: 'ignored', measured: '实测 107ms · 非推理，全局最快基线' },
   { id: 'official:deepseek-flash', label: 'deepseek-flash', channel: 'official', modelId: 'deepseek-flash', thinking: 'always', defaultThinking: true, budget: 'ignored', measured: '思考型；官方忽略开关，无法关闭' },
   { id: 'official:deepseek-v4-pro', label: 'deepseek-v4-pro', channel: 'official', modelId: 'deepseek-v4-pro', thinking: 'always', defaultThinking: true, budget: 'ignored', measured: '思考型；官方忽略开关，无法关闭' },
+  // ---- 火山方舟 · Agent Plan（OpenAI 兼容） ----
+  // 思考开关走 `thinking.type`（见 thinkingParamFor）；实测 disabled→0 / enabled 有 reasoning tok。
+  // 注意：火山套餐不支持 deepseek-chat / deepseek-flash 等旧名，可用名为下面这两个。
+  { id: 'ark:deepseek-v4-flash', label: 'deepseek-v4-flash', channel: 'ark', modelId: 'deepseek-v4-flash', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '实测 关思考 reasoning=0 / 开思考 reasoning≈361 tok；预算档位不适用（方舟用 reasoning_effort）' },
+  { id: 'ark:deepseek-v4-pro', label: 'deepseek-v4-pro', channel: 'ark', modelId: 'deepseek-v4-pro', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '实测 关思考 reasoning=0 / 开思考 reasoning≥64 tok；预算档位不适用' },
 
   // ---- 阿里云百炼 · 千问（实测支持思考预算） ----
   { id: 'aliyun:qwen3.8-max', label: 'qwen3.8-max', channel: 'aliyun', modelId: 'qwen3.8-max', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '推理任务实测 206s（思考 7258 tok）→ 预算256 降至 37.8s' },
@@ -151,7 +157,9 @@ function optionById(id: string): ModelOption | undefined {
 
 /** 通道凭据是否就绪（缺 key 的通道模型在前端置灰，而不是变成死按钮）。 */
 function channelReady(channel: ModelChannel): boolean {
-  return channel === 'official' ? config.llm.apiKey.trim().length > 0 : config.llm.aliyun.apiKey.trim().length > 0;
+  if (channel === 'official') return config.llm.apiKey.trim().length > 0;
+  if (channel === 'ark') return config.llm.ark.apiKey.trim().length > 0;
+  return config.llm.aliyun.apiKey.trim().length > 0;
 }
 
 /** 规范化预算档位：实测忽略该参数的模型一律落到 `off`，不保留一个不会生效的档位。 */
@@ -382,13 +390,25 @@ export function describeActiveModel(): string {
 const modelCache = new Map<string, LanguageModel>();
 
 /**
+ * 思考开关的参数形态按通道方言区分（同一语义，字段不同，混用会 400）：
+ * - 阿里云百炼：`enable_thinking: boolean`
+ * - 火山方舟 / DeepSeek 官方：`thinking: { type: 'enabled' | 'disabled' }`
+ * 仅在 `thinking==='toggle'` 时经 `transformRequestBody` 注入；`always`/`none` 一律不发送。
+ */
+function thinkingParamFor(channel: ModelChannel, thinking: boolean): Record<string, unknown> {
+  return channel === 'aliyun'
+    ? { enable_thinking: thinking }
+    : { thinking: { type: thinking ? 'enabled' : 'disabled' } };
+}
+
+/**
  * Resolve one frozen model selection. New run execution must pass an immutable run receipt;
  * process-global UI selection is only a convenience default for the *next* run.
  *
- * 参数注入（两者都是阿里云百炼的非 OpenAI 标准参数，经 `transformRequestBody` 透传）：
- * - `enable_thinking` 只在 `thinking==='toggle'` 时注入：`always`/`none` 发送无意义，
- *   其中 glm-5.3 / MiniMax-M2.5 实测发送 `false` 会直接 400。
- * - `thinking_budget` 只在**实测生效**（`budget==='verified'`）且推理已开启且档位非 `off` 时注入；
+ * 参数注入（非 OpenAI 标准参数，经 `transformRequestBody` 透传；形态随通道方言，见 `thinkingParamFor`）：
+ * - 思考开关只在 `thinking==='toggle'` 时注入：`always`/`none` 发送无意义，
+ *   其中 glm-5.3 / MiniMax-M2.5 实测发送 `false` 会直接 400，故一律不发送。
+ * - `thinking_budget`（仅阿里云）只在**实测生效**（`budget==='verified'`）且推理已开启且档位非 `off` 时注入；
  *   实测被忽略的模型（DeepSeek 官方、glm 系、deepseek-v4.1-flash 等）一律不发送，
  *   避免出现「档位可调但请求里根本没有这个参数」的假开关。
  */
@@ -403,7 +423,9 @@ export function resolveLanguageModelFor(frozen: FrozenModelSelection): LanguageM
 
   const credentials = option.channel === 'official'
     ? { baseURL: config.llm.baseURL, apiKey: config.llm.apiKey }
-    : { baseURL: config.llm.aliyun.baseURL, apiKey: config.llm.aliyun.apiKey };
+    : option.channel === 'ark'
+      ? { baseURL: config.llm.ark.baseURL, apiKey: config.llm.ark.apiKey }
+      : { baseURL: config.llm.aliyun.baseURL, apiKey: config.llm.aliyun.apiKey };
 
   const needsBodyTransform = sendsThinking || budgetTokens !== undefined;
   const provider = createOpenAICompatible({
@@ -414,7 +436,7 @@ export function resolveLanguageModelFor(frozen: FrozenModelSelection): LanguageM
       ? {
           transformRequestBody: (body: Record<string, unknown>) => {
             const next: Record<string, unknown> = { ...body };
-            if (sendsThinking) next.enable_thinking = frozen.thinking;
+            if (sendsThinking) Object.assign(next, thinkingParamFor(option.channel, frozen.thinking));
             if (budgetTokens !== undefined) next.thinking_budget = budgetTokens;
             return next;
           },

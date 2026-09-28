@@ -36,7 +36,7 @@ test('model catalog: id 唯一、分组为官方 + 阿里两通道、label 与 A
   const catalog = getModelCatalog();
   const ids = catalog.options.map((option) => option.id);
   assert.equal(new Set(ids).size, ids.length, 'id 必须唯一');
-  assert.deepEqual([...new Set(catalog.options.map((option) => option.channelLabel))], ['DeepSeek 官方', '阿里云百炼']);
+  assert.deepEqual([...new Set(catalog.options.map((option) => option.channelLabel))], ['DeepSeek 官方', '火山方舟', '阿里云百炼']);
   for (const option of catalog.options) {
     assert.equal(option.id, `${option.channel}:${option.modelId}`, `id 必须由 channel + modelId 组成：${option.id}`);
     assert.equal(option.label, option.modelId);
@@ -52,6 +52,8 @@ test('model catalog: thinking 三态与开关可用性一致，且 always 不依
     assert.equal(typeof option.defaultThinking, 'boolean');
   }
   assert.equal(optionById('official:deepseek-chat')?.thinking, 'none');
+  assert.equal(optionById('ark:deepseek-v4-flash')?.thinking, 'toggle');
+  assert.equal(optionById('ark:deepseek-v4-pro')?.thinking, 'toggle');
   assert.equal(optionById('aliyun:glm-5.3')?.thinking, 'always');
   assert.equal(optionById('aliyun:MiniMax-M2.5')?.thinking, 'always');
   assert.equal(optionById('aliyun:qwen3.6-flash')?.thinking, 'toggle');

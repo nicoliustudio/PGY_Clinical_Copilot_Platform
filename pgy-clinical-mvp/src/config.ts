@@ -30,6 +30,11 @@ export const config = {
       baseURL: process.env.LLM_ALIYUN_BASE_URL ?? 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       apiKey: process.env.LLM_ALIYUN_API_KEY ?? '',
     },
+    /** 火山方舟 Agent Plan 通道；与官方/百炼并存，未配置 key 时该通道模型在前端置灰。 */
+    ark: {
+      baseURL: process.env.LLM_ARK_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/plan/v3',
+      apiKey: process.env.LLM_ARK_API_KEY ?? '',
+    },
   },
   embedding: {
     baseURL: req('EMBEDDING_BASE_URL'),
