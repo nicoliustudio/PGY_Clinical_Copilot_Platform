@@ -110,6 +110,7 @@ A source's syndrome/disease label describes the knowledge source, not the patien
 - Use `DIAGNOSTIC_STANDARD` only when disease boundary / diagnostic basis is materially uncertain.
 - `NORMATIVE_TREATMENT` (P1) and `CLINICAL_CASE` (P2) are independent retrieval lanes with different source roles. P2 remains historical case truth and never becomes normative merely because it is similar.
 - Retrieval should preserve both relevant source roles when available; source-role comparison belongs to clinical selection, not to a P1-or-P2 fallback switch.
+- When both `NORMATIVE_TREATMENT` (P1) and `CLINICAL_CASE` (P2) candidates are clinically applicable to this patient and supported by current facts, the normative source (P1) is the default authority for the base formula; a historical case formula (P2) is a non-normative draft reference, used only when the normative source is clinically inapplicable, or its evidence is insufficient (`INSUFFICIENT_EVIDENCE` / `LEAVE_UNASSESSED`). Source authority is one consideration within clinical selection: it never overrides patient facts, never turns "similar" into "normative", and never removes a candidate from comparison.
 - There is no fixed S1 → Standard → P1 → P2 pipeline; choose evidence according to the current decision while preserving source authority.
 
 ## Knowledge Applicability Premises vs Patient Facts
