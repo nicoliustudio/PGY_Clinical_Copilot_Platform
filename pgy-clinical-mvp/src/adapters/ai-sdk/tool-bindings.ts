@@ -8,7 +8,7 @@ import { config } from '../../config.js';
 import { searchNormativeWithDiagnostics, validateNormativeFormulaCached, getCanonicalFormula, recordFormulaValidation } from '../../clinical/formula.js';
 import { searchFormulaCandidates, getFormulaEvidence, formulaSearchStateSignature } from '../../clinical/formula-evidence.js';
 import { searchModificationEvidence } from '../../clinical/modification-evidence.js';
-import { bindCanonicalSources } from '../../clinical/source-binding.js';
+import { bindCanonicalSources, sourceBindableOutcomes } from '../../clinical/source-binding.js';
 import { selectCanonicalFormula } from '../../clinical/formula-selection-transaction.js';
 import { adoptCanonicalModifications } from '../../clinical/modification-adoption-transaction.js';
 import { recordSearchReceipt, recordHydrationReceipt, evidenceRetrievalProgress } from '../../clinical/capability-evidence.js';
@@ -1064,45 +1064,53 @@ export const DEFAULT_AI_SDK_TOOL_BINDINGS: AiSdkToolBindings = {
       return result;
     },
   }),
-  'source.bind': (context) => tool({
-    description: 'Kernel SOURCE_BOUND transaction for one exact outcome. The model supplies hydrated asset ids; Runtime validates provider ownership, hydration receipts, identity and content hash, writes an immutable SourceBindingReceipt, and deterministically commits delivery in the same transaction.',
-    inputSchema: z.object({
-      outcome: z.string().min(1),
-      assetRefs: z.array(z.string().min(1)).min(1),
-    }),
-    execute: async ({ outcome, assetRefs }) => {
-      const result = bindCanonicalSources(context, outcome, assetRefs);
-      if (!result.ok) {
-        return toolFailure(result.code, `source binding failed for ${outcome}: ${result.code}`, {
-          outcome,
-          details: result.details,
-          allowedNextActions: result.code === 'SOURCE_BINDING_MISMATCH'
-            ? ['hydrate the exact canonical asset for this outcome with the provider-declared hydration tool, then call source.bind again']
-            : ['repair the deterministic source binding precondition'],
-        });
-      }
-      refreshControlPlaneV21(context);
-      // Phase 5：source binding 完成后，delivery.commit 是确定性的机械动作。
-      // Runtime 直接推进到 terminal delivery，不再让 LLM 记得"再调一次 delivery.commit"。
-      const commitResult = await commitDeliveryOutcome(context, outcome);
-      refreshControlPlaneV21(context);
-      if (!commitResult.ok) {
-        return toolFailure(commitResult.code, `delivery commit failed for ${outcome}: ${commitResult.code}`, {
-          outcome,
-          details: commitResult.details,
-          allowedNextActions: ['repair the deterministic commit precondition, then retry delivery.commit'],
-        });
-      }
-      return {
-        ok: true,
-        reused: result.reused,
-        receipt: result.receipt,
-        commitId: commitResult.record.commitId,
-        deliveryStatus: commitResult.record.deliveryStatus,
-        executionClearance: commitResult.record.executionClearance,
-      };
-    },
-  }),
+  'source.bind': (context) => {
+    // 合法 outcome 由 obligation graph + provider manifest 派生（无业务枚举）；把它写进工具契约，
+    // 直接消除「用内部 artifact 拼写当 outcome」这一类无进展重试。
+    const bindable = sourceBindableOutcomes(context);
+    const legalNote = bindable.length > 0 ? ` Legal outcomes (copy one exactly): ${bindable.join(', ')}.` : '';
+    return tool({
+      description: `Kernel SOURCE_BOUND transaction for one exact outcome. The model supplies hydrated asset ids; Runtime validates provider ownership, hydration receipts, identity and content hash, writes an immutable SourceBindingReceipt, and deterministically commits delivery in the same transaction.${legalNote}`,
+      inputSchema: z.object({
+        outcome: z.string().min(1),
+        assetRefs: z.array(z.string().min(1)).min(1),
+      }),
+      execute: async ({ outcome, assetRefs }) => {
+        const result = bindCanonicalSources(context, outcome, assetRefs);
+        if (!result.ok) {
+          return toolFailure(result.code, `source binding failed for ${outcome}: ${result.code}`, {
+            outcome,
+            details: result.details,
+            allowedNextActions: result.code === 'SOURCE_BINDING_MISMATCH'
+              ? ['hydrate the exact canonical asset for this outcome with the provider-declared hydration tool, then call source.bind again']
+              : result.code === 'NO_PROVIDER'
+                ? [`copy one of the exact legal outcomes declared by the provider${bindable.length > 0 ? `: ${bindable.join(', ')}` : ''}, then call source.bind again`]
+                : ['repair the deterministic source binding precondition'],
+          });
+        }
+        refreshControlPlaneV21(context);
+        // Phase 5：source binding 完成后，delivery.commit 是确定性的机械动作。
+        // Runtime 直接推进到 terminal delivery，不再让 LLM 记得"再调一次 delivery.commit"。
+        const commitResult = await commitDeliveryOutcome(context, outcome);
+        refreshControlPlaneV21(context);
+        if (!commitResult.ok) {
+          return toolFailure(commitResult.code, `delivery commit failed for ${outcome}: ${commitResult.code}`, {
+            outcome,
+            details: commitResult.details,
+            allowedNextActions: ['repair the deterministic commit precondition, then retry delivery.commit'],
+          });
+        }
+        return {
+          ok: true,
+          reused: result.reused,
+          receipt: result.receipt,
+          commitId: commitResult.record.commitId,
+          deliveryStatus: commitResult.record.deliveryStatus,
+          executionClearance: commitResult.record.executionClearance,
+        };
+      },
+    });
+  },
   'delivery.adopt': (context) => tool({
     description: 'Explicitly extend the effective delivery contract with one exact registered outcome discovered during clinical reasoning. Adoption creates obligations only; it never creates a product or DELIVERED state.',
     inputSchema: z.object({ outcome: z.string().min(1), reason: z.string().optional() }),

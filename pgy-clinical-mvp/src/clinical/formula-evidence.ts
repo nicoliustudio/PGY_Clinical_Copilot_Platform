@@ -435,15 +435,30 @@ export async function searchFormulaCandidates(
   const exactDiseaseNames = resolvedDiseaseIdentityNames(workspace);
   const exactFamily = exactDiseaseFamilyHits(idx.docs, scopes, exactDiseaseNames);
 
-  // 1b. Patient phenotype recall is bounded, because it is discovery evidence rather than identity authority.
-  const sourceRecall = patientQuery
-    ? await searchWithDiagnostics(patientQuery, topK, scopes, 'formula.search_candidates', {
-        role: 'NORMATIVE_TREATMENT',
-        denseRecallGuard: Math.min(3, topK),
-      })
-    : null;
-  // 1c. Hypothesis-conditioned recall is also bounded and explicitly separate from the exact family lane.
-  const hypothesisSearch = await searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'NORMATIVE_TREATMENT' });
+  // 1b–2 四条 recall lane 相互独立（各自只读知识索引、无共享可变状态），并发发出把多轮
+  // embed/rerank 远程往返压成一轮；每条 lane 的 query / role / kind / denseRecallGuard
+  // 与串行版本完全一致，结果仍按原 lane 顺序确定性合并，语义与候选集不变。
+  const [
+    sourceRecall, // 1b. Patient phenotype recall（有界：它是 discovery 证据而非身份权威）
+    hypothesisSearch, // 1c. Hypothesis-conditioned recall（有界，且与 exact family lane 显式分离）
+    p2PatientRecall,
+    p2HypothesisSearch,
+  ] = await Promise.all([
+    patientQuery
+      ? searchWithDiagnostics(patientQuery, topK, scopes, 'formula.search_candidates', {
+          role: 'NORMATIVE_TREATMENT',
+          denseRecallGuard: Math.min(3, topK),
+        })
+      : Promise.resolve(null),
+    searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'NORMATIVE_TREATMENT' }),
+    // 2. Historical-case lane is independent from the normative lane. A small wording change in the
+    // model-authored clinical projection must not flip the *entire* candidate universe between P1 and
+    // P2. Both source roles are recalled; authority remains typed and final selection remains clinical.
+    patientQuery
+      ? searchWithDiagnostics(patientQuery, topK, scopes, 'formula.search_candidates', { role: 'CLINICAL_CASE', kind: 'case-formula' })
+      : Promise.resolve(null),
+    searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'CLINICAL_CASE', kind: 'case-formula' }),
+  ]);
   const applicableHits = mergeP1RecallHits(
     exactFamily,
     laneHits((sourceRecall?.hits ?? []).filter((h) => h.authority === 'P1'), 'PHENOTYPE'),
@@ -454,13 +469,6 @@ export async function searchFormulaCandidates(
     .filter((candidate) => candidate.retrievalLanes?.includes('EXACT_DISEASE_FAMILY'))
     .map((candidate) => candidate.candidateRef);
 
-  // 2. Historical-case lane is independent from the normative lane. A small wording change in the
-  // model-authored clinical projection must not flip the *entire* candidate universe between P1 and
-  // P2. Both source roles are recalled; authority remains typed and final selection remains clinical.
-  const p2PatientRecall = patientQuery
-    ? await searchWithDiagnostics(patientQuery, topK, scopes, 'formula.search_candidates', { role: 'CLINICAL_CASE', kind: 'case-formula' })
-    : null;
-  const p2HypothesisSearch = await searchWithDiagnostics(query, topK, scopes, 'formula.search_candidates', { role: 'CLINICAL_CASE', kind: 'case-formula' });
   const p2Hits = mergeHitsBySource(p2PatientRecall?.hits ?? [], p2HypothesisSearch.hits);
   const p2Candidates = buildP2CandidateCards(p2Hits);
 

@@ -78,6 +78,7 @@ export interface ClinicalCompletionState {
   formulaSelected: boolean;
   formulaSelectedRef?: string;
   obligationComplete: boolean;
+  /** 缺失的完成义务：优先呈现 canonical outcome（内部 artifact key 已投影），供模型对齐词汇。 */
   obligationMissing: string[];
 }
 
@@ -90,19 +91,28 @@ export interface FormulaDecisionState {
 }
 
 /** H15.2.8：Kernel 确定性推导完成状态，复用既有 completion 检查（不新增临床规则）。 */
-function buildClinicalCompletionState(workspace: ClinicalWorkspace, requiredArtifacts?: string[]): ClinicalCompletionState {
+function buildClinicalCompletionState(
+  workspace: ClinicalWorkspace,
+  requiredArtifacts?: string[],
+  requiredArtifactLabels?: ReadonlyMap<string, string>,
+): ClinicalCompletionState {
   const core = checkClinicalCoreCompletion(workspace);
   const obligation = requiredArtifacts
     ? checkCompletionAgainst(workspace, requiredArtifacts)
     : checkClinicalCompletion(workspace);
   const selectedRef = workspace.clinicalDecisionSpine.formulaSelection?.selectedCandidateRef;
+  // 完成为「缺什么」的判定用内部 key（唯一真源）；对模型呈现时改投影成 canonical outcome，
+  // 避免把 capabilityDelivery:… 这类内部拼写当成可填值。未登记的 key 原样保留。
+  const obligationMissing = requiredArtifactLabels && requiredArtifactLabels.size > 0
+    ? [...new Set(obligation.missingArtifacts.map((key) => requiredArtifactLabels.get(key) ?? key))]
+    : obligation.missingArtifacts;
   return {
     coreComplete: core.ok,
     coreMissing: core.missing,
     formulaSelected: typeof selectedRef === 'string' && selectedRef.trim() !== '',
     formulaSelectedRef: selectedRef,
     obligationComplete: obligation.ok,
-    obligationMissing: obligation.missingArtifacts,
+    obligationMissing,
   };
 }
 
@@ -125,6 +135,7 @@ export function buildClinicalWorkingView(
   retrievalFeedback?: RecentRetrievalFeedback,
   precomputedDecisionState?: DecisionState,
   completionRequiredArtifacts?: string[],
+  completionArtifactLabels?: ReadonlyMap<string, string>,
 ): ClinicalWorkingView {
   const decisionState = precomputedDecisionState ?? buildDecisionState(workspace, strategy);
 
@@ -178,7 +189,7 @@ export function buildClinicalWorkingView(
     activeCapabilities: workspace.activeCapabilities ?? [],
     recentUsefulActions: recentActions.map((a) => `${a.toolName}: ${a.summary}`),
     retrievalFeedback,
-    clinicalCompletionState: buildClinicalCompletionState(workspace, completionRequiredArtifacts),
+    clinicalCompletionState: buildClinicalCompletionState(workspace, completionRequiredArtifacts, completionArtifactLabels),
     formulaDecisionState: buildFormulaDecisionState(workspace, retrievalFeedback),
     clinicalClosureState: computeClinicalClosure(workspace),
   };

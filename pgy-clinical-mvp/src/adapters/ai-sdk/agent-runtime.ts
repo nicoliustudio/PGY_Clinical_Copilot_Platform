@@ -34,6 +34,7 @@ import {
   openObligationsV21,
   outcomeCoverage,
   refreshControlPlaneV21,
+  requiredArtifactOutcomeLabelsV21,
   runnableObligations,
   unmetObligationsV21,
   v21ToolSurface,
@@ -382,6 +383,18 @@ export function completionContractFor(context: RuntimeContext): { requiredArtifa
 }
 
 /**
+ * 内部 readiness artifact key → canonical outcome 标签（无 control plane 或无可派生项时返回 undefined）。
+ * 用于把 completion / no-progress 反馈里的 capabilityDelivery:… 拼写投影回模型可对齐的 outcome 词汇，
+ * 不改变任何判定口径（判定仍用内部 key）。
+ */
+function completionArtifactLabels(context: RuntimeContext): ReadonlyMap<string, string> | undefined {
+  const state = context.controlPlaneV21;
+  if (!state) return undefined;
+  const labels = requiredArtifactOutcomeLabelsV21(state);
+  return labels.size > 0 ? labels : undefined;
+}
+
+/**
  * H15.5.3：Recovery active tools。与主 loop 共用同一 phase-driven action-surface 投影
  * （missing 参数冗余，phase 从 workspace 重新推导，保证主/recovery 口径一致）。
  */
@@ -522,10 +535,14 @@ export function dynamicInstructions(base: string, context: RuntimeContext, ledge
   const view = buildClinicalWorkingView(
     context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, decisionState,
     completionContractFor(context).requiredArtifacts,
+    completionArtifactLabels(context),
   );
   const workingView = renderClinicalWorkingView(view);
   const patternPrinciple = config.experiment.diagnosticPatternSet ? `\n\n${DIAGNOSTIC_PATTERN_PRINCIPLE}` : '';
-  return `${base}\n\n${ACTION_PRINCIPLE}${patternPrinciple}${controlPlaneOutcomeGuidance(context)}${pendingObligationHints(context)}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}\n\n## Clinical Working View\n${workingView}`;
+  // 段落顺序按「前缀稳定性」排列：base / ACTION_PRINCIPLE / Active Harness Skills / Active scopes 在
+  // 一次 run 内逐字节不变，必须整体前置，才能落在 provider 的前缀缓存里；随步变化的 outcome guidance、
+  // obligation hints 与 working view 统一后置（working view 恒为末段）。仅调整段落次序，各段文本原样保留。
+  return `${base}\n\n${ACTION_PRINCIPLE}${patternPrinciple}\n\n## Active Harness Skills\n${skills || '（无）'}\n\nActive scopes: ${context.knowledgeScopes.join(', ')}${controlPlaneOutcomeGuidance(context)}${pendingObligationHints(context)}\n\n## Clinical Working View\n${workingView}`;
 }
 
 /** 度量「目标驱动工作上下文」相对「全量投影」的收缩程度（估算）。 */
@@ -533,6 +550,7 @@ function computeContextMetrics(context: RuntimeContext, ledger: ToolCallLedger, 
   const workingView = renderClinicalWorkingView(buildClinicalWorkingView(
     context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, undefined,
     completionContractFor(context).requiredArtifacts,
+    completionArtifactLabels(context),
   ));
   const raw = [
     JSON.stringify(buildHypothesisProjection(context.workspace), null, 2),
@@ -554,6 +572,7 @@ function computePromptComponents(context: RuntimeContext, ledger: ToolCallLedger
   const workingViewTokens = estimateTokens(renderClinicalWorkingView(buildClinicalWorkingView(
     context.workspace, context.strategy, buildRecentActions(ledger), retrievalFeedback, undefined,
     completionContractFor(context).requiredArtifacts,
+    completionArtifactLabels(context),
   )));
   const skillTokens = estimateTokens(renderActiveSkills(context.skills));
   const toolSchemaTokens = estimateTokens(context.tools.map((t) => `${t.id}:${t.description}`).join('\n'));
@@ -1347,6 +1366,9 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       proposalSubmitted = false;
       commitReliability.finalProposalCommittedCount = 1;
       const missing = finalContract?.missingArtifacts ?? [];
+      // 反馈给用户/模型的缺失项按 canonical outcome 呈现（内部 key 已投影）；判定口径不变。
+      const labels = completionArtifactLabels(context);
+      const missingLabels = [...new Set(missing.map((key) => labels?.get(key) ?? key))];
       // V2.1.1：fail-closed 必须可解释。typed blocker（unsupported / ambiguous / cycle / NEED_EVIDENCE）
       // 是「为什么闭世界下无法交付」的真源，不能让用户只看到 EXECUTION_INCOMPLETE。
       const typedBlockers = (context.controlPlaneV21?.graph.nodes ?? [])
@@ -1357,7 +1379,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
         : '';
       proposal = {
         mode: 'conversation',
-        message: `${stoppedForNoProgress ? 'NO_PROGRESS' : 'EXECUTION_INCOMPLETE'}: missing artifacts [${missing.join(', ')}]${blockerNote}`,
+        message: `${stoppedForNoProgress ? 'NO_PROGRESS' : 'EXECUTION_INCOMPLETE'}: missing artifacts [${missingLabels.join(', ')}]${blockerNote}`,
       };
     }
 

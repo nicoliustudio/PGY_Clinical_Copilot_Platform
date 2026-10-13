@@ -293,6 +293,54 @@ export function requiredArtifactsFromGraphV21(
   return [...keys];
 }
 
+/**
+ * 图内 treatment-delivery 义务声明的 exact outcome —— canonical outcome 词汇表的唯一来源。
+ * 纯结构派生（provider manifest 决定），Core 不认识任何具体治疗形式；新增 modality 只改数据。
+ */
+export function deliveryOutcomesFromGraphV21(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+): string[] {
+  return [...new Set(state.graph.nodes
+    .filter((node) => node.target.type === 'artifact:treatment-delivery'
+      && typeof node.target.qualifiers?.outcome === 'string')
+    .map((node) => node.target.qualifiers.outcome as string))].sort();
+}
+
+/**
+ * readiness 使用的 durable artifact key → 该义务的 exact outcome。
+ *
+ * 与 requiredArtifactsFromGraphV21 采用**同一结构遍历**派生，保证 key 与 outcome 同源（无第二真源）；
+ * 仅覆盖 control-plane 生成的 obligation 级 key（capabilityEvidence/capabilityDelivery），
+ * 其余 key（formulaSelection 等）不登记标签。这样模型看到的词汇始终是 canonical outcome，
+ * 而不是内部 artifact 拼写。
+ */
+export function requiredArtifactOutcomeLabelsV21(
+  state: NonNullable<RuntimeContext['controlPlaneV21']>,
+): Map<string, string> {
+  const labels = new Map<string, string>();
+  const descriptorOf = (capabilityId: string | undefined): CapabilityDescriptor | undefined =>
+    state.capabilityDescriptors.find((c) => c.id === capabilityId);
+  for (const node of state.graph.nodes) {
+    if (!node.required) continue;
+    const outcome = typeof node.target.qualifiers?.outcome === 'string' ? node.target.qualifiers.outcome : undefined;
+    if (!outcome) continue;
+    const descriptor = descriptorOf(node.target.producerCapabilityId);
+    if (!descriptor) continue;
+    if (node.target.type === 'artifact:treatment-evidence') {
+      for (const ob of descriptor.evidenceObligations ?? []) {
+        labels.set(`capabilityEvidence:${descriptor.id}:${ob.id}`, outcome);
+      }
+      continue;
+    }
+    if (node.target.type === 'artifact:treatment-draft') {
+      for (const ob of descriptor.deliveryObligations ?? []) {
+        labels.set(`capabilityDelivery:${descriptor.id}:${ob.id}`, outcome);
+      }
+    }
+  }
+  return labels;
+}
+
 /** 未完成（INCOMPLETE）的 required outcome：提交必须被阻断。 */
 export function incompleteOutcomes(state: NonNullable<RuntimeContext['controlPlaneV21']>): string[] {
   return outcomeCoverage(state).filter((o) => o.status === 'INCOMPLETE').map((o) => o.outcome);

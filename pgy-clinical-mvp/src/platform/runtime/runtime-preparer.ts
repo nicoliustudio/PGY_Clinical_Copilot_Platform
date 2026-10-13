@@ -49,12 +49,35 @@ export class RuntimePreparer implements RuntimePreparationPort {
 
   async prepare(input: string, runId: string = randomUUID(), signal?: AbortSignal): Promise<RuntimeContext> {
     const understanding = await this.deps.understanding.understand(input);
+    const capabilityDescriptors = this.deps.capabilities.enabled();
+    // Request IR 的一次性编译只依赖 input + understanding，与 safety/planner 之间没有任何数据依赖，
+    // 故与它们并行发出，省掉一轮 LLM 往返。结果仍在下方控制面段落按原顺序消费；
+    // 这里立刻接住 rejection，避免出现未处理的 promise 拒绝。
+    //
+    // Request IR 的 outcome 词汇表由 registry 提供，但只取**语义命名空间**（modality:/outcome:）。
+    // 这不是业务枚举：新增治疗形式只要在 manifest 里声明 modality:* / outcome:* 即自动进入。
+    // 收窄命名空间可避免把 capability 的内部 key 误当成 outcome。
+    const requestIRPromise = this.deps.controlPlane
+      ? compileClinicalRequest(
+          {
+            input,
+            understanding,
+            availableSemanticTypes: [...new Set(capabilityDescriptors.flatMap((c) => c.provides))]
+              .filter((value) => value.startsWith('modality:') || value.startsWith('outcome:'))
+              .sort(),
+          },
+          this.deps.controlPlane.compiler,
+        ).then(
+          (ir) => ({ ok: true as const, ir }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+      : undefined;
     const safety = await this.deps.safety.evaluate(understanding);
     const strategy = await this.deps.planner.plan({
       input,
       understanding,
       safety,
-      availableCapabilities: this.deps.capabilities.enabled().map((c) => ({
+      availableCapabilities: capabilityDescriptors.map((c) => ({
         id: c.id,
         semanticDescription: c.semanticDescription,
       })),
@@ -105,23 +128,16 @@ export class RuntimePreparer implements RuntimePreparationPort {
     );
 
     // Phase 2：用户表达一次性编译为 Request IR（Runtime 不再反复 regex 用户句子）。
-    if (this.deps.controlPlane) {
-      const capabilityDescriptors = this.deps.capabilities.enabled();
+    if (this.deps.controlPlane && requestIRPromise) {
       let requestIR: ClinicalRequestIR = defaultClinicalRequestIR();
       let compileStatus: RequestCompileStatusV21 = 'FAILED';
       let compileError: string | undefined;
       let semanticValidation: ReturnType<typeof validateRequestSemantics> | undefined;
       try {
-        // Request IR 的 outcome 词汇表由 registry 提供，但只取**语义命名空间**（modality:/outcome:）。
-        // 这不是业务枚举：新增治疗形式只要在 manifest 里声明 modality:* / outcome:* 即自动进入。
-        // 收窄命名空间可避免把 capability 的内部 key 误当成 outcome。
-        const semanticTypes = [...new Set(capabilityDescriptors.flatMap((c) => c.provides))]
-          .filter((value) => value.startsWith('modality:') || value.startsWith('outcome:'))
-          .sort();
-        requestIR = await compileClinicalRequest(
-          { input, understanding, availableSemanticTypes: semanticTypes },
-          this.deps.controlPlane.compiler,
-        );
+        // 编译结果已在 prepare 开头与 safety/planner 并行发出，这里只等待并做确定性语义校验。
+        const compiled = await requestIRPromise;
+        if (!compiled.ok) throw compiled.error;
+        requestIR = compiled.ir;
         // V2.1.2：Request IR 建立后立即做确定性语义校验。
         // 家族关系不构成 exact satisfaction —— 被更宽家族项顶替的指名形式 fail-closed 到 unresolved。
         semanticValidation = validateRequestSemantics(

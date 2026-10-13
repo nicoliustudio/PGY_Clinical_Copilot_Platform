@@ -457,13 +457,49 @@ function buildDocs(): KnowledgeDoc[] {
   return docs;
 }
 
+const INDEX_SCHEMA_VERSION = 5;
+
+/**
+ * 进程内索引记忆化（promise 级，含 in-flight 去重）。索引是只读知识快照：同一
+ * releaseVersion + schemaVersion 下内容不可变，重复 `JSON.parse` 一份大索引不产生任何语义，
+ * 只浪费时间（磁盘 + 解析）。缓存 promise 而非结果，使并发调用（例如同一 run 内多条 recall lane）
+ * 共享同一次解析，既省时间也避免并发重复解析造成的内存尖峰；`buildIndex(true)`（强制重建）会先
+ * 失效缓存。解析失败立即清空缓存，后续调用可重试，不会把一次失败固化给整个进程。
+ */
+let cachedIndexPromise: Promise<KnowledgeIndex> | undefined;
+let cachedIndexKey: string | undefined;
+
+/** 失效进程内索引缓存（KB 强制重建或测试隔离用）。 */
+export function resetIndexCache(): void {
+  cachedIndexPromise = undefined;
+  cachedIndexKey = undefined;
+}
+
 export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const releaseVersion = resolveReleaseVersion(config.kb.releaseDir);
+  const memoKey = `${releaseVersion}\u0000${INDEX_SCHEMA_VERSION}`;
+  if (force) {
+    resetIndexCache();
+  } else if (cachedIndexPromise && cachedIndexKey === memoKey) {
+    return cachedIndexPromise;
+  }
+  const promise = loadOrBuildIndex(force, releaseVersion);
+  if (!force) {
+    cachedIndexPromise = promise;
+    cachedIndexKey = memoKey;
+    promise.catch(() => {
+      if (cachedIndexPromise === promise) resetIndexCache();
+    });
+  }
+  return promise;
+}
+
+async function loadOrBuildIndex(force: boolean, releaseVersion: string): Promise<KnowledgeIndex> {
   const cacheFile = path.join(config.kb.cacheDir, `index.${releaseVersion}.json`);
   if (!force && existsSync(cacheFile)) {
     const cached = loadJson<KnowledgeIndex>(cacheFile);
     // Durable knowledge shape changed: stale caches must never hide source-preserved product fields.
-    if (cached.schemaVersion === 5 && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
+    if (cached.schemaVersion === INDEX_SCHEMA_VERSION && cached.breakdown && cached.releaseVersion && Array.isArray(cached.docs) && Array.isArray(cached.vectors)) {
       return cached;
     }
     console.log('[index] 检测到旧 schema 缓存，重建索引');
@@ -479,7 +515,7 @@ export async function buildIndex(force = false): Promise<KnowledgeIndex> {
   const vectors = await embed(docs.map((d) => d.text));
 
   const index: KnowledgeIndex = {
-    schemaVersion: 5,
+    schemaVersion: INDEX_SCHEMA_VERSION,
     version: releaseVersion,
     releaseVersion,
     builtAt: new Date().toISOString(),
