@@ -91,6 +91,9 @@ test('Inv2: missing product disposition entirely → validateProductDecisions re
   assert.equal(r.ok, false);
   if (!r.ok) assert.equal(r.code, 'PRODUCT_DECISION_INCOMPLETE');
   assert.match(r.details.join(';'), /R3/);
+  // Failure feedback must project the authoritative member refs and legal fact refs.
+  assert.match(r.details.join('\n'), /authoritative memberRefs of the selected source[^\n]*R1[^\n]*R2[^\n]*R3/);
+  assert.match(r.details.join('\n'), /known patient fact refs able to back decisions[^\n]*CF_P1[^\n]*CF_C1/);
 });
 
 // ===== Invariant 3: exactly one CURRENTLY_SELECTED → primaryFormulaRef defined =====

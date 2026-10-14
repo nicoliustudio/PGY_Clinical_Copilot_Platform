@@ -153,7 +153,11 @@ test('P0-5: a support/contradiction ref that is not a patient fact fails closed'
   const run = selectionContext([PRESENT_FACT]);
   const missingSupport = await run([{ candidateRef: 'source-node:P1:K_ROOT', disposition: 'CONSIDERED', supportingFactRefs: ['CF_GHOST'] }]);
   assert.equal(missingSupport.ok, false);
-  if (!missingSupport.ok) assert.equal(missingSupport.code, 'FACT_BACKING_INVALID');
+  if (!missingSupport.ok) {
+    assert.equal(missingSupport.code, 'FACT_BACKING_INVALID');
+    // Failure feedback must project the legal fact refs so the Agent can repair in one step.
+    assert.match(missingSupport.details.join('\n'), /known patient fact refs able to back decisions[^\n]*CF_PRESENT/);
+  }
 });
 
 test('P0-5: rationale-only CONSIDERED is rejected', async () => {

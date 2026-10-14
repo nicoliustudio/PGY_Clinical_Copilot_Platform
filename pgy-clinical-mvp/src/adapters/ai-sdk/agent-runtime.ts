@@ -1,6 +1,7 @@
 import { ToolLoopAgent, isStepCount, generateText, type ToolSet, type ModelMessage, type LanguageModel } from 'ai';
 import { config } from '../../config.js';
 import { extractJson } from '../../util/json.js';
+import { pushLlmProbeRecord } from '../../util/llm-probe.js';
 import { agentResultSchema, type AgentResult, type ProposalSubmitInput } from '../../contracts/result.js';
 import type { RuntimeContext } from '../../contracts/runtime.js';
 import type { PrimaryAgentOutput, PrimaryAgentPort } from '../../contracts/ports.js';
@@ -69,6 +70,32 @@ function toApiToolName(id: string): string {
 
 function fromApiToolName(name: string): string {
   return name.replace(/-/g, '.');
+}
+
+/**
+ * 纯观测挂点：逐 step 记录 LLM 响应耗时 / usage / 缓存命中（LLM_PROBE=1 时才写入，默认 no-op）。
+ * 不参与任何执行路径；异常一律吞掉，观测失败不得中断 run。
+ */
+function recordStepProbe(step: {
+  performance?: { stepTimeMs?: number; responseTimeMs?: number; toolExecutionMs?: Readonly<Record<string, number>> };
+  usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number } };
+  finishReason?: unknown;
+}): void {
+  try {
+    pushLlmProbeRecord({
+      kind: 'step',
+      ts: Date.now(),
+      stepTimeMs: step.performance?.stepTimeMs ?? -1,
+      responseTimeMs: step.performance?.responseTimeMs ?? -1,
+      inputTokens: step.usage?.inputTokens,
+      outputTokens: step.usage?.outputTokens,
+      cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
+      toolExecutionMs: { ...(step.performance?.toolExecutionMs ?? {}) },
+      finishReason: String(step.finishReason ?? ''),
+    });
+  } catch {
+    // observation must never affect execution
+  }
 }
 
 function wrapToolWithLedger(id: string, t: ToolSet[string], ledger: ToolCallLedger, stateKey?: () => string): ToolSet[string] {
@@ -1283,6 +1310,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       const response = await buildLoopAgent(resourceSteps, null).generate({
         prompt: buildContextPrompt(context, mode),
         timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
+        onStepEnd: recordStepProbe,
         ...(context.signal ? { abortSignal: context.signal } : {}),
       });
       proposal = extractJson(response.text, agentResultSchema);
@@ -1302,6 +1330,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
       const response = await agent.generate({
         prompt: buildContextPrompt(context, mode),
         timeout: { totalMs: this.options.totalTimeoutMs ?? 360_000 },
+        onStepEnd: recordStepProbe,
         ...(context.signal ? { abortSignal: context.signal } : {}),
       });
       stepCount += response.steps.length;

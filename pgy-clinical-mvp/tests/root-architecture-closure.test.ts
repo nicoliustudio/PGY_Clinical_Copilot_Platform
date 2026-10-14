@@ -160,7 +160,12 @@ test('root invariant: omission cannot become hidden selection authority', async 
     hydrateSourceFormulaSet: () => null,
   });
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.code, 'CANDIDATE_DELIBERATION_INCOMPLETE');
+  if (!result.ok) {
+    assert.equal(result.code, 'CANDIDATE_DELIBERATION_INCOMPLETE');
+    // Failure feedback must project the authoritative CandidateSet so the Agent can repair
+    // in one step even when the search_candidates result was already compacted out of history.
+    assert.match(result.details.join('\n'), /authoritative CandidateSet candidateRefs[^\n]*source-node:P1:K_ROOT[^\n]*source-node:P1:K_OTHER/);
+  }
 });
 
 test('root invariant: clinical-core liveness is owned by structured clinical model, not terminal alternative bookkeeping', () => {

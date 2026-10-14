@@ -35,6 +35,23 @@ const DEFAULT_DEPENDENCIES: FormulaSelectionDependencies = {
   hydrateSourceFormulaSet: hydrateSourceFormulaSetForCandidate,
 };
 
+/**
+ * Failure-feedback completeness contract: the agent's compacted message history may have already
+ * dropped the tool result that carried a reference set (e.g. the formula.search_candidates output).
+ * Every closed-world validator therefore projects the authoritative reference set it validated
+ * against back into its failure details, so the Agent can repair its input in one step without
+ * re-reading dropped history. This is pure projection of existing Kernel state — membership is
+ * never re-decided here.
+ */
+function authoritativeRefsDetail(label: string, refs: readonly string[]): string {
+  return refs.length === 0 ? `${label}: (empty)` : `${label}: ${refs.join(', ')}`;
+}
+
+/** Patient facts that are real (PRESENT / explicitly_absent) and therefore allowed to back a disposition. */
+function knownBackingFactRefs(caseFacts: CaseFact[]): string[] {
+  return caseFacts.filter((fact) => caseFactCanBackDecision(fact)).map((fact) => fact.id);
+}
+
 function validateClosedWorldDecision(
   candidateRefs: string[],
   selectedCandidateRef: string,
@@ -49,13 +66,20 @@ function validateClosedWorldDecision(
     seen.add(decision.candidateRef);
   }
   for (const ref of candidateRefs) if (!seen.has(ref)) details.push(`candidate has no clinical disposition: ${ref}`);
+  const projectedCandidateSet = () => authoritativeRefsDetail(
+    'authoritative CandidateSet candidateRefs (submit exactly one disposition for each)',
+    candidateRefs,
+  );
   const selected = decisions.find((decision) => decision.candidateRef === selectedCandidateRef);
   if (selected && selected.disposition !== 'CONSIDERED') {
     details.push(`selected candidate must be CONSIDERED: ${selectedCandidateRef}`);
+    details.push(projectedCandidateSet());
     return { ok: false, details, selectedExcluded: true };
   }
   if (!selected) details.push(`selected candidate has no decision: ${selectedCandidateRef}`);
-  return details.length === 0 ? { ok: true } : { ok: false, details };
+  if (details.length === 0) return { ok: true };
+  details.push(projectedCandidateSet());
+  return { ok: false, details };
 }
 
 /**
@@ -109,7 +133,9 @@ export function validateFactBackedDecision(
     }
   }
 
-  return details.length === 0 ? { ok: true } : { ok: false, details };
+  if (details.length === 0) return { ok: true };
+  details.push(authoritativeRefsDetail('known patient fact refs able to back decisions', knownBackingFactRefs(caseFacts)));
+  return { ok: false, details };
 }
 
 /**
@@ -156,6 +182,11 @@ export function validateProductDecisions(
 
   if (details.length === 0) return { ok: true };
   const incomplete = productRefs.some((ref) => !seen.has(ref)) || selectedCount !== 1;
+  details.push(authoritativeRefsDetail(
+    'authoritative memberRefs of the selected source (submit exactly one disposition for each)',
+    productRefs,
+  ));
+  details.push(authoritativeRefsDetail('known patient fact refs able to back decisions', knownBackingFactRefs(caseFacts)));
   return { ok: false, code: incomplete ? 'PRODUCT_DECISION_INCOMPLETE' : 'PRODUCT_DECISION_INVALID', details };
 }
 
@@ -177,14 +208,28 @@ export async function selectCanonicalFormula(
   dependencies: Partial<FormulaSelectionDependencies> = {},
 ): Promise<FormulaSelectionTransactionResult> {
   const deps = { ...DEFAULT_DEPENDENCIES, ...dependencies };
+  const candidateRefs = focusedFormulaCandidateRefs(context.workspace);
   const candidate = context.workspace.candidates.find((item) => item.kind === 'formula' && item.id === input.candidateRef);
   if (!candidate) {
-    return { ok: false, code: 'UNKNOWN_CANDIDATE_REF', details: [`unknown formula candidate: ${input.candidateRef}`] };
+    return {
+      ok: false,
+      code: 'UNKNOWN_CANDIDATE_REF',
+      details: [
+        `unknown formula candidate: ${input.candidateRef}`,
+        authoritativeRefsDetail('current Kernel CandidateSet formula candidateRefs', candidateRefs),
+      ],
+    };
   }
 
-  const candidateRefs = focusedFormulaCandidateRefs(context.workspace);
   if (!candidateRefs.includes(input.candidateRef)) {
-    return { ok: false, code: 'CANDIDATE_NOT_FOCUSED', details: [`candidate is not in the Kernel CandidateSet: ${input.candidateRef}`] };
+    return {
+      ok: false,
+      code: 'CANDIDATE_NOT_FOCUSED',
+      details: [
+        `candidate is not in the Kernel CandidateSet: ${input.candidateRef}`,
+        authoritativeRefsDetail('current Kernel CandidateSet formula candidateRefs', candidateRefs),
+      ],
+    };
   }
 
   if (!formulaSelectionReady(context.workspace)) {

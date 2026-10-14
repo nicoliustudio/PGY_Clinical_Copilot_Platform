@@ -1,6 +1,7 @@
 import { generateText, type LanguageModel } from 'ai';
 import { resolveLanguageModel } from '../../model/model-registry.js';
 import { extractJson } from '../../util/json.js';
+import { pushLlmProbeRecord } from '../../util/llm-probe.js';
 import type { ModelPort, StructuredRequest } from '../../ports/model.js';
 
 /**
@@ -35,21 +36,41 @@ export function buildStructuredRepairPrompt(
   ].join('\n');
 }
 
+/** 纯观测：结构化输出校验失败时记录错误原文（LLM_PROBE=1 时才记录），用于离线归因格式修复重试的根因。 */
+function pushParseErrorProbe(operation: string | undefined, attempt: number, output: string, error: unknown): void {
+  try {
+    pushLlmProbeRecord({
+      kind: 'parse_error',
+      ts: Date.now(),
+      operation,
+      attempt,
+      error: errorSummary(error).slice(0, 800),
+      outputLen: output.length,
+      outputHead: output.slice(0, 400),
+    });
+  } catch {
+    // observation must never affect execution
+  }
+}
+
 export async function generateStructuredWithRetry<T>(
   request: StructuredRequest<T>,
-  generate: (args: { system?: string; prompt: string }) => Promise<string>,
+  generate: (args: { system?: string; prompt: string; attempt: number }) => Promise<string>,
 ): Promise<T> {
-  const firstText = await generate({ system: request.system, prompt: request.prompt });
+  const firstText = await generate({ system: request.system, prompt: request.prompt, attempt: 1 });
   try {
     return extractJson(firstText, request.schema);
   } catch (firstError) {
+    pushParseErrorProbe(request.operation, 1, firstText, firstError);
     const secondText = await generate({
       system: request.system,
       prompt: buildStructuredRepairPrompt(request.prompt, firstText, errorSummary(firstError)),
+      attempt: 2,
     });
     try {
       return extractJson(secondText, request.schema);
     } catch (secondError) {
+      pushParseErrorProbe(request.operation, 2, secondText, secondError);
       const op = request.operation ?? 'structured_generation';
       throw new Error(
         `STRUCTURED_OUTPUT_FAILED[${op}]: ${errorSummary(secondError)} | first_error=${errorSummary(firstError)}`,
@@ -65,7 +86,8 @@ export async function generateStructuredWithRetry<T>(
 export function createAiSdkModelPort(resolveModel: () => LanguageModel): ModelPort {
   return {
     async generateStructured<T>(request: StructuredRequest<T>) {
-      return generateStructuredWithRetry(request, async ({ system, prompt }) => {
+      return generateStructuredWithRetry(request, async ({ system, prompt, attempt }) => {
+        const startedAt = Date.now();
         const result = await generateText({
           // 每次调用按当前活动模型解析：前端切换模型后下一次调用即生效，无需重启。
           model: resolveModel(),
@@ -73,6 +95,21 @@ export function createAiSdkModelPort(resolveModel: () => LanguageModel): ModelPo
           prompt,
           timeout: { totalMs: 180_000 },
         });
+        // 纯观测：控制面单次 LLM 请求耗时 / usage / 缓存命中（LLM_PROBE=1 时才记录）。
+        try {
+          pushLlmProbeRecord({
+            kind: 'control',
+            ts: Date.now(),
+            responseTimeMs: Date.now() - startedAt,
+            inputTokens: result.usage?.inputTokens,
+            outputTokens: result.usage?.outputTokens,
+            cacheReadTokens: result.usage?.inputTokenDetails?.cacheReadTokens,
+            operation: request.operation,
+            attempt,
+          });
+        } catch {
+          // observation must never affect execution
+        }
         return result.text;
       });
     },
