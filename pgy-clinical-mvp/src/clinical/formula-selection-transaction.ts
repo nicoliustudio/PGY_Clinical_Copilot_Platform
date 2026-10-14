@@ -2,6 +2,7 @@ import type { RuntimeContext } from '../contracts/runtime.js';
 import type { CandidateReference, CaseFact, FormulaCandidateDecision, FormulaProductDecision, SourceFormulaSet } from '../contracts/workspace.js';
 import { loadIndex } from '../knowledge/build.js';
 import type { KnowledgeIndex } from '../knowledge/types.js';
+import { loadSourcePriorityRoute, type SourcePriorityRoute } from '../knowledge/source-priority.js';
 import { formulaSelectionReady, focusedFormulaCandidateRefs, missingFocusedFormulaEvidence } from './formula-selection.js';
 import { hydrateSourceFormulaSetForCandidate } from './source-formula-set.js';
 import { caseFactCanBackDecision } from './canonical-clinical-state.js';
@@ -21,13 +22,15 @@ export type FormulaSelectionTransactionResult =
     }
   | {
       ok: false;
-      code: 'UNKNOWN_CANDIDATE_REF' | 'CANDIDATE_NOT_FOCUSED' | 'CANDIDATE_EXCLUDED' | 'CANDIDATE_DELIBERATION_INCOMPLETE' | 'FORMULA_EVIDENCE_INCOMPLETE' | 'CANONICAL_HYDRATION_FAILED' | 'FACT_BACKING_INVALID' | 'PRODUCT_DECISION_INCOMPLETE' | 'PRODUCT_DECISION_INVALID';
+      code: 'UNKNOWN_CANDIDATE_REF' | 'CANDIDATE_NOT_FOCUSED' | 'CANDIDATE_EXCLUDED' | 'CANDIDATE_DELIBERATION_INCOMPLETE' | 'FORMULA_EVIDENCE_INCOMPLETE' | 'CANONICAL_HYDRATION_FAILED' | 'FACT_BACKING_INVALID' | 'SOURCE_AUTHORITY_VIOLATION' | 'PRODUCT_DECISION_INCOMPLETE' | 'PRODUCT_DECISION_INVALID';
       details: string[];
     };
 
 export interface FormulaSelectionDependencies {
   loadIndex: () => Promise<KnowledgeIndex>;
   hydrateSourceFormulaSet: (docs: KnowledgeIndex['docs'], candidate: CandidateReference) => SourceFormulaSet | null;
+  /** 注入处方来源优先级路由（默认从 release 的 SOURCE_PRIORITY.json 加载）。 */
+  loadSourcePriorityRoute?: () => SourcePriorityRoute | null;
 }
 
 const DEFAULT_DEPENDENCIES: FormulaSelectionDependencies = {
@@ -191,6 +194,45 @@ export function validateProductDecisions(
 }
 
 /**
+ * 数据驱动的处方来源优先级 gate。
+ *
+ * SOURCE_PRIORITY.json 声明 hard_treatment_route：normative 层（prescription_authority: true）
+ * 的候选可用时，fallback 层（open_gate 声明的层）不得中选。落选的 normative 候选必须以
+ * typed patient facts 显式 EXCLUDED（反证完备性由 validateFactBackedDecision 保证）；
+ * INSUFFICIENT_EVIDENCE 不构成 unusable——那意味着应先补证据 / 追问，而不是降级 fallback。
+ *
+ * 层级归属与开放条件全部来自 KB 声明（candidate.sourceTier ↔ manifest ↔ route），
+ * 本函数不认识任何具体来源、病种或方名；新增来源只改 SOURCE_PRIORITY.json 与 manifest。
+ */
+function validateSourcePrioritySelection(
+  route: SourcePriorityRoute | null,
+  candidates: readonly CandidateReference[],
+  decisions: readonly FormulaCandidateDecision[],
+  selectedCandidateRef: string,
+): { ok: true } | { ok: false; details: string[] } {
+  if (!route) return { ok: true };
+  const selected = candidates.find((c) => c.id === selectedCandidateRef);
+  if (!selected?.sourceTier || !route.fallbackSourceTiers.has(selected.sourceTier)) return { ok: true };
+
+  const dispositionByRef = new Map(decisions.map((d) => [d.candidateRef, d.disposition]));
+  const openNormative = candidates.filter((c) =>
+    c.kind === 'formula'
+    && c.sourceTier !== undefined
+    && route.normativeSourceTiers.has(c.sourceTier)
+    && dispositionByRef.get(c.id) !== 'EXCLUDED');
+  if (openNormative.length === 0) return { ok: true };
+
+  return {
+    ok: false,
+    details: [
+      `selected candidate ${selectedCandidateRef} belongs to a fallback source tier while normative-prescription candidates remain unexcluded (SOURCE_PRIORITY hard_treatment_route)`,
+      authoritativeRefsDetail('normative-tier candidates not EXCLUDED (exclude each with typed contradictingFactRefs, or select one)', openNormative.map((c) => c.id)),
+      'fallback opens only after every normative-tier candidate is explicitly EXCLUDED; INSUFFICIENT_EVIDENCE requires clarification instead of fallback',
+    ],
+  };
+}
+
+/**
  * Closed-world semantic selection transaction.
  *
  * Runtime owns CandidateSet/source-product membership and canonical evidence linkage. The model submits
@@ -254,6 +296,17 @@ export async function selectCanonicalFormula(
   const factCheck = validateFactBackedDecision(context.workspace.caseFacts, input.candidateDecisions ?? []);
   if (!factCheck.ok) {
     return { ok: false, code: 'FACT_BACKING_INVALID', details: factCheck.details };
+  }
+
+  // 处方来源优先级 gate：fallback 层中选前，normative 层候选必须全部被显式排除。
+  const priorityCheck = validateSourcePrioritySelection(
+    (deps.loadSourcePriorityRoute ?? loadSourcePriorityRoute)(),
+    context.workspace.candidates,
+    input.candidateDecisions ?? [],
+    input.candidateRef,
+  );
+  if (!priorityCheck.ok) {
+    return { ok: false, code: 'SOURCE_AUTHORITY_VIOLATION', details: priorityCheck.details };
   }
 
   let sourceFormulaSet: SourceFormulaSet | null;

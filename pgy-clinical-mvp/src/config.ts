@@ -20,6 +20,12 @@ export const config = {
     /** 初始活动模型的目录 id（优先级高于 LLM_DEEP_MODEL；留空则按模型名匹配）。 */
     modelId: process.env.LLM_MODEL_ID ?? '',
     /**
+     * 采样温度：临床主循环 / finalization / 控制面 structured 调用统一注入，
+     * 收敛 query 措辞与选方分布的随机漂移（DeepSeek 默认 1.0）。
+     * 设为 1 恢复旧行为；个别 provider 不支持时可调高或设 1。
+     */
+    temperature: Number(process.env.LLM_TEMPERATURE ?? 0.2),
+    /**
      * 控制面固定模型。用于 Understanding / Request Compiler / Planner。
      * 留空时默认使用 official:deepseek-chat，避免“切临床模型”同时改写控制栈语义，
      * 从而污染模型 A/B。若该通道不可用，Runtime 会确定性回退到本次 run 的 clinical 模型。

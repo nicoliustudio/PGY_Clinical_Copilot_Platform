@@ -215,6 +215,7 @@ export function workspaceEventsForTool(
           name: readField(c, 'formulaName'),
           sourceAuthority: readField(c, 'sourceAuthority'),
           sourceKind: readField(c, 'sourceKind'),
+          sourceTier: readField(c, 'sourceTier'),
           retrievalRank: readField(c, 'retrievalRank'),
           retrievalScore: readField(c, 'retrievalScore'),
           retrievalLane: readField(c, 'retrievalLane'),

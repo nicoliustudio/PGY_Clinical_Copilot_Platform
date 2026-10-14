@@ -930,6 +930,8 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     const buildLoopAgent = (maxSteps: number, rec: RecoveryState | null) => new ToolLoopAgent({
       // 每轮按当前活动模型解析：前端切换模型后下一轮即生效。
       model: this.options.resolveModel!(),
+      // 收敛采样随机性（query 措辞 / 辨证 / 选方分布漂移）；可经 LLM_TEMPERATURE 配置。
+      temperature: config.llm.temperature,
       tools: buildTools(context, bindings, ledger),
       instructions: dynamicInstructions(this.options.instructions, context, ledger, tracker.feedback()),
       toolChoice: rec ? 'required' : undefined,
@@ -1527,6 +1529,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
 
     let result = await generateText({
       model: this.options.resolveModel!(),
+      temperature: config.llm.temperature,
       system: this.options.instructions,
       prompt,
       timeout: { totalMs: 120_000 },
@@ -1559,6 +1562,7 @@ export class AiSdkPrimaryAgent implements PrimaryAgentPort {
     commitReliability.proposalRetryCount += 1;
     const retryResult = await generateText({
       model: this.options.resolveModel!(),
+      temperature: config.llm.temperature,
       system: this.options.instructions,
       prompt: buildRetryPrompt(draft, parsed.error),
       timeout: { totalMs: 120_000 },

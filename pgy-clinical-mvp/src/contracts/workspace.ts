@@ -615,6 +615,8 @@ export interface CandidateReference {
   /** H15.2.6：P2 case-derived fallback 的来源标记（不升级处方权）。 */
   sourceAuthority?: 'P1' | 'P2_CASE_DERIVED';
   sourceKind?: 'P1_NORMATIVE_SOURCE' | 'P2_CASE_SOURCE';
+  /** 粗粒度权威层级（doc sourceTier，P1/P2/AUX）：供处方来源优先级路由判定，非业务身份。 */
+  sourceTier?: 'P1' | 'P2' | 'AUX';
   retrievalRank?: number;
   retrievalScore?: number;
   retrievalLane?: 'NORMATIVE' | 'CASE_ANALOG';

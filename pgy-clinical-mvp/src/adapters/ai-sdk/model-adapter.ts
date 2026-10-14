@@ -1,5 +1,6 @@
 import { generateText, type LanguageModel } from 'ai';
 import { resolveLanguageModel } from '../../model/model-registry.js';
+import { config } from '../../config.js';
 import { extractJson } from '../../util/json.js';
 import { pushLlmProbeRecord } from '../../util/llm-probe.js';
 import type { ModelPort, StructuredRequest } from '../../ports/model.js';
@@ -91,6 +92,7 @@ export function createAiSdkModelPort(resolveModel: () => LanguageModel): ModelPo
         const result = await generateText({
           // 每次调用按当前活动模型解析：前端切换模型后下一次调用即生效，无需重启。
           model: resolveModel(),
+          temperature: config.llm.temperature,
           system,
           prompt,
           timeout: { totalMs: 180_000 },

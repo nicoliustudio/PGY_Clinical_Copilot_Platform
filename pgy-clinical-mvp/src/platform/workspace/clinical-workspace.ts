@@ -321,6 +321,7 @@ export class ClinicalWorkspaceStore implements WorkspaceControlPort {
         name: asString(payload.name),
         sourceAuthority: asString(payload.sourceAuthority) as 'P1' | 'P2_CASE_DERIVED' | undefined,
         sourceKind: asString(payload.sourceKind) as 'P1_NORMATIVE_SOURCE' | 'P2_CASE_SOURCE' | undefined,
+        sourceTier: asString(payload.sourceTier) as 'P1' | 'P2' | 'AUX' | undefined,
         retrievalRank: typeof payload.retrievalRank === 'number' ? payload.retrievalRank : undefined,
         retrievalScore: typeof payload.retrievalScore === 'number' ? payload.retrievalScore : undefined,
         retrievalLane: asString(payload.retrievalLane) as 'NORMATIVE' | 'CASE_ANALOG' | undefined,
