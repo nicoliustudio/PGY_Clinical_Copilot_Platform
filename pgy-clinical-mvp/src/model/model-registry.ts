@@ -10,13 +10,18 @@ import type { ModelProfile } from '../contracts/runtime.js';
  * 无法热切换。这里把「选哪个模型」收敛成一个显式注册表 + 一个进程级活动选择，
  * 语言模型在**每次调用时**按当前选择解析，因此切换后无需重启即可生效。
  *
+ * 通道策略（2026-10 基准实测后收敛）：
+ * - 默认走 DeepSeek 官方；目录只保留官方 + 阿里云百炼·千问系列（其余源实测明显更慢，剔除）；
+ * - 官方通道熔断（5xx / 网络故障 / 超时等通道级失败）时，clinical/control 在 run 快照阶段
+ *   自动切到 `aliyun:qwen3.8-flash`（全目录实测综合响应最快的兜底），冷却期后半开重试官方。
+ *
  * 边界：
- * - 本模块只决定「用哪个模型 / 是否发送思考开关」这一事实，不做任何临床判断；
+ * - 本模块只决定「用哪个模型 / 是否发送思考开关 / 通道是否熔断」这一事实，不做任何临床判断；
  * - 目录内每个模型的 thinking 语义都来自实测（见 thinking 字段注释），不靠文档推断，
  *   避免出现「点了没反应」或「发送参数直接 400」的死开关。
  */
 
-export type ModelChannel = 'official' | 'aliyun' | 'ark';
+export type ModelChannel = 'official' | 'aliyun';
 
 /**
  * 推理开关的实际可用性（实测三态，决定前端开关是否可点、以及是否发送思考开关参数）：
@@ -68,57 +73,178 @@ export interface ModelOption {
 const CHANNEL_LABEL: Record<ModelChannel, string> = {
   official: 'DeepSeek 官方',
   aliyun: '阿里云百炼',
-  ark: '火山方舟',
 };
 
 type ModelOptionSeed = Omit<ModelOption, 'channelLabel'>;
 
 const CATALOG: ModelOption[] = ([
-  // ---- DeepSeek 官方 ----
+  // ---- DeepSeek 官方（默认通道） ----
   // 官方通道实测忽略 enable_thinking，自然也不会应用 thinking_budget。
   { id: 'official:deepseek-chat', label: 'deepseek-chat', channel: 'official', modelId: 'deepseek-chat', thinking: 'none', defaultThinking: false, budget: 'ignored', measured: '实测 107ms · 非推理，全局最快基线' },
   { id: 'official:deepseek-flash', label: 'deepseek-flash', channel: 'official', modelId: 'deepseek-flash', thinking: 'always', defaultThinking: true, budget: 'ignored', measured: '思考型；官方忽略开关，无法关闭' },
   { id: 'official:deepseek-v4-pro', label: 'deepseek-v4-pro', channel: 'official', modelId: 'deepseek-v4-pro', thinking: 'always', defaultThinking: true, budget: 'ignored', measured: '思考型；官方忽略开关，无法关闭' },
-  // ---- 火山方舟 · Agent Plan（OpenAI 兼容） ----
-  // 思考开关走 `thinking.type`（见 thinkingParamFor）；实测 disabled→0 / enabled 有 reasoning tok。
-  // 注意：火山套餐不支持 deepseek-chat / deepseek-flash 等旧名，可用名为下面这两个。
-  { id: 'ark:deepseek-v4-flash', label: 'deepseek-v4-flash', channel: 'ark', modelId: 'deepseek-v4-flash', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '实测 关思考 reasoning=0 / 开思考 reasoning≈361 tok；预算档位不适用（方舟用 reasoning_effort）' },
-  { id: 'ark:deepseek-v4-pro', label: 'deepseek-v4-pro', channel: 'ark', modelId: 'deepseek-v4-pro', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '实测 关思考 reasoning=0 / 开思考 reasoning≥64 tok；预算档位不适用' },
 
-  // ---- 阿里云百炼 · 千问（实测支持思考预算） ----
+  // ---- 阿里云百炼 · 千问（兜底通道，实测支持思考预算） ----
   { id: 'aliyun:qwen3.8-max', label: 'qwen3.8-max', channel: 'aliyun', modelId: 'qwen3.8-max', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '推理任务实测 206s（思考 7258 tok）→ 预算256 降至 37.8s' },
-  { id: 'aliyun:qwen3.8-flash', label: 'qwen3.8-flash', channel: 'aliyun', modelId: 'qwen3.8-flash', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '推理任务实测 89s（思考 5880 tok）→ 预算256 降至 18.5s' },
+  { id: 'aliyun:qwen3.8-flash', label: 'qwen3.8-flash', channel: 'aliyun', modelId: 'qwen3.8-flash', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '官方故障兜底模型；推理任务实测 89s（思考 5880 tok）→ 预算256 降至 18.5s' },
   { id: 'aliyun:qwen3.7-plus', label: 'qwen3.7-plus', channel: 'aliyun', modelId: 'qwen3.7-plus', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '推理任务实测 40.9s（思考 2732 tok）→ 预算256 降至 13.1s' },
   { id: 'aliyun:qwen3.7-max', label: 'qwen3.7-max', channel: 'aliyun', modelId: 'qwen3.7-max', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '推理任务实测 70s（思考 5095 tok）→ 预算256 降至 10.2s' },
   { id: 'aliyun:qwen3.6-plus', label: 'qwen3.6-plus', channel: 'aliyun', modelId: 'qwen3.6-plus', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '推理任务实测 80s（思考 4110 tok）→ 预算256 降至 14.0s' },
   { id: 'aliyun:qwen3.6-flash', label: 'qwen3.6-flash', channel: 'aliyun', modelId: 'qwen3.6-flash', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '默认知 7.7s / 关推理 ~0.3s；预算256 实测 4.7s→1.7s' },
-
-  // ---- 阿里云百炼 · DeepSeek ----
-  // v4.1-flash / v4-pro-0813 实测静默忽略该参数（思考反而更长），故不开放预算档位。
-  { id: 'aliyun:deepseek-v4.1-flash', label: 'deepseek-v4.1-flash', channel: 'aliyun', modelId: 'deepseek-v4.1-flash', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '默认知 2.1s / 关推理 ~1.2s；实测忽略思考预算' },
-  { id: 'aliyun:deepseek-v4-pro-0813', label: 'deepseek-v4-pro-0813', channel: 'aliyun', modelId: 'deepseek-v4-pro-0813', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '默认知 2.2s / 关推理 ~1.4s；实测忽略思考预算' },
-  { id: 'aliyun:deepseek-v4-pro', label: 'deepseek-v4-pro', channel: 'aliyun', modelId: 'deepseek-v4-pro', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '默认知 3.0s / 关推理 ~1.4s；预算实测生效' },
-  { id: 'aliyun:deepseek-v4-flash', label: 'deepseek-v4-flash', channel: 'aliyun', modelId: 'deepseek-v4-flash', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '默认知 1.5s / 关推理 ~0.8s；预算实测生效' },
-  { id: 'aliyun:deepseek-v4-flash-0731', label: 'deepseek-v4-flash-0731', channel: 'aliyun', modelId: 'deepseek-v4-flash-0731', thinking: 'toggle', defaultThinking: true, budget: 'verified', measured: '默认知 1.8s / 关推理 ~1.5s；预算实测生效' },
-  { id: 'aliyun:deepseek-v3.2', label: 'deepseek-v3.2', channel: 'aliyun', modelId: 'deepseek-v3.2', thinking: 'toggle', defaultThinking: false, budget: 'verified', measured: '默认非推理 1.0s；可开启思考；预算实测生效' },
-
-  // ---- 阿里云百炼 · 月之暗面 ----
-  { id: 'aliyun:kimi-k2.5', label: 'kimi-k2.5', channel: 'aliyun', modelId: 'kimi-k2.5', thinking: 'toggle', defaultThinking: false, budget: 'verified', measured: '默认非推理 0.7s；可开启思考；预算实测生效' },
-  { id: 'aliyun:kimi-k2.6', label: 'kimi-k2.6', channel: 'aliyun', modelId: 'kimi-k2.6', thinking: 'toggle', defaultThinking: false, budget: 'verified', measured: '默认非推理 1.0s；可开启思考；预算实测生效' },
-  { id: 'aliyun:kimi-k2.7-code', label: 'kimi-k2.7-code', channel: 'aliyun', modelId: 'kimi-k2.7-code', thinking: 'always', defaultThinking: true, budget: 'verified', measured: '实测开关无效；但思考预算实测生效' },
-
-  // ---- 阿里云百炼 · 智谱 ----
-  // 全系实测静默忽略该参数，故不开放预算档位。
-  { id: 'aliyun:glm-5.3', label: 'glm-5.3', channel: 'aliyun', modelId: 'glm-5.3', thinking: 'always', defaultThinking: true, budget: 'ignored', measured: '发送关推理参数会返回 400，故不发送；实测忽略思考预算' },
-  { id: 'aliyun:glm-5.2', label: 'glm-5.2', channel: 'aliyun', modelId: 'glm-5.2', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '默认知 7.4s / 关推理 ~7.0s；实测忽略思考预算' },
-  { id: 'aliyun:glm-5', label: 'glm-5', channel: 'aliyun', modelId: 'glm-5', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '默认知 10.9s / 关推理 ~9.1s；实测忽略思考预算' },
-  { id: 'aliyun:glm-5.1', label: 'glm-5.1', channel: 'aliyun', modelId: 'glm-5.1', thinking: 'toggle', defaultThinking: true, budget: 'ignored', measured: '默认知 6.8s / 关推理 ~6.4s；实测忽略思考预算' },
-
-  // ---- 阿里云百炼 · MiniMax ----
-  { id: 'aliyun:MiniMax-M2.5', label: 'MiniMax-M2.5', channel: 'aliyun', modelId: 'MiniMax-M2.5', thinking: 'always', defaultThinking: true, budget: 'verified', measured: '发送关推理参数会返回 400，故不发送；预算实测生效' },
 ] satisfies ModelOptionSeed[]).map((option) => ({ ...option, channelLabel: CHANNEL_LABEL[option.channel] }));
 
 const DEFAULT_OPTION_ID = 'official:deepseek-chat';
+export const OFFICIAL_FALLBACK_OPTION_ID = 'aliyun:qwen3.8-flash';
+
+export type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+interface CircuitBreakerConfig {
+  /** 触发熔断的连续失败次数阈值 */
+  failureThreshold: number;
+  /** 熔断后冷却时间 (毫秒)，冷却期后转为 HALF_OPEN 尝试探测 */
+  cooldownMs: number;
+}
+
+const officialCircuitBreaker = {
+  state: 'CLOSED' as CircuitBreakerState,
+  failures: 0,
+  lastFailureTime: 0,
+  config: {
+    failureThreshold: 2,
+    cooldownMs: 30_000,
+  },
+};
+
+/** 查询官方通道熔断器当前状态 */
+export function getOfficialCircuitBreakerStatus(): {
+  state: CircuitBreakerState;
+  failures: number;
+  lastFailureTime: number;
+} {
+  if (officialCircuitBreaker.state === 'OPEN') {
+    const elapsed = Date.now() - officialCircuitBreaker.lastFailureTime;
+    if (elapsed >= officialCircuitBreaker.config.cooldownMs) {
+      officialCircuitBreaker.state = 'HALF_OPEN';
+    }
+  }
+  return {
+    state: officialCircuitBreaker.state,
+    failures: officialCircuitBreaker.failures,
+    lastFailureTime: officialCircuitBreaker.lastFailureTime,
+  };
+}
+
+/** 记录官方通道调用失败，满足阈值时切为 OPEN */
+export function recordOfficialChannelFailure(): void {
+  officialCircuitBreaker.failures += 1;
+  officialCircuitBreaker.lastFailureTime = Date.now();
+  if (officialCircuitBreaker.failures >= officialCircuitBreaker.config.failureThreshold) {
+    officialCircuitBreaker.state = 'OPEN';
+  }
+}
+
+/** 记录官方通道调用成功，恢复 CLOSED */
+export function recordOfficialChannelSuccess(): void {
+  officialCircuitBreaker.state = 'CLOSED';
+  officialCircuitBreaker.failures = 0;
+  officialCircuitBreaker.lastFailureTime = 0;
+}
+
+/** 重置熔断器（供测试或管理） */
+export function resetOfficialCircuitBreaker(): void {
+  recordOfficialChannelSuccess();
+}
+
+/** 手动触发熔断（供测试或运维） */
+export function tripOfficialCircuitBreaker(): void {
+  officialCircuitBreaker.state = 'OPEN';
+  officialCircuitBreaker.failures = officialCircuitBreaker.config.failureThreshold;
+  officialCircuitBreaker.lastFailureTime = Date.now();
+}
+
+/**
+ * 官方通道「活挂」超时保护。
+ *
+ * 官方接口的真实故障形态可能是：HTTP 200 秒回，但只发 SSE keep-alive 心跳、永不产出内容。
+ * 此时 `doGenerate` 的 Promise 永不 settle、永不抛错 —— 错误驱动的熔断器永远等不到故障信号，
+ * 兜底自然不触发（表现为请求无限卡住）。该超时把「活挂」转为 `ChannelHangTimeoutError`
+ * （isChannelCrashError 判定为通道级故障），从而记录失败并透明切换到阿里兜底通道。
+ *
+ * 默认 60s：非流式 doGenerate 无法区分「服务器在思考」与「活挂」，race 的是整个调用时长；
+ * 正常临床长调用可达 30-60s，取 30s 会误杀慢调用并把官方错误熔断。可经 LLM_OFFICIAL_TIMEOUT_MS 调整。
+ */
+let officialHangTimeoutMs = Number.parseInt(process.env.LLM_OFFICIAL_TIMEOUT_MS ?? '', 10) || 60_000;
+
+/** 覆盖官方通道活挂超时（测试注入用）。 */
+export function setOfficialHangTimeoutMsForTests(ms: number): void {
+  officialHangTimeoutMs = ms;
+}
+
+/** 官方通道活挂超时错误：必须被 isChannelCrashError 判定为通道级故障（而非用户取消）。 */
+export class ChannelHangTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`channel hang timeout: official channel produced no result within ${ms}ms`);
+    this.name = 'ChannelHangTimeoutError';
+  }
+}
+
+/**
+ * 给底层模型调用加活挂超时：
+ * - 注入合并后的 AbortSignal（用户取消信号 + 超时信号），超时时同步 abort 底层请求，避免连接悬挂；
+ * - 超时以 `ChannelHangTimeoutError` 拒绝（可触发熔断）；用户主动取消仍以原始 AbortError 形态抛出（不触发熔断）。
+ */
+async function callWithHangTimeout(
+  orig: (...args: unknown[]) => Promise<unknown>,
+  target: object,
+  args: unknown[],
+): Promise<unknown> {
+  const options = { ...((args[0] as Record<string, unknown> | undefined) ?? {}) };
+  const userSignal = options.abortSignal as AbortSignal | undefined;
+  const controller = new AbortController();
+  options.abortSignal = controller.signal;
+
+  const forwardUserAbort = () => controller.abort(userSignal?.reason);
+  if (userSignal?.aborted) forwardUserAbort();
+  else userSignal?.addEventListener('abort', forwardUserAbort, { once: true });
+
+  let rejectOnTimeout: ((err: ChannelHangTimeoutError) => void) | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    rejectOnTimeout = reject;
+  });
+  const timer = setTimeout(() => {
+    const err = new ChannelHangTimeoutError(officialHangTimeoutMs);
+    controller.abort(err);
+    rejectOnTimeout?.(err);
+  }, officialHangTimeoutMs);
+
+  try {
+    return await Promise.race([orig.apply(target, [options]), timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+    userSignal?.removeEventListener('abort', forwardUserAbort);
+  }
+}
+
+/** 判断错误是否属于通道级崩溃（网络故障、5xx、超时等），非用户主动取消或参数校验错误 */
+export function isChannelCrashError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const msg = (err as Error).message || '';
+  const name = (err as Error).name || '';
+  if (name === 'AbortError' || msg.includes('aborted')) return false;
+  if (name === 'ChannelHangTimeoutError') return true;
+
+  const status = (err as { statusCode?: number; status?: number }).statusCode ?? (err as { status?: number }).status;
+  if (typeof status === 'number' && status >= 500) return true;
+
+  const code = (err as { code?: string }).code;
+  if (code && ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) {
+    return true;
+  }
+  if (/fetch failed|timeout|network|socket hang up|connection refused|gateway timeout|service unavailable/i.test(msg)) {
+    return true;
+  }
+  return false;
+}
 
 export interface ModelSelection {
   optionId: string;
@@ -144,6 +270,8 @@ export interface ModelExecutionReceipt {
   requestedControlOptionId: string;
   /** Present only when the configured control role was unavailable and this run fell back to clinical. */
   controlFallbackReason?: 'UNKNOWN_MODEL' | 'CHANNEL_NOT_CONFIGURED';
+  /** Present only when the requested clinical model fell back due to circuit breaker or unavailability. */
+  clinicalFallbackReason?: 'CIRCUIT_BREAKER_OPEN' | 'CHANNEL_NOT_CONFIGURED';
   clinicalProfile: ModelProfile;
   controlProfile: ModelProfile;
   /** Stable cache / trace key. */
@@ -158,7 +286,6 @@ function optionById(id: string): ModelOption | undefined {
 /** 通道凭据是否就绪（缺 key 的通道模型在前端置灰，而不是变成死按钮）。 */
 function channelReady(channel: ModelChannel): boolean {
   if (channel === 'official') return config.llm.apiKey.trim().length > 0;
-  if (channel === 'ark') return config.llm.ark.apiKey.trim().length > 0;
   return config.llm.aliyun.apiKey.trim().length > 0;
 }
 
@@ -230,6 +357,8 @@ export interface CatalogView {
   };
   budgetLevels: typeof BUDGET_LEVELS;
   defaultOptionId: string;
+  fallbackOptionId: string;
+  circuitBreaker: ReturnType<typeof getOfficialCircuitBreakerStatus>;
 }
 
 export function getModelCatalog(): CatalogView {
@@ -249,6 +378,8 @@ export function getModelCatalog(): CatalogView {
     },
     budgetLevels: BUDGET_LEVELS,
     defaultOptionId: DEFAULT_OPTION_ID,
+    fallbackOptionId: OFFICIAL_FALLBACK_OPTION_ID,
+    circuitBreaker: getOfficialCircuitBreakerStatus(),
   };
 }
 
@@ -316,19 +447,46 @@ export interface RunModelRequest {
   budget?: ThinkingBudgetLevel;
 }
 
-function requestedClinicalSelection(request?: RunModelRequest): FrozenModelSelection {
-  if (!request) {
-    const active = getActiveOption();
-    return normalizeSelectionForOption(active, selection);
+function requestedClinicalSelection(request?: RunModelRequest): {
+  selection: FrozenModelSelection;
+  fallbackReason?: ModelExecutionReceipt['clinicalFallbackReason'];
+} {
+  const targetOptionId = request?.optionId ?? selection.optionId;
+  const targetOption = optionById(targetOptionId);
+  if (!targetOption) throw new Error(`requested clinical model is unknown: ${targetOptionId}`);
+
+  const isOfficial = targetOption.channel === 'official';
+  const breaker = getOfficialCircuitBreakerStatus();
+  const isBreakerOpen = isOfficial && breaker.state === 'OPEN';
+  const isChannelMissingKey = !channelReady(targetOption.channel);
+
+  const reqThinking = request ? request.thinking : selection.thinking;
+  const reqBudget = request ? request.budget : selection.budget;
+
+  if (isBreakerOpen || (isOfficial && isChannelMissingKey)) {
+    const fallbackOption = optionById(OFFICIAL_FALLBACK_OPTION_ID);
+    if (fallbackOption && channelReady(fallbackOption.channel)) {
+      return {
+        selection: normalizeSelectionForOption(fallbackOption, {
+          thinking: reqThinking,
+          // 兜底的价值在「快速恢复可用」：不限预算的思考在大 prompt 下可超活挂超时，
+          // 会被误杀导致双通道同时判死。官方请求的 budget 档位对其无意义（官方 budget=ignored）。
+          budget: 'low',
+        }),
+        fallbackReason: isBreakerOpen ? 'CIRCUIT_BREAKER_OPEN' : 'CHANNEL_NOT_CONFIGURED',
+      };
+    }
   }
-  const option = optionById(request.optionId);
-  if (!option) throw new Error(`requested clinical model is unknown: ${request.optionId}`);
-  if (!channelReady(option.channel)) throw new Error(`requested clinical model channel is unavailable: ${request.optionId}`);
-  return normalizeSelectionForOption(option, {
-    optionId: option.id,
-    thinking: request.thinking,
-    budget: request.budget,
-  });
+
+  if (isChannelMissingKey) throw new Error(`requested clinical model channel is unavailable: ${targetOptionId}`);
+
+  return {
+    selection: normalizeSelectionForOption(targetOption, {
+      optionId: targetOption.id,
+      thinking: reqThinking,
+      budget: reqBudget,
+    }),
+  };
 }
 
 function controlSelection(clinical: FrozenModelSelection): {
@@ -339,6 +497,11 @@ function controlSelection(clinical: FrozenModelSelection): {
   const option = optionById(requested);
   if (!option) return { selection: clinical, fallbackReason: 'UNKNOWN_MODEL' };
   if (!channelReady(option.channel)) return { selection: clinical, fallbackReason: 'CHANNEL_NOT_CONFIGURED' };
+
+  if (option.channel === 'official' && getOfficialCircuitBreakerStatus().state === 'OPEN') {
+    return { selection: clinical, fallbackReason: 'CHANNEL_NOT_CONFIGURED' };
+  }
+
   return { selection: normalizeSelectionForOption(option) };
 }
 
@@ -351,14 +514,16 @@ function controlSelection(clinical: FrozenModelSelection): {
  * Planner at the same time.
  */
 export function snapshotModelExecution(request?: RunModelRequest): ModelExecutionReceipt {
-  const clinical = requestedClinicalSelection(request);
+  const clinicalResolved = requestedClinicalSelection(request);
+  const clinical = clinicalResolved.selection;
   const controlResolved = controlSelection(clinical);
   const control = controlResolved.selection;
   return Object.freeze({
     clinical,
     control,
-    requestedClinicalOptionId: request?.optionId ?? clinical.optionId,
+    requestedClinicalOptionId: request?.optionId ?? getActiveOption().id,
     requestedControlOptionId: config.llm.controlModelId.trim(),
+    ...(clinicalResolved.fallbackReason ? { clinicalFallbackReason: clinicalResolved.fallbackReason } : {}),
     ...(controlResolved.fallbackReason ? { controlFallbackReason: controlResolved.fallbackReason } : {}),
     clinicalProfile: modelProfileForSelection('clinical', clinical),
     controlProfile: modelProfileForSelection('control', control),
@@ -402,6 +567,55 @@ function thinkingParamFor(channel: ModelChannel, thinking: boolean): Record<stri
 }
 
 /**
+ * 包装官方通道模型：活挂超时 + 熔断 + 透明兜底。
+ * - 熔断 OPEN 期间不再等待故障通道（否则一次 run 内每次 LLM 调用都白等超时），直接快速兜底；
+ *   冷却结束转 HALF_OPEN 后自动恢复对官方的探测。
+ * - 运行时调用（doGenerate/doStream）一旦超时或通道崩溃，记录失败并改由 fallbackFactory 提供的
+ *   兜底模型重试同一请求；用户主动取消（AbortError）原样抛出，不记失败不兜底。
+ * - 注意：doStream 的超时只保护到响应建立（运行时全部走 generateText/doGenerate，
+ *   不存在流式中途活挂路径）。
+ */
+export function wrapLanguageModelWithBreaker(baseModel: LanguageModel, fallbackFactory: () => LanguageModel): LanguageModel {
+  const invokeFallback = (method: 'doGenerate' | 'doStream', args: unknown[]): Promise<unknown> => {
+    const fallback = fallbackFactory() as Record<string, unknown>;
+    const fn = fallback[method] as ((...args: unknown[]) => Promise<unknown>) | undefined;
+    if (typeof fn !== 'function') throw new Error(`fallback model has no ${method}`);
+    // 兜底通道同样可能活挂：不加保护时双通道同挂会把 run 拖满上层总超时（180s/360s）才报错。
+    return callWithHangTimeout(fn, fallback, args);
+  };
+  return new Proxy(baseModel as object, {
+    get(target, prop, receiver) {
+      if (prop === 'doGenerate' || prop === 'doStream') {
+        const orig = Reflect.get(target, prop, receiver) as ((...args: unknown[]) => Promise<unknown>) | undefined;
+        if (typeof orig !== 'function') return orig;
+        return async (...args: unknown[]) => {
+          // 熔断 OPEN：通道已被判定崩溃，立即兜底，不再等官方（含活挂超时）
+          if (getOfficialCircuitBreakerStatus().state === 'OPEN') {
+            return await invokeFallback(prop, args);
+          }
+          try {
+            const res = await callWithHangTimeout(orig, target, args);
+            recordOfficialChannelSuccess();
+            return res;
+          } catch (err) {
+            if (isChannelCrashError(err)) {
+              recordOfficialChannelFailure();
+              try {
+                return await invokeFallback(prop, args);
+              } catch {
+                // 兜底若失败则抛出原错误
+              }
+            }
+            throw err;
+          }
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as unknown as LanguageModel;
+}
+
+/**
  * Resolve one frozen model selection. New run execution must pass an immutable run receipt;
  * process-global UI selection is only a convenience default for the *next* run.
  *
@@ -423,9 +637,7 @@ export function resolveLanguageModelFor(frozen: FrozenModelSelection): LanguageM
 
   const credentials = option.channel === 'official'
     ? { baseURL: config.llm.baseURL, apiKey: config.llm.apiKey }
-    : option.channel === 'ark'
-      ? { baseURL: config.llm.ark.baseURL, apiKey: config.llm.ark.apiKey }
-      : { baseURL: config.llm.aliyun.baseURL, apiKey: config.llm.aliyun.apiKey };
+    : { baseURL: config.llm.aliyun.baseURL, apiKey: config.llm.aliyun.apiKey };
 
   const needsBodyTransform = sendsThinking || budgetTokens !== undefined;
   const provider = createOpenAICompatible({
@@ -443,7 +655,12 @@ export function resolveLanguageModelFor(frozen: FrozenModelSelection): LanguageM
         }
       : {}),
   });
-  const model = provider(option.modelId);
+  const rawModel = provider(option.modelId);
+  const model = option.channel === 'official' && channelReady('aliyun')
+    ? wrapLanguageModelWithBreaker(rawModel, () => resolveLanguageModelFor(
+        normalizeSelectionForOption(optionById(OFFICIAL_FALLBACK_OPTION_ID)!, { budget: 'low' }),
+      ))
+    : rawModel;
   modelCache.set(cacheKey, model);
   return model;
 }

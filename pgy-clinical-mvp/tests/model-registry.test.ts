@@ -6,6 +6,16 @@ import {
   getActiveModelProfile,
   getModelCatalog,
   resolveLanguageModel,
+  snapshotModelExecution,
+  getOfficialCircuitBreakerStatus,
+  recordOfficialChannelFailure,
+  resetOfficialCircuitBreaker,
+  tripOfficialCircuitBreaker,
+  isChannelCrashError,
+  wrapLanguageModelWithBreaker,
+  setOfficialHangTimeoutMsForTests,
+  ChannelHangTimeoutError,
+  OFFICIAL_FALLBACK_OPTION_ID,
   BUDGET_LEVELS,
   BUDGET_TOKENS,
 } from '../src/model/model-registry.js';
@@ -36,12 +46,12 @@ test('model catalog: id 唯一、分组为官方 + 阿里两通道、label 与 A
   const catalog = getModelCatalog();
   const ids = catalog.options.map((option) => option.id);
   assert.equal(new Set(ids).size, ids.length, 'id 必须唯一');
-  assert.deepEqual([...new Set(catalog.options.map((option) => option.channelLabel))], ['DeepSeek 官方', '火山方舟', '阿里云百炼']);
+  assert.deepEqual([...new Set(catalog.options.map((option) => option.channelLabel))], ['DeepSeek 官方', '阿里云百炼']);
   for (const option of catalog.options) {
     assert.equal(option.id, `${option.channel}:${option.modelId}`, `id 必须由 channel + modelId 组成：${option.id}`);
     assert.equal(option.label, option.modelId);
   }
-  assert.ok(catalog.options.length >= 20, `目录应包含全部候选模型，实际 ${catalog.options.length}`);
+  assert.equal(catalog.options.length, 9, `目录应严格只保留官方3+千问6共9个模型，实际 ${catalog.options.length}`);
 });
 
 test('model catalog: thinking 三态与开关可用性一致，且 always 不依赖默认开关值', () => {
@@ -52,10 +62,10 @@ test('model catalog: thinking 三态与开关可用性一致，且 always 不依
     assert.equal(typeof option.defaultThinking, 'boolean');
   }
   assert.equal(optionById('official:deepseek-chat')?.thinking, 'none');
-  assert.equal(optionById('ark:deepseek-v4-flash')?.thinking, 'toggle');
-  assert.equal(optionById('ark:deepseek-v4-pro')?.thinking, 'toggle');
-  assert.equal(optionById('aliyun:glm-5.3')?.thinking, 'always');
-  assert.equal(optionById('aliyun:MiniMax-M2.5')?.thinking, 'always');
+  assert.equal(optionById('official:deepseek-flash')?.thinking, 'always');
+  assert.equal(optionById('official:deepseek-v4-pro')?.thinking, 'always');
+  assert.equal(optionById('aliyun:qwen3.8-max')?.thinking, 'toggle');
+  assert.equal(optionById('aliyun:qwen3.8-flash')?.thinking, 'toggle');
   assert.equal(optionById('aliyun:qwen3.6-flash')?.thinking, 'toggle');
 });
 
@@ -93,16 +103,11 @@ test('model selection: 可开关模型保留用户选择，未指定时采用模
 });
 
 test('model selection: 仅思考模型（always）的开关值被规范化为 true', () => {
-  const ready = optionById('aliyun:glm-5.3')?.available;
-  if (!ready) {
-    assert.equal(applyModelSelection('official:deepseek-flash', false).ok, true);
-    assert.equal(getModelCatalog().active.thinking, true, 'always 模型不得被关掉');
-    return;
-  }
-  assert.equal(applyModelSelection('aliyun:glm-5.3', false).ok, true);
+  assert.equal(applyModelSelection('official:deepseek-flash', false).ok, true);
   const catalog = getModelCatalog();
   assert.equal(catalog.active.thinkingMode, 'always');
-  assert.equal(catalog.active.thinking, true, '请求关推理时不得假装关掉');
+  assert.equal(catalog.active.thinking, true, 'always 模型不得被关掉');
+  resetToBaseline();
 });
 
 test('model identity: modelProfile 使用真实 API model 名，描述区分推理状态', () => {
@@ -204,3 +209,227 @@ test('budget: 缓存键包含预算，改档位必须解析到新的模型实例
   assert.equal(resolveLanguageModel(), lowBudget, '同一档位应复用实例');
   resetToBaseline();
 });
+
+/* ---------- 熔断机制与快速兜底 ---------- */
+
+test('circuit breaker: 官方通道故障熔断后，快照自动快速降级为 qwen3.8-flash', () => {
+  resetToBaseline();
+  resetOfficialCircuitBreaker();
+  assert.equal(getOfficialCircuitBreakerStatus().state, 'CLOSED');
+
+  // 未熔断时，指定官方模型快照正常保持官方
+  const normalReceipt = snapshotModelExecution({ optionId: 'official:deepseek-chat' });
+  assert.equal(normalReceipt.clinical.optionId, 'official:deepseek-chat');
+  assert.equal(normalReceipt.clinicalFallbackReason, undefined);
+
+  // 模拟通道连续失败或主动熔断
+  tripOfficialCircuitBreaker();
+  assert.equal(getOfficialCircuitBreakerStatus().state, 'OPEN');
+
+  // 熔断后，快照自动切为兜底模型 aliyun:qwen3.8-flash
+  const fallbackReceipt = snapshotModelExecution({ optionId: 'official:deepseek-chat' });
+  assert.equal(fallbackReceipt.clinical.optionId, OFFICIAL_FALLBACK_OPTION_ID);
+  assert.equal(fallbackReceipt.clinicalFallbackReason, 'CIRCUIT_BREAKER_OPEN');
+  assert.equal(fallbackReceipt.requestedClinicalOptionId, 'official:deepseek-chat');
+
+  // 重置后恢复
+  resetOfficialCircuitBreaker();
+  assert.equal(getOfficialCircuitBreakerStatus().state, 'CLOSED');
+  const restoredReceipt = snapshotModelExecution({ optionId: 'official:deepseek-chat' });
+  assert.equal(restoredReceipt.clinical.optionId, 'official:deepseek-chat');
+  assert.equal(restoredReceipt.clinicalFallbackReason, undefined);
+  resetToBaseline();
+});
+
+test('circuit breaker: isChannelCrashError 能正确识别 5xx 与网络故障，排除用户主动取消', () => {
+  assert.equal(isChannelCrashError(new Error('fetch failed')), true);
+  assert.equal(isChannelCrashError({ statusCode: 503, message: 'Service Unavailable' }), true);
+  assert.equal(isChannelCrashError({ code: 'ETIMEDOUT', message: 'connection timeout' }), true);
+  assert.equal(isChannelCrashError({ code: 'ECONNRESET', message: 'socket hang up' }), true);
+
+  // 正常客户端中断不判定为通道崩溃
+  const abortErr = new Error('The operation was aborted');
+  abortErr.name = 'AbortError';
+  assert.equal(isChannelCrashError(abortErr), false);
+  assert.equal(isChannelCrashError(new Error('aborted by user')), false);
+  assert.equal(isChannelCrashError(new Error('Invalid JSON format in prompt')), false);
+});
+
+/* ---------- 官方通道「活挂」超时与运行时透明兜底 ---------- */
+
+/** 测试替身转模型类型（避免与 SDK 的 LanguageModel 复杂签名纠缠）。 */
+function toModel(obj: unknown): ReturnType<typeof wrapLanguageModelWithBreaker> {
+  return obj as never;
+}
+
+test('hang timeout: doGenerate 活挂（200 后永不出内容）时超时转故障、记录熔断并透明兜底', async () => {
+  resetOfficialCircuitBreaker();
+  setOfficialHangTimeoutMsForTests(30);
+
+  // 官方模型活挂：永不 settle（模拟 200 + keep-alive-only、无内容 token）
+  let hungSignal: AbortSignal | undefined;
+  const hungModel = {
+    doGenerate: (options: { abortSignal?: AbortSignal } = {}) => {
+      hungSignal = options.abortSignal;
+      return new Promise(() => {});
+    },
+  };
+  const fallbackResult = { from: 'fallback' };
+  let fallbackCalls = 0;
+  const fallbackModel = {
+    doGenerate: () => {
+      fallbackCalls += 1;
+      return Promise.resolve(fallbackResult);
+    },
+  };
+  const wrapped = wrapLanguageModelWithBreaker(toModel(hungModel), () => toModel(fallbackModel));
+  const call = () => (wrapped as unknown as { doGenerate: () => Promise<unknown> }).doGenerate();
+
+  const startedAt = Date.now();
+  const res = await call();
+  assert.equal(res, fallbackResult, '活挂必须在超时时限内由兜底模型返回结果');
+  assert.ok(Date.now() - startedAt < 5_000, '不能无限等待');
+  assert.equal(fallbackCalls, 1);
+  assert.ok(hungSignal?.aborted, '超时必须 abort 底层请求，避免连接永久悬挂');
+  assert.equal(getOfficialCircuitBreakerStatus().failures, 1, '活挂必须记为通道失败');
+
+  // 第二次活挂达到阈值，熔断 OPEN（此后快照期将直接快速降级为 qwen3.8-flash）
+  await call();
+  assert.equal(getOfficialCircuitBreakerStatus().state, 'OPEN');
+  assert.equal(isChannelCrashError(new ChannelHangTimeoutError(1000)), true, '超时错误必须判定为通道级故障');
+
+  setOfficialHangTimeoutMsForTests(30_000);
+  resetOfficialCircuitBreaker();
+});
+
+test('hang timeout: doStream 活挂同样超时转故障并兜底', async () => {
+  resetOfficialCircuitBreaker();
+  setOfficialHangTimeoutMsForTests(30);
+  const hungModel = { doStream: () => new Promise(() => {}) };
+  const fallbackResult = { stream: 'ok' };
+  const fallbackModel = { doStream: () => Promise.resolve(fallbackResult) };
+  const wrapped = wrapLanguageModelWithBreaker(toModel(hungModel), () => toModel(fallbackModel));
+
+  const res = await (wrapped as unknown as { doStream: () => Promise<unknown> }).doStream();
+  assert.equal(res, fallbackResult);
+  assert.equal(getOfficialCircuitBreakerStatus().failures, 1);
+
+  setOfficialHangTimeoutMsForTests(30_000);
+  resetOfficialCircuitBreaker();
+});
+
+test('hang timeout: 用户主动取消仍原样抛 AbortError，不记失败不兜底', async () => {
+  resetOfficialCircuitBreaker();
+  setOfficialHangTimeoutMsForTests(30);
+  const userController = new AbortController();
+  const pendingModel = {
+    doGenerate: (options: { abortSignal?: AbortSignal } = {}) =>
+      new Promise((_resolve, reject) => {
+        options.abortSignal?.addEventListener('abort', () => {
+          const err = new Error('This operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      }),
+  };
+  let fallbackCalls = 0;
+  const fallbackModel = {
+    doGenerate: () => {
+      fallbackCalls += 1;
+      return Promise.resolve({});
+    },
+  };
+  const wrapped = wrapLanguageModelWithBreaker(toModel(pendingModel), () => toModel(fallbackModel));
+
+  const pending = (wrapped as unknown as { doGenerate: (o: unknown) => Promise<unknown> }).doGenerate({
+    abortSignal: userController.signal,
+  });
+  userController.abort();
+  await assert.rejects(pending, (err: unknown) => (err as Error).name === 'AbortError');
+  assert.equal(fallbackCalls, 0, '用户取消不得触发兜底');
+  assert.equal(getOfficialCircuitBreakerStatus().failures, 0, '用户取消不得记为通道失败');
+
+  setOfficialHangTimeoutMsForTests(30_000);
+  resetOfficialCircuitBreaker();
+});
+
+test('hang timeout: 正常完成的调用不受超时影响并记录成功', async () => {
+  resetOfficialCircuitBreaker();
+  setOfficialHangTimeoutMsForTests(50);
+  const okResult = { ok: true };
+  const okModel = { doGenerate: () => Promise.resolve(okResult) };
+  const wrapped = wrapLanguageModelWithBreaker(toModel(okModel), () => {
+    throw new Error('不应触发兜底');
+  });
+
+  const res = await (wrapped as unknown as { doGenerate: () => Promise<unknown> }).doGenerate();
+  assert.equal(res, okResult);
+  assert.equal(getOfficialCircuitBreakerStatus().state, 'CLOSED');
+  assert.equal(getOfficialCircuitBreakerStatus().failures, 0);
+
+  setOfficialHangTimeoutMsForTests(30_000);
+  resetOfficialCircuitBreaker();
+});
+
+test('hang timeout: 兜底通道同样活挂时，调用在超时窗口内抛错而非挂满上层总超时', async () => {
+  resetOfficialCircuitBreaker();
+  setOfficialHangTimeoutMsForTests(30);
+
+  let hungFallbackSignal: AbortSignal | undefined;
+  const hungModel = { doGenerate: () => new Promise(() => {}) };
+  const hungFallback = {
+    doGenerate: (options: { abortSignal?: AbortSignal } = {}) => {
+      hungFallbackSignal = options.abortSignal;
+      return new Promise(() => {});
+    },
+  };
+  const wrapped = wrapLanguageModelWithBreaker(toModel(hungModel), () => toModel(hungFallback));
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    (wrapped as unknown as { doGenerate: () => Promise<unknown> }).doGenerate(),
+    (err: unknown) => (err as Error).name === 'ChannelHangTimeoutError',
+    '双通道同挂时必须抛出通道故障错误，不得无限悬挂',
+  );
+  assert.ok(Date.now() - startedAt < 5_000, '不得拖满上层 180s/360s 总超时');
+  assert.ok(hungFallbackSignal?.aborted, '兜底超时必须 abort 底层请求，避免连接悬挂');
+  assert.equal(getOfficialCircuitBreakerStatus().failures, 1, '官方活挂仍记为通道失败');
+
+  setOfficialHangTimeoutMsForTests(30_000);
+  resetOfficialCircuitBreaker();
+});
+
+test('circuit breaker: OPEN 期间 doGenerate 直接快速兜底，不再等待官方通道', async () => {
+  resetOfficialCircuitBreaker();
+  // 超时给足 10s：若误等官方（活挂替身永不返回），耗时断言会失败
+  setOfficialHangTimeoutMsForTests(10_000);
+  tripOfficialCircuitBreaker();
+
+  let officialCalls = 0;
+  const deadOfficial = {
+    doGenerate: () => {
+      officialCalls += 1;
+      return new Promise(() => {});
+    },
+  };
+  const fallbackResult = { fast: true };
+  let fallbackCalls = 0;
+  const fallbackModel = {
+    doGenerate: () => {
+      fallbackCalls += 1;
+      return Promise.resolve(fallbackResult);
+    },
+  };
+  const wrapped = wrapLanguageModelWithBreaker(toModel(deadOfficial), () => toModel(fallbackModel));
+
+  const startedAt = Date.now();
+  const res = await (wrapped as unknown as { doGenerate: () => Promise<unknown> }).doGenerate();
+  assert.equal(res, fallbackResult);
+  assert.ok(Date.now() - startedAt < 1_000, 'OPEN 期间必须立即兜底，不得等待超时');
+  assert.equal(officialCalls, 0, 'OPEN 期间不得再调用官方通道');
+  assert.equal(fallbackCalls, 1);
+
+  setOfficialHangTimeoutMsForTests(30_000);
+  resetOfficialCircuitBreaker();
+});
+

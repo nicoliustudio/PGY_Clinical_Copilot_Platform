@@ -1,62 +1,128 @@
 import 'dotenv/config';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText } from 'ai';
+import { getModelCatalog, resolveLanguageModelFor, normalizeSelectionForOption } from '../src/model/model-registry.js';
 
-/**
- * 模型速度对比（3 个）：
- * 1. DeepSeek 官方 deepseek-flash
- * 2. 阿里 token-plan qwen3.8-flash
- * 3. 阿里 token-plan deepseek-v4.1-flash（当前 .env 生效）
- */
-
-const PROMPT = `你是中医临床助手。请对以下病例输出 JSON：{"disease":"","syndrome":"","treatment":""}。
+const PROMPT = `你是中医临床助手。请对以下病例输出简要 JSON：{"disease":"...","syndrome":"...","treatment":"..."}。
 患者女，30岁。经行腹痛拒按，经血色暗有块，块下痛减，舌质紫暗有瘀点，脉弦涩。`;
 
-const RUNS = 3;
+interface BenchResult {
+  id: string;
+  name: string;
+  channel: string;
+  thinkingMode: string;
+  testThinking: boolean;
+  status: 'SUCCESS' | 'FAILED';
+  latencyMs?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  error?: string;
+  sample?: string;
+}
 
-const TOKEN_PLAN = {
-  baseURL: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-  apiKey: process.env.LLM_API_KEY ?? '',
-};
+async function runBenchmark() {
+  const catalog = getModelCatalog();
+  const results: BenchResult[] = [];
 
-const MODELS = [
-  { name: 'deepseek官方-deepseek-flash', baseURL: 'https://api.deepseek.com/v1', apiKey: 'sk-REDACTED-FOR-REVIEW-PACKAGE-NOT-A-KEY', model: 'deepseek-flash' },
-  { name: '阿里tokenplan-qwen3.8-flash', baseURL: TOKEN_PLAN.baseURL, apiKey: TOKEN_PLAN.apiKey, model: 'qwen3.8-flash' },
-  { name: '阿里tokenplan-deepseek-v4.1-flash', baseURL: TOKEN_PLAN.baseURL, apiKey: TOKEN_PLAN.apiKey, model: 'deepseek-v4.1-flash' },
-];
+  console.log('================ 开始测试系统注册模型 ================');
+  console.log(`候选模型总数: ${catalog.options.length}\n`);
 
-async function bench(cfg: { name: string; baseURL: string; apiKey: string; model: string }) {
-  const provider = createOpenAICompatible({ name: cfg.name, baseURL: cfg.baseURL, apiKey: cfg.apiKey });
-  const model = provider(cfg.model);
-  const lats: number[] = [];
-  let outTok = 0;
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = Date.now();
-    try {
-      const r = await generateText({ model, prompt: PROMPT, maxOutputTokens: 128, temperature: 0 });
-      lats.push(Date.now() - t0);
-      outTok = r.usage?.outputTokens ?? 0;
-      console.log(`  ${cfg.name} run${i + 1}: ${lats[i]}ms (out=${outTok})`);
-    } catch (e) {
-      console.log(`  ${cfg.name} run${i + 1}: ERROR ${(e as Error).message.slice(0, 80)}`);
+  for (const opt of catalog.options) {
+    if (!opt.available) {
+      console.log(`[跳过] ${opt.id} - 通道未配置凭据`);
+      continue;
+    }
+
+    // 测试模式：如果模型支持 toggle，测试关推理（以评估基线最快速度）和默认模式
+    const testCases: { thinking: boolean; tag: string }[] = [];
+    if (opt.thinking === 'toggle') {
+      testCases.push({ thinking: false, tag: '关思考' });
+      testCases.push({ thinking: true, tag: '开思考' });
+    } else if (opt.thinking === 'always') {
+      testCases.push({ thinking: true, tag: '总是思考' });
+    } else {
+      testCases.push({ thinking: false, tag: '非推理' });
+    }
+
+    for (const tc of testCases) {
+      const selection = normalizeSelectionForOption(opt, { thinking: tc.thinking, budget: 'off' });
+      const model = resolveLanguageModelFor(selection);
+      const label = `${opt.id} [${tc.tag}]`;
+
+      process.stdout.write(`测试中: ${label.padEnd(45)} ... `);
+      const t0 = Date.now();
+      try {
+        // 设置超时限制，避免挂起
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('请求超时 (>15s)')), 15000)
+        );
+        const reqPromise = generateText({
+          model,
+          prompt: PROMPT,
+          maxOutputTokens: 120,
+          temperature: 0.1,
+        });
+
+        const res = await Promise.race([reqPromise, timeoutPromise]) as Awaited<typeof reqPromise>;
+        const latency = Date.now() - t0;
+        const outTok = res.usage?.outputTokens ?? 0;
+        // @ts-ignore
+        const reasoningTok = res.usage?.reasoningTokens ?? 0;
+
+        console.log(`成功 | ${latency}ms | out=${outTok} | reasoning=${reasoningTok}`);
+        results.push({
+          id: opt.id,
+          name: opt.label,
+          channel: opt.channelLabel,
+          thinkingMode: opt.thinking,
+          testThinking: tc.thinking,
+          status: 'SUCCESS',
+          latencyMs: latency,
+          outputTokens: outTok,
+          reasoningTokens: reasoningTok,
+          sample: res.text.replace(/\n/g, ' ').slice(0, 60),
+        });
+      } catch (err: any) {
+        const latency = Date.now() - t0;
+        const errMsg = err?.message || String(err);
+        console.log(`失败 (${latency}ms) | ${errMsg.slice(0, 80)}`);
+        results.push({
+          id: opt.id,
+          name: opt.label,
+          channel: opt.channelLabel,
+          thinkingMode: opt.thinking,
+          testThinking: tc.thinking,
+          status: 'FAILED',
+          latencyMs: latency,
+          error: errMsg,
+        });
+      }
     }
   }
-  if (lats.length === 0) return { name: cfg.name, avg: Infinity, min: Infinity, max: Infinity };
-  return { name: cfg.name, avg: lats.reduce((a, b) => a + b, 0) / lats.length, min: Math.min(...lats), max: Math.max(...lats) };
+
+  console.log('\n================ 测试汇总报告 ================');
+  console.log('| 通道 | 模型 | 思考模式 | 状态 | 耗时(ms) | 输出Tokens | 思考Tokens | 详情/错误 |');
+  console.log('| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |');
+
+  for (const r of results) {
+    const thinkingTag = r.testThinking ? '开启' : '关闭';
+    const statusTag = r.status === 'SUCCESS' ? '可用' : '不可用/崩溃';
+    const latStr = r.latencyMs !== undefined ? `${r.latencyMs}` : '-';
+    const outStr = r.outputTokens !== undefined ? `${r.outputTokens}` : '-';
+    const rznStr = r.reasoningTokens !== undefined ? `${r.reasoningTokens}` : '-';
+    const note = r.status === 'SUCCESS' ? (r.sample ?? '') : (r.error?.slice(0, 40) ?? '');
+    console.log(`| ${r.channel} | ${r.name} | ${thinkingTag} | ${statusTag} | ${latStr} | ${outStr} | ${rznStr} | ${note} |`);
+  }
+
+  const successList = results.filter(r => r.status === 'SUCCESS' && r.latencyMs !== undefined);
+  if (successList.length > 0) {
+    successList.sort((a, b) => (a.latencyMs ?? 0) - (b.latencyMs ?? 0));
+    console.log('\n================ 速度排行榜 (Top 5 可用模型) ================');
+    successList.slice(0, 5).forEach((r, idx) => {
+      console.log(`${idx + 1}. [${r.channel}] ${r.name} (${r.testThinking ? '开思考' : '关思考'}) -> 耗时: ${r.latencyMs}ms`);
+    });
+  }
 }
 
-console.log('开始测速...\n');
-const results = [];
-for (const m of MODELS) {
-  results.push(await bench(m));
-}
-
-console.log('\n================ 结果 ================');
-for (const r of results) {
-  console.log(`${r.name}: avg=${r.avg === Infinity ? 'ERR' : r.avg.toFixed(0) + 'ms'} min=${r.min === Infinity ? '-' : r.min + 'ms'} max=${r.max === Infinity ? '-' : r.max + 'ms'}`);
-}
-const ok = results.filter((r) => r.avg !== Infinity);
-if (ok.length) {
-  const faster = ok.sort((a, b) => a.avg - b.avg)[0];
-  console.log(`\n最快: ${faster.name} (${faster.avg.toFixed(0)}ms)`);
-}
+runBenchmark().catch(err => {
+  console.error('基准测试运行异常:', err);
+});

@@ -284,6 +284,7 @@ async function handleRunStream(req: IncomingMessage, res: ServerResponse): Promi
     modelOptionId: modelExecution.clinical.optionId,
     controlModelOptionId: modelExecution.control.optionId,
     controlFallbackReason: modelExecution.controlFallbackReason,
+    clinicalFallbackReason: modelExecution.clinicalFallbackReason,
     asrEnabled: isAsrEnabled(),
   });
 
